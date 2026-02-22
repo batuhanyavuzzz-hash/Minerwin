@@ -1,4 +1,10 @@
-# app.py
+# app.py — Tek Hisse + Portföy Analiz (V4.4)
+# Değişiklikler:
+# 1) Minervini #5 (Fiyat >= 52W dip * 1.25) eklendi + hard filter
+# 2) Portföy teknik yorumları "eldeki pozisyon" diliyle: TUT / AZALT / KAR AL / STOPTA ÇIK
+# 3) Tek hisse skor/metrik alanında "Güncel Fiyat" görünür eklendi
+# 4) Grafiğe "Fiyat (Line)" eklendi (mumlardan ve EMA’lardan bağımsız; legend ile diğerleri kapanınca line kalır)
+
 import io
 import os
 import csv
@@ -21,8 +27,8 @@ from reportlab.lib.units import cm
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V4.3)", layout="wide")
-st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.3 | Portföy Analiz + Minervini 52W Filter)")
+st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V4.4)", layout="wide")
+st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.4 | Portföy Analiz + Minervini 52W)")
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
 if not API_KEY:
@@ -156,21 +162,17 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
 # =========================================================
 # MINERVINI FILTER (52W LOW +25%)
 # =========================================================
-@st.cache_data(ttl=6 * 3600)  # 6 hours; 52W low doesn't need minute-level refresh
+@st.cache_data(ttl=6 * 3600)  # 6 hours
 def td_52w_low(symbol: str) -> Tuple[float, int]:
     """
-    Returns:
-      low_52w: float (min low of last 252 daily bars)
-      bars_used: int
-    Notes:
-      Uses TwelveData 1day series. Outputsize 320 to safely cover 252 trading days.
+    52 haftalık dip için son 252 günlük barın en düşük 'low' değeri.
+    TwelveData 1day series ile hesaplar.
     """
-    payload = td_time_series(symbol, "1day", 320)
+    payload = td_time_series(symbol, "1day", 320)  # 252'yi güvenli kapatmak için
     df = parse_ohlcv(payload)
     if df.empty:
         return (float("nan"), 0)
 
-    # last 252 daily bars (approx 52 trading weeks)
     tail = df.tail(252)
     if tail.empty:
         return (float("nan"), 0)
@@ -180,9 +182,9 @@ def td_52w_low(symbol: str) -> Tuple[float, int]:
 
 
 def minervini_rule_ok(price: float, low_52w: float) -> bool:
-    # Minervini Rule #5: current price at least 25% above 52-week low
+    # Minervini #5: current price at least 25% above 52-week low
     if not (np.isfinite(price) and np.isfinite(low_52w)) or low_52w <= 0:
-        return True  # cannot evaluate -> do not block
+        return True  # ölçemiyorsak bloklama
     return price >= 1.25 * low_52w
 
 
@@ -334,7 +336,6 @@ def _status_tag(
     consolidation: bool,
     minervini_fail: bool,
 ) -> str:
-    # Guards first
     if minervini_fail:
         return "🔴 52W DİBE YAKIN"
     if trend_broken or setup_score < 45:
@@ -362,7 +363,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
     dist_ema50_pct = ((close - ema50) / ema50) * 100 if ema50 else float("nan")
     dist_ema150_pct = ((close - ema150) / ema150) * 100 if ema150 else float("nan")
 
-    # Minervini #5: price >= 1.25 * 52w low
+    # Minervini #5
     above_25 = minervini_rule_ok(close, low_52w)
     dist_from_52w_low_pct = ((close - low_52w) / low_52w * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
     minervini_fail = (np.isfinite(low_52w) and low_52w > 0 and not above_25)
@@ -396,8 +397,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
     e_pts = 15 if not extended else 0
     total += e_pts
 
-    # Minervini filter points: reward pass, penalize fail
-    # (keeps total within 0-100 by applying a clamp rather than changing max distribution)
+    # Minervini points (soft reward)
     min_pts = 10 if above_25 else 0
     total = min(100, total + min_pts)
 
@@ -408,7 +408,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
     entry_high = float(max(ema20, ema50))
     entry_mid = (entry_low + entry_high) / 2.0
 
-    # Stop: EMA50 vs ATR (tightest)
+    # Stop: EMA50 vs ATR
     stop_ema = ema50 * 0.995
     stop_atr = entry_mid - 1.2 * atr14
     stop = float(max(stop_ema, stop_atr))
@@ -420,7 +420,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
     tp1 = float(entry_mid + 2.0 * risk) if risk > 0 else float(entry_mid * 1.02)
     rr = (tp1 - entry_mid) / risk if risk > 0 else float("nan")
 
-    # V4 split scores
+    # Split scores
     setup_raw = trend_pts + p_pts + m_pts + v_pts + (10 if above_25 else 0)  # max 95
     setup_score = int(round(100 * setup_raw / 95)) if setup_raw > 0 else 0
 
@@ -429,9 +429,8 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
     ext_pts = _extension_points(extended)              # 0..40
     timing_score = int(ext_pts + prox_pts)             # 0..100
 
-    # Hardening filter: if Minervini rule fails, degrade labels/scores decisively
+    # Hard filter: Minervini fail -> degrade
     if minervini_fail:
-        # Purpose: eliminate "dip-from-bottom weak names" from being suggested as valid setups.
         total = min(int(total), 55)
         setup_score = min(int(setup_score), 40)
         label = "UYGUN DEĞİL"
@@ -468,9 +467,8 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
 
     if status_tag.startswith("🔴 52W"):
         scenario = (
-            "Senaryo: Minervini filtresi (52W dip +%25) geçilemedi. Bu tip hisseler genelde "
-            "dipten yeni çıkan ve kırılgan olur. Önce 52W dibe göre net güçlenme (dipten +%25 üstü) "
-            "ve trend metriklerinin toparlanması beklenmeli."
+            "Senaryo: Minervini filtresi (52W dip +%25) geçilemedi. Bu tip hisseler genelde dipten yeni çıkan ve kırılgan olur. "
+            "Önce 52W dibe göre net güçlenme (dipten +%25 üstü) ve trend metriklerinin toparlanması beklenmeli."
         )
     elif status_tag.startswith("🟢"):
         scenario = (
@@ -633,7 +631,7 @@ def build_pdf_bytes(
             c.showPage()
             y = h - 2.0 * cm
 
-    draw_line("Tek Hisse Teknik Analiz Raporu (V4.3)", font="Helvetica-Bold", size=16, space=18)
+    draw_line("Tek Hisse Teknik Analiz Raporu (V4.4)", font="Helvetica-Bold", size=16, space=18)
     draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
     draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
     draw_line("", size=10, space=10)
@@ -645,7 +643,10 @@ def build_pdf_bytes(
 
     low52_txt = f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"
     draw_line(f"Minervini #5 (52W Dip +%25): {'GEÇTİ ✅' if plan.above_52w_low_25pct else 'KALDI ❌'}", size=11)
-    draw_line(f"52W Dip: {low52_txt}  | Dipten Uzaklık: {plan.dist_from_52w_low_pct:.2f}%" if np.isfinite(plan.dist_from_52w_low_pct) else f"52W Dip: {low52_txt}", size=11)
+    if np.isfinite(plan.dist_from_52w_low_pct):
+        draw_line(f"52W Dip: {low52_txt}  | Dipten Uzaklık: {plan.dist_from_52w_low_pct:.2f}%", size=11)
+    else:
+        draw_line(f"52W Dip: {low52_txt}", size=11)
 
     draw_line(f"Giriş: {plan.entry_low:.2f} – {plan.entry_high:.2f}", size=11)
     draw_line(f"Giriş Mesafesi: {plan.dist_to_entry_pct:+.2f}%    Takip: {plan.watch_level:.2f}", size=11)
@@ -683,6 +684,17 @@ def build_pdf_bytes(
 def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: float):
     fig = go.Figure()
 
+    # ✅ Fiyat (Line) — legend'da diğerleri kapatılsa bile bu trace kalabilir
+    fig.add_trace(
+        go.Scatter(
+            x=df["time"],
+            y=df["close"],
+            name="Fiyat (Line)",
+            mode="lines",
+            line=dict(width=2),
+        )
+    )
+
     fig.add_trace(
         go.Candlestick(
             x=df["time"],
@@ -690,7 +702,7 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
             high=df["high"],
             low=df["low"],
             close=df["close"],
-            name="OHLC",
+            name="OHLC (Mum)",
         )
     )
 
@@ -713,7 +725,7 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
     fig.add_hline(y=float(last_price_line), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
 
     fig.update_layout(
-        title=f"{symbol} — Candlestick + EMA'lar + Trade Levels",
+        title=f"{symbol} — Fiyat(Line) + Candlestick + EMA'lar + Trade Levels",
         xaxis_title="Tarih",
         yaxis_title="Fiyat",
         height=680,
@@ -759,47 +771,38 @@ def holding_action_comment(
     user_tp1: float,
 ) -> Tuple[str, str]:
     """
-    Portfolio için: "alım yapıyormuşuz gibi" konuşma yok.
-    Çıktı:
-      action: kısa etiket (TUT / SAT / KAR AL / STOPTA ÇIK / DİKKAT)
-      note: 1 cümlelik gerekçe
+    Portföy yorum dili: "eldeki pozisyon" aksiyonu.
+    Çıktı: (Aksiyon etiketi, kısa gerekçe)
     """
     if not np.isfinite(price):
         return ("DİKKAT", "Fiyat alınamadı → veri hatası olabilir.")
 
-    # If stop exists and broken -> exit discipline
     if np.isfinite(user_stop) and user_stop > 0 and price < user_stop:
         return ("STOPTA ÇIK", "Fiyat stop altına sarktı → disipline göre pozisyon kapat.")
 
-    # Minervini fail = weakness near 52W low
     if np.isfinite(plan.low_52w) and (not plan.above_52w_low_25pct):
-        # For holdings: do NOT add; consider reducing risk if also trend weak
         if plan.status_tag.startswith("🔴"):
             return ("SAT / AZALT", "52W dip gücü zayıf + trend filtresi bozuk → riski azaltmayı düşün.")
         return ("TUT (EKLEME YOK)", "52W dip filtresi zayıf → ekleme yapma; trend bozulursa azalt.")
 
-    # Trend broken logic
     if plan.status_tag.startswith("🔴"):
         return ("SAT / AZALT", "Trend filtresi bozuk → ekleme yok; riski azaltmayı değerlendir.")
 
-    # Take-profit logic (if user_tp1 defined)
     if np.isfinite(user_tp1) and user_tp1 > 0 and price >= user_tp1:
         return ("KAR AL", "TP1 seviyesine ulaşıldı → planın varsa kısmi kar al.")
 
-    # Distance to stop
     if np.isfinite(user_stop) and user_stop > 0:
         dist_stop = (price - user_stop) / price
         if dist_stop < 0.02:
             return ("DİKKAT", "Stop çok yakın → oynaklık stoplatabilir; pozisyon boyunu gözden geçir.")
 
-    # Extended / pullback / consolidation for holdings
     if plan.status_tag.startswith("⚫"):
         return ("TUT (EKLEME YOK)", "Uzamış → kovalamak yok; pullback sonrası yeniden güç ararsın.")
     if plan.status_tag.startswith("🔵"):
         return ("TUT / İZLE", "Konsolidasyon → yön kırılımı gelene kadar sabır.")
     if plan.status_tag.startswith("🟡"):
         return ("TUT / İZLE", "Pullback fazı → stopu koru; güçlenme yoksa ekleme yapma.")
-    # 🟢
+
     return ("TUT", "Şartlar iyi görünüyor → plana sadık kal (ekleme kararı ayrı).")
 
 
@@ -895,7 +898,7 @@ with tab_single:
                 df["rsi14"] = rsi(df["close"], 14)
                 df["atr14"] = atr(df, 14)
 
-                # 52W low: if daily bars present, compute locally; else fetch cached daily
+                # 52W low: daily ise df içinden, değilse cached daily çek
                 low52 = float("nan")
                 if interval == "1day" and len(df) >= 252:
                     low52 = float(df.tail(252)["low"].min())
@@ -963,9 +966,14 @@ with tab_single:
                 # UI outputs
                 st.divider()
                 st.subheader("📊 Strateji Özeti")
-                st.metric("Toplam Skor", f"{plan.total_score} / 100")
-                st.metric("Setup Kalitesi", f"{plan.setup_score} / 100")
-                st.metric("Zamanlama", f"{plan.timing_score} / 100")
+
+                # ✅ İSTEK #1: Güncel fiyat skorların yanında görünür
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Güncel Fiyat", f"{float(last_price_line):.2f}")
+                c2.metric("Toplam Skor", f"{plan.total_score} / 100")
+                c3.metric("Setup Kalitesi", f"{plan.setup_score} / 100")
+                c4.metric("Zamanlama", f"{plan.timing_score} / 100")
+
                 st.metric("Durum", plan.status_tag)
 
                 st.subheader("📌 İşlem Planı")
@@ -1023,7 +1031,7 @@ with tab_single:
                             "",
                             "",
                             "",
-                            "Fail ise hard filter uygular (zayıf dipten çıkışları eler).",
+                            "Fail ise hard filter uygular (dipten yeni çıkan zayıfları eler).",
                         ],
                     }
                 )
@@ -1264,7 +1272,6 @@ with tab_portfolio:
                 st.markdown("### Sonuç Tablosu")
                 st.dataframe(out, use_container_width=True, hide_index=True)
 
-                # Quick summary buckets
                 st.markdown("### Hızlı Özet")
                 if not out.empty:
                     a = out[out["Durum"].astype(str).str.startswith("🟢")]
@@ -1278,7 +1285,6 @@ with tab_portfolio:
                     colz.metric("⚫ Uzamış", len(c))
                     colw.metric("🔴 Kırmızı", len(d))
 
-                # Download results
                 csv_bytes = out.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Portföy Analiz CSV indir",
