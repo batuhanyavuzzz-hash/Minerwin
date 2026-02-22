@@ -8,20 +8,37 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from dotenv import load_dotenv
+
+# Optional local .env support (Cloud'da gerekmez)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 
 # =========================================================
-# ENV + APP CONFIG
+# APP CONFIG
 # =========================================================
-load_dotenv()
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-
 st.set_page_config(page_title="Tek Hisse Teknik Analiz (Finnhub)", layout="wide")
 st.title("Tek Hisse Teknik Analiz — Finnhub (V1)")
 
+# API key loading priority:
+# 1) Streamlit Cloud secrets
+# 2) Environment variable / .env
+FINNHUB_API_KEY = None
+if hasattr(st, "secrets") and "FINNHUB_API_KEY" in st.secrets:
+    FINNHUB_API_KEY = st.secrets["FINNHUB_API_KEY"]
+else:
+    FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+
 if not FINNHUB_API_KEY:
-    st.error("FINNHUB_API_KEY bulunamadı. app.py ile aynı klasöre .env koyup FINNHUB_API_KEY=... yazın.")
+    st.error(
+        "FINNHUB_API_KEY bulunamadı.\n\n"
+        "Streamlit Cloud: Settings → Secrets içine şunu ekle:\n"
+        'FINNHUB_API_KEY = "YOUR_KEY"\n\n'
+        "Lokal: `.env` içine `FINNHUB_API_KEY=YOUR_KEY` yaz."
+    )
     st.stop()
 
 
@@ -44,7 +61,6 @@ class FinnhubClient:
         return self._get("/quote", {"symbol": symbol})
 
     def candles(self, symbol: str, resolution: str, _from: int, _to: int) -> dict:
-        # resolution: "D" (daily), "60" (1h) etc.
         return self._get(
             "/stock/candle",
             {"symbol": symbol, "resolution": resolution, "from": _from, "to": _to},
@@ -99,7 +115,7 @@ def slope(series: pd.Series, lookback: int = 20) -> float:
 
 
 # =========================================================
-# EVALUATION (YOUR V1 THRESHOLDS)
+# EVALUATION (V1 THRESHOLDS)
 # =========================================================
 @dataclass
 class StrategyFitResult:
@@ -120,7 +136,7 @@ def evaluate(df: pd.DataFrame) -> StrategyFitResult:
     atr14 = float(last["atr14"])
     atr_pct = (atr14 / close) * 100 if close else float("nan")
 
-    # --- Trend checks
+    # Trend
     trend_stack = (ema50 > ema150 > ema200)
     dist_ema150_pct = ((close - ema150) / ema150) * 100 if ema150 else float("nan")
     price_above_ema150 = close > ema150
@@ -129,16 +145,16 @@ def evaluate(df: pd.DataFrame) -> StrategyFitResult:
     ema200_slope = slope(df["ema200"], lookback=20)
     long_trend_ok = (ema200_slope > 0)
 
-    # --- Momentum
+    # Momentum
     momentum_ok = (rsi14 >= 55)
     momentum_borderline = (50 <= rsi14 < 55)
 
-    # --- Volatility
+    # Volatility
     vol_ok = (2.0 <= atr_pct <= 6.0)
     vol_borderline = (1.5 <= atr_pct < 2.0) or (6.0 < atr_pct <= 9.0)
     vol_fail = (atr_pct > 9.0)
 
-    # --- Hard fail
+    # Hard fail
     price_below_ema200 = close < ema200
 
     # Core fit score (5 items)
@@ -158,11 +174,11 @@ def evaluate(df: pd.DataFrame) -> StrategyFitResult:
     else:
         fit_label = "UYGUN DEĞİL"
 
-    # --- Entry / Buy zone (V1)
+    # Entry / Buy zone (V1)
     dist_ema50_pct = ((close - ema50) / ema50) * 100 if ema50 else float("nan")
     extended = (dist_ema50_pct > 8.0)
 
-    # Simple breakout heuristic: close at ~20d high + volume >= 1.5x vol_sma20
+    # Simple breakout heuristic: ~20d high + vol >= 1.5x vol_sma20
     lookback = 20
     breakout = False
     if len(df) >= lookback + 5:
@@ -236,9 +252,34 @@ def evaluate(df: pd.DataFrame) -> StrategyFitResult:
 
 
 # =========================================================
+# SAFE TIME RANGE BUILDER (FIXES 403 from>to)
+# =========================================================
+def build_time_range(resolution: str, bars: int) -> tuple[int, int]:
+    """
+    Finnhub candle endpoint requires from <= to (unix seconds).
+    This function guarantees correct ordering.
+    """
+    now = int(time.time())
+    _to = now
+
+    if resolution == "D":
+        # safer buffer: 2 days per bar
+        _from = now - int(bars * 2 * 24 * 3600)
+    else:
+        # safer buffer: 3 hours per bar
+        _from = now - int(bars * 3 * 3600)
+
+    # hard safety
+    if _from >= _to:
+        _from = _to - 60  # 1 minute back
+
+    return _from, _to
+
+
+# =========================================================
 # PLOTTING
 # =========================================================
-def plot_chart(df: pd.DataFrame, symbol: str, last_price: float | None):
+def plot_chart(df: pd.DataFrame, symbol: str, last_price):
     fig = go.Figure()
 
     fig.add_trace(
@@ -256,11 +297,11 @@ def plot_chart(df: pd.DataFrame, symbol: str, last_price: float | None):
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema200"], name="EMA200", mode="lines"))
 
     if last_price is not None and np.isfinite(last_price):
-        fig.add_hline(y=last_price, line_dash="dot")
+        fig.add_hline(y=float(last_price), line_dash="dot")
         fig.add_annotation(
             x=df["time"].iloc[-1],
-            y=last_price,
-            text=f"Last ~ {last_price:.2f}",
+            y=float(last_price),
+            text=f"Last ~ {float(last_price):.2f}",
             showarrow=True,
             arrowhead=2,
         )
@@ -313,24 +354,14 @@ left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
 with left:
     st.subheader("Hisse")
-    symbol_in = st.text_input(
-        "Ticker",
-        value=st.session_state["symbol"],
-        placeholder="Örn: NVDA",
-        help="Büyük harf önerilir.",
-    )
+    symbol_in = st.text_input("Ticker", value=st.session_state["symbol"], placeholder="Örn: NVDA")
     run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
 
     if run:
         symbol = symbol_in.strip().upper()
         st.session_state["symbol"] = symbol
 
-        now = int(time.time())
-        _to = now
-        if resolution == "D":
-            _from = now - int(bars * 1.6 * 24 * 3600)
-        else:
-            _from = now - int(bars * 2.2 * 3600)
+        _from, _to = build_time_range(resolution, bars)
 
         with st.spinner("Finnhub'tan veri çekiliyor..."):
             try:
@@ -338,9 +369,25 @@ with left:
                 candles = client.candles(symbol, resolution, _from, _to)
             except requests.HTTPError as e:
                 st.error(f"HTTP hata: {e}")
+
+                # yardımcı teşhis: from/to göster
+                st.info(f"İstek aralığı (unix): from={_from}, to={_to}. (from <= to olmalı)")
+
+                # 403 özel mesaj
+                if "403" in str(e):
+                    st.warning(
+                        "403 genelde şu nedenlerden olur:\n"
+                        "- Candle endpoint erişim kısıtı (plan/market)\n"
+                        "- Yanlış sembol/market\n"
+                        "- Zaman aralığı problemi\n\n"
+                        "Bu sürümde zaman aralığı emniyete alındı. Eğer 403 devam ederse, "
+                        "büyük ihtimalle Finnhub planınız NVDA için candle verisini kısıtlıyor olabilir."
+                    )
+
                 st.session_state["df"] = None
                 st.session_state["result"] = None
                 st.session_state["quote"] = None
+
             except Exception as e:
                 st.error(f"Beklenmeyen hata: {e}")
                 st.session_state["df"] = None
@@ -350,7 +397,8 @@ with left:
                 st.session_state["quote"] = quote
 
                 if candles.get("s") != "ok":
-                    st.error("Candle verisi alınamadı. (Ticker/borsa/plan kaynaklı olabilir.)")
+                    st.error("Candle verisi alınamadı. (Ticker/market/plan kaynaklı olabilir.)")
+                    st.info(f"Yanıt: {candles}")
                     st.session_state["df"] = None
                     st.session_state["result"] = None
                 else:
@@ -365,7 +413,6 @@ with left:
                         }
                     ).sort_values("time")
 
-                    # indicators
                     df["ema50"] = ema(df["close"], 50)
                     df["ema150"] = ema(df["close"], 150)
                     df["ema200"] = ema(df["close"], 200)
@@ -411,7 +458,7 @@ with right:
     st.subheader("Grafik & Yorum")
 
     if st.session_state["df"] is None:
-        st.write("Soldan bir ticker girip **Getir & Analiz Et** ile başlayın.")
+        st.write("Soldan ticker girip **Getir & Analiz Et** ile başlayın.")
     else:
         df = st.session_state["df"]
         symbol = st.session_state["symbol"]
