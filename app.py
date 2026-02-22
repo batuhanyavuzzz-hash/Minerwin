@@ -18,8 +18,8 @@ from reportlab.lib.units import cm
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Tek Hisse Teknik Analiz (V4.1)", layout="wide")
-st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.1 | Hafıza + CSV)")
+st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V4.2)", layout="wide")
+st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.2 | Portföy Analiz + Hafıza)")
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
 if not API_KEY:
@@ -28,6 +28,7 @@ if not API_KEY:
 
 BASE_URL = "https://api.twelvedata.com"
 HISTORY_FILE = "history.csv"
+PORTFOLIO_FILE = "portfolio.csv"
 
 INTERVAL_MAP = {
     "Günlük (1day)": "1day",
@@ -38,6 +39,12 @@ INTERVAL_MAP = {
 # Session memory init
 if "daily_tests" not in st.session_state:
     st.session_state.daily_tests = []
+
+if "portfolio" not in st.session_state:
+    # default empty portfolio template
+    st.session_state.portfolio = pd.DataFrame(
+        columns=["ticker", "qty", "avg_cost", "stop", "tp1"]
+    )
 
 
 # =========================================================
@@ -86,7 +93,7 @@ def slope(series: pd.Series, lookback: int = 20) -> float:
 # =========================================================
 # DATA (Twelve Data)
 # =========================================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120)
 def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
     r = requests.get(
         f"{BASE_URL}/time_series",
@@ -103,7 +110,7 @@ def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
     return r.json()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120)
 def td_quote(symbol: str) -> dict:
     r = requests.get(
         f"{BASE_URL}/quote",
@@ -175,6 +182,34 @@ def clear_today_session():
     st.session_state.daily_tests = []
 
 
+def save_portfolio_df(df_port: pd.DataFrame):
+    df_port = df_port.copy()
+    df_port["ticker"] = df_port["ticker"].astype(str).str.upper().str.strip()
+    df_port.to_csv(PORTFOLIO_FILE, index=False)
+
+
+def load_portfolio_df() -> pd.DataFrame:
+    if not os.path.isfile(PORTFOLIO_FILE):
+        return st.session_state.portfolio.copy()
+    try:
+        dfp = pd.read_csv(PORTFOLIO_FILE)
+        expected = ["ticker", "qty", "avg_cost", "stop", "tp1"]
+        for c in expected:
+            if c not in dfp.columns:
+                dfp[c] = np.nan
+        dfp = dfp[expected]
+        return dfp
+    except Exception:
+        return st.session_state.portfolio.copy()
+
+
+def portfolio_csv_bytes() -> bytes:
+    if not os.path.isfile(PORTFOLIO_FILE):
+        return b""
+    with open(PORTFOLIO_FILE, "rb") as f:
+        return f.read()
+
+
 # =========================================================
 # SCORING / PLAN
 # =========================================================
@@ -189,12 +224,12 @@ class ScoreBreakdown:
 
 @dataclass
 class TradePlan:
-    total_score: int          # 0-100 (legacy)
-    label: str                # UYGUN / SINIRDA / UYGUN DEĞİL
+    total_score: int
+    label: str
 
-    setup_score: int          # 0-100
-    timing_score: int         # 0-100
-    status_tag: str           # ALIM / PULLBACK / KONSOLİDASYON / TREND BOZULDU / UZAMIŞ
+    setup_score: int
+    timing_score: int
+    status_tag: str
 
     entry_low: float
     entry_high: float
@@ -257,6 +292,7 @@ def _status_tag(
     in_entry: bool,
     consolidation: bool,
 ) -> str:
+    # Option B: status primarily driven by timing, but guard for broken trend/setup
     if trend_broken or setup_score < 45:
         return "🔴 TREND BOZULDU"
     if consolidation:
@@ -324,19 +360,6 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
     entry_low = float(min(ema20, ema50))
     entry_high = float(max(ema20, ema50))
     entry_mid = (entry_low + entry_high) / 2.0
-
-    # Conservative breakout heuristic
-    lookback = 20
-    breakout = False
-    if len(df) >= lookback + 5:
-        hh20 = float(df["high"].iloc[-lookback:].max())
-        vol_sma20 = float(df["volume"].iloc[-lookback:].mean())
-        breakout = (close >= hh20 * 0.995) and (float(last["volume"]) >= 1.5 * vol_sma20)
-
-    if breakout and not extended and not trend_broken:
-        entry_low = close * 0.985
-        entry_high = close * 1.015
-        entry_mid = (entry_low + entry_high) / 2.0
 
     # Stop: EMA50 vs ATR (tightest)
     stop_ema = ema50 * 0.995
@@ -452,21 +475,15 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         "momentum_ok": momentum_ok,
         "vol_ok": vol_ok,
         "extended": extended,
-        "breakout_heuristic": breakout,
         "entry_low": entry_low,
         "entry_high": entry_high,
         "entry_mid": entry_mid,
-        "stop_ema": stop_ema,
-        "stop_atr": stop_atr,
         "stop": stop,
         "tp1": tp1,
         "rr": rr,
-        "setup_raw": setup_raw,
         "setup_score": setup_score,
         "timing_score": timing_score,
         "dist_to_entry_pct": dist_entry_pct,
-        "prox_pts": prox_pts,
-        "ext_pts": ext_pts,
         "status_tag": status_tag,
         "consolidation": consolidation,
     }
@@ -533,7 +550,7 @@ def build_pdf_bytes(
             c.showPage()
             y = h - 2.0 * cm
 
-    draw_line("Tek Hisse Teknik Analiz Raporu (V4.1)", font="Helvetica-Bold", size=16, space=18)
+    draw_line("Tek Hisse Teknik Analiz Raporu (V4.2)", font="Helvetica-Bold", size=16, space=18)
     draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
     draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
     draw_line("", size=10, space=10)
@@ -605,8 +622,6 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
 
     fig.add_hline(y=plan.stop, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
     fig.add_hline(y=plan.tp1, line_dash="dash", annotation_text="TP1", annotation_position="top left")
-
-    # Always show last price line (quote if available else candle close)
     fig.add_hline(y=float(last_price_line), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
 
     fig.update_layout(
@@ -621,24 +636,73 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
 
 
 # =========================================================
-# UI
+# PORTFOLIO ANALYSIS HELPERS
+# =========================================================
+def safe_float(x):
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return np.nan
+        return float(x)
+    except Exception:
+        return np.nan
+
+
+def portfolio_row_comment(plan: TradePlan, price: float, user_stop: float, user_tp1: float) -> str:
+    # Short, actionable: keep / watch / tighten / avoid add
+    if not np.isfinite(price):
+        return "Fiyat alınamadı."
+    if plan.status_tag.startswith("🔴"):
+        return "Trend bozuk → ekleme yok; risk azaltmayı düşün."
+    if plan.status_tag.startswith("⚫"):
+        return "Uzamış → ekleme yok; pullback bekle."
+    if plan.status_tag.startswith("🔵"):
+        return "Sıkışma → kırılım gelene kadar bekle."
+    if plan.status_tag.startswith("🟡"):
+        return "Pullback → giriş bandı yaklaşınca yeniden değerlendir."
+    # 🟢
+    # If user stop very close, warn.
+    if np.isfinite(user_stop) and (price - user_stop) / price < 0.02:
+        return "Alım bölgesi ama stop çok yakın → oynaklık stoplatabilir."
+    return "Koşullar iyi → planına sadık kal."
+
+
+def compute_rr(price: float, stop: float, tp: float) -> float:
+    if not (np.isfinite(price) and np.isfinite(stop) and np.isfinite(tp)):
+        return np.nan
+    risk = price - stop
+    reward = tp - price
+    if risk <= 0:
+        return np.nan
+    return reward / risk
+
+
+def pct(a: float, b: float) -> float:
+    if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
+        return np.nan
+    return (a - b) / b * 100
+
+
+# =========================================================
+# SIDEBAR (Global)
 # =========================================================
 with st.sidebar:
-    st.header("Kontroller")
-    interval_label = st.selectbox("Zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=0)
+    st.header("Genel Ayarlar")
+    default_interval_label = st.selectbox("Varsayılan zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=0)
     bars = st.slider("Bar sayısı", min_value=120, max_value=800, value=300, step=10)
-    show_quote = st.checkbox("Quote paneli (anlık özet)", value=True)
-    st.caption("Free planda istek limiti var. Cache (60 sn) aktif.")
+
+    # Quote = extra API call; default off to save requests.
+    show_quote = st.checkbox("Quote (anlık fiyat) kullan", value=False)
+    st.caption("Quote açarsan +1 API çağrısı (ticker başına).")
 
     st.divider()
-    st.subheader("📌 Test Hafızası (Oturum)")
+    st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
     if st.session_state.daily_tests:
         df_mem = pd.DataFrame(st.session_state.daily_tests)
         show_cols = ["timestamp", "ticker", "timeframe", "price", "setup_score", "timing_score", "total_score", "status_tag", "dist_to_entry_pct"]
         show_cols = [c for c in show_cols if c in df_mem.columns]
         st.dataframe(df_mem[show_cols].iloc[::-1], use_container_width=True, hide_index=True)
     else:
-        st.info("Henüz test edilen hisse yok.")
+        st.info("Henüz tek hisse testi yok.")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -656,169 +720,375 @@ with st.sidebar:
             disabled=(not bool(hist_bytes)),
         )
 
-    with st.expander("📚 Geçmiş (CSV) görüntüle"):
+    with st.expander("📚 Geçmiş (history.csv)"):
         hist_df = read_history_df()
         if hist_df.empty:
             st.info("history.csv yok veya boş.")
         else:
             st.dataframe(hist_df.tail(200), use_container_width=True, hide_index=True)
 
-left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
-with left:
-    st.subheader("Hisse")
-    ticker = st.text_input("Ticker", placeholder="Örn: NVDA, TSLA, PLTR").strip().upper()
-    run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
+# =========================================================
+# MAIN TABS
+# =========================================================
+tab_single, tab_portfolio = st.tabs(["📈 Tek Hisse Analiz", "🧳 Portföy Analiz"])
 
-    if run:
-        if not ticker:
-            st.warning("Ticker gir.")
-        else:
-            interval = INTERVAL_MAP[interval_label]
-            with st.spinner("Twelve Data'dan veri çekiliyor..."):
+# =========================================================
+# TAB 1: SINGLE STOCK
+# =========================================================
+with tab_single:
+    left, right = st.columns([0.36, 0.64], vertical_alignment="top")
+
+    with left:
+        st.subheader("Hisse")
+        ticker = st.text_input("Ticker", placeholder="Örn: NVDA, TSLA, PLTR").strip().upper()
+        interval_label = st.selectbox("Zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=list(INTERVAL_MAP.keys()).index(default_interval_label))
+        run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
+
+        if run:
+            if not ticker:
+                st.warning("Ticker gir.")
+            else:
+                interval = INTERVAL_MAP[interval_label]
+                with st.spinner("Veri çekiliyor..."):
+                    try:
+                        payload = td_time_series(ticker, interval, bars)
+                        df = parse_ohlcv(payload)
+                    except Exception as e:
+                        st.error(f"Veri alınamadı: {e}")
+                        st.stop()
+
+                df["ema20"] = ema(df["close"], 20)
+                df["ema50"] = ema(df["close"], 50)
+                df["ema150"] = ema(df["close"], 150)
+                df["ema200"] = ema(df["close"], 200)
+                df["rsi14"] = rsi(df["close"], 14)
+                df["atr14"] = atr(df, 14)
+
+                plan = build_trade_plan(df)
+
+                q = {}
+                quote_price = None
+                if show_quote:
+                    try:
+                        q = td_quote(ticker)
+                        for key in ["price", "close"]:
+                            if key in q:
+                                try:
+                                    quote_price = float(q[key])
+                                    break
+                                except Exception:
+                                    pass
+                    except Exception:
+                        q = {}
+
+                candle_close = float(df.iloc[-1]["close"])
+                last_price_line = quote_price if (quote_price is not None and np.isfinite(quote_price)) else candle_close
+
+                # Save for chart
+                st.session_state["__df"] = df
+                st.session_state["__ticker"] = ticker
+                st.session_state["__plan"] = plan
+                st.session_state["__quote"] = q
+                st.session_state["__last_price_line"] = float(last_price_line)
+                st.session_state["__interval_label"] = interval_label
+                st.session_state["__bars"] = bars
+
+                # Memory record (session + csv)
+                record = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ticker": ticker,
+                    "timeframe": interval,
+                    "price": round(float(last_price_line), 4),
+                    "setup_score": int(plan.setup_score),
+                    "timing_score": int(plan.timing_score),
+                    "total_score": int(plan.total_score),
+                    "status_tag": plan.status_tag,
+                    "entry_low": round(float(plan.entry_low), 4),
+                    "entry_high": round(float(plan.entry_high), 4),
+                    "stop": round(float(plan.stop), 4),
+                    "tp1": round(float(plan.tp1), 4),
+                    "rr": round(float(plan.rr), 4) if np.isfinite(plan.rr) else "",
+                    "dist_to_entry_pct": round(float(plan.dist_to_entry_pct), 4),
+                    "watch_level": round(float(plan.watch_level), 4),
+                }
+                st.session_state.daily_tests.append(record)
                 try:
-                    payload = td_time_series(ticker, interval, bars)
-                    df = parse_ohlcv(payload)
+                    save_to_history(record)
                 except Exception as e:
-                    st.error(f"Veri alınamadı: {e}")
-                    st.stop()
+                    st.warning(f"history.csv yazılamadı: {e}")
 
-            df["ema20"] = ema(df["close"], 20)
-            df["ema50"] = ema(df["close"], 50)
-            df["ema150"] = ema(df["close"], 150)
-            df["ema200"] = ema(df["close"], 200)
-            df["rsi14"] = rsi(df["close"], 14)
-            df["atr14"] = atr(df, 14)
+                # UI outputs
+                st.divider()
+                st.subheader("📊 Strateji Özeti")
+                st.metric("Toplam Skor", f"{plan.total_score} / 100")
+                st.metric("Setup Kalitesi", f"{plan.setup_score} / 100")
+                st.metric("Zamanlama", f"{plan.timing_score} / 100")
+                st.metric("Durum", plan.status_tag)
 
-            plan = build_trade_plan(df)
+                st.subheader("📌 İşlem Planı")
+                table = pd.DataFrame(
+                    {
+                        "Parametre": ["Giriş Bölgesi", "Giriş Mesafesi", "Takip Seviyesi", "Stop", "TP1", "Risk/Reward"],
+                        "Değer": [
+                            f"{plan.entry_low:.2f} – {plan.entry_high:.2f}",
+                            f"{plan.dist_to_entry_pct:+.2f}%",
+                            f"{plan.watch_level:.2f}",
+                            f"{plan.stop:.2f}",
+                            f"{plan.tp1:.2f}",
+                            f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—",
+                        ],
+                    }
+                )
+                st.table(table)
 
-            q = {}
-            quote_price = None
-            if show_quote:
-                try:
-                    q = td_quote(ticker)
-                    for key in ["price", "close"]:
-                        if key in q:
-                            try:
-                                quote_price = float(q[key])
-                                break
-                            except Exception:
-                                pass
-                except Exception:
-                    q = {}
+                st.subheader("🧠 Skor Dağılımı (Legacy)")
+                b = plan.breakdown
+                bdf = pd.DataFrame(
+                    {
+                        "Bileşen": ["Trend", "Fiyat/EMA150", "Momentum (RSI)", "Volatilite (ATR%)", "Uzama (EMA50)"],
+                        "Puan": [b.trend_stack, b.price_vs_ema150, b.momentum_rsi, b.volatility_atr, b.extension_vs_ema50],
+                        "Maks": [30, 20, 20, 15, 15],
+                    }
+                )
+                st.table(bdf)
 
-            candle_close = float(df.iloc[-1]["close"])
-            last_price_line = quote_price if (quote_price is not None and np.isfinite(quote_price)) else candle_close
+                st.subheader("🧭 Senaryo")
+                st.write(plan.scenario)
 
-            # Save to session state for chart
-            st.session_state["__df"] = df
-            st.session_state["__ticker"] = ticker
-            st.session_state["__plan"] = plan
-            st.session_state["__quote"] = q
-            st.session_state["__last_price_line"] = float(last_price_line)
-            st.session_state["__interval_label"] = interval_label
-            st.session_state["__bars"] = bars
+                st.subheader("📝 Otomatik Teknik Yorum")
+                st.markdown(plan.narrative)
 
-            # ---- MEMORY (Session + CSV) ----
-            record = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ticker": ticker,
-                "timeframe": INTERVAL_MAP[interval_label],
-                "price": round(float(last_price_line), 4),
-                "setup_score": int(plan.setup_score),
-                "timing_score": int(plan.timing_score),
-                "total_score": int(plan.total_score),
-                "status_tag": plan.status_tag,
-                "entry_low": round(float(plan.entry_low), 4),
-                "entry_high": round(float(plan.entry_high), 4),
-                "stop": round(float(plan.stop), 4),
-                "tp1": round(float(plan.tp1), 4),
-                "rr": round(float(plan.rr), 4) if np.isfinite(plan.rr) else "",
-                "dist_to_entry_pct": round(float(plan.dist_to_entry_pct), 4),
-                "watch_level": round(float(plan.watch_level), 4),
-            }
-            st.session_state.daily_tests.append(record)
-            try:
-                save_to_history(record)
-            except Exception as e:
-                st.warning(f"CSV'ye yazılamadı (history.csv): {e}")
+                if show_quote and q:
+                    st.subheader("⚡ Quote (Anlık Özet)")
+                    keys = ["symbol", "name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]
+                    compact = {k: q[k] for k in keys if k in q}
+                    st.write(compact)
 
-            # ---- UI OUTPUT ----
-            st.divider()
-            st.subheader("📊 Strateji Özeti")
-            st.metric("Toplam Skor", f"{plan.total_score} / 100")
-            st.metric("Setup Kalitesi", f"{plan.setup_score} / 100")
-            st.metric("Zamanlama", f"{plan.timing_score} / 100")
-            st.metric("Durum", plan.status_tag)
+                st.subheader("📄 Rapor")
+                pdf_bytes = build_pdf_bytes(
+                    ticker=ticker,
+                    interval_label=interval_label,
+                    bars=bars,
+                    plan=plan,
+                    quote=(q if show_quote else None),
+                )
+                st.download_button(
+                    label="Raporu PDF'e Çevir (İndir)",
+                    data=pdf_bytes,
+                    file_name=f"{ticker}_{interval}_rapor.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
 
-            st.subheader("📌 İşlem Planı")
-            table = pd.DataFrame(
-                {
-                    "Parametre": ["Giriş Bölgesi", "Giriş Mesafesi", "Takip Seviyesi", "Stop", "TP1", "Risk/Reward"],
-                    "Değer": [
-                        f"{plan.entry_low:.2f} – {plan.entry_high:.2f}",
-                        f"{plan.dist_to_entry_pct:+.2f}%",
-                        f"{plan.watch_level:.2f}",
-                        f"{plan.stop:.2f}",
-                        f"{plan.tp1:.2f}",
-                        f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—",
-                    ],
-                }
-            )
-            st.table(table)
+                with st.expander("Detay (debug)"):
+                    st.json(plan.debug)
 
-            st.subheader("🧠 Skor Dağılımı (Legacy)")
-            b = plan.breakdown
-            bdf = pd.DataFrame(
-                {
-                    "Bileşen": ["Trend", "Fiyat/EMA150", "Momentum (RSI)", "Volatilite (ATR%)", "Uzama (EMA50)"],
-                    "Puan": [b.trend_stack, b.price_vs_ema150, b.momentum_rsi, b.volatility_atr, b.extension_vs_ema50],
-                    "Maks": [30, 20, 20, 15, 15],
-                }
-            )
-            st.table(bdf)
+    with right:
+        st.subheader("Grafik")
+        if "__df" not in st.session_state:
+            st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
+        else:
+            df = st.session_state["__df"]
+            ticker = st.session_state["__ticker"]
+            plan = st.session_state["__plan"]
+            last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
+            fig = plot_chart(df, ticker, plan, last_price_line)
+            st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("🧭 Senaryo")
-            st.write(plan.scenario)
 
-            st.subheader("📝 Otomatik Teknik Yorum")
-            st.markdown(plan.narrative)
+# =========================================================
+# TAB 2: PORTFOLIO
+# =========================================================
+with tab_portfolio:
+    st.subheader("🧳 Portföy Analiz")
+    st.caption("Portföy satırlarını gir: ticker, alış ort., stop ve TP1. Sonra analiz et → her hisse için strateji + risk tablosu.")
 
-            if show_quote and q:
-                st.subheader("⚡ Quote (Anlık Özet)")
-                keys = ["symbol", "name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]
-                compact = {k: q[k] for k in keys if k in q}
-                st.write(compact)
+    top_left, top_right = st.columns([0.65, 0.35], vertical_alignment="top")
 
-            # PDF
-            st.subheader("📄 Rapor")
-            pdf_bytes = build_pdf_bytes(
-                ticker=ticker,
-                interval_label=interval_label,
-                bars=bars,
-                plan=plan,
-                quote=(q if show_quote else None),
-            )
+    with top_right:
+        st.markdown("### Portföy Dosyası")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Portföyü Yükle (portfolio.csv)", use_container_width=True):
+                st.session_state.portfolio = load_portfolio_df()
+                st.rerun()
+        with col2:
             st.download_button(
-                label="Raporu PDF'e Çevir (İndir)",
-                data=pdf_bytes,
-                file_name=f"{ticker}_{INTERVAL_MAP[interval_label]}_rapor.pdf",
-                mime="application/pdf",
+                "portfolio.csv indir",
+                data=portfolio_csv_bytes() if portfolio_csv_bytes() else b"",
+                file_name="portfolio.csv",
+                mime="text/csv",
                 use_container_width=True,
+                disabled=(not bool(portfolio_csv_bytes())),
             )
 
-            with st.expander("Detay (debug)"):
-                st.json(plan.debug)
+        st.markdown("### Hızlı İşlemler")
+        if st.button("Portföyü Kaydet", type="primary", use_container_width=True):
+            try:
+                save_portfolio_df(st.session_state.portfolio)
+                st.success("portfolio.csv kaydedildi.")
+            except Exception as e:
+                st.error(f"Kaydedilemedi: {e}")
 
-with right:
-    st.subheader("Grafik")
-    if "__df" not in st.session_state:
-        st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
-    else:
-        df = st.session_state["__df"]
-        ticker = st.session_state["__ticker"]
-        plan = st.session_state["__plan"]
-        last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
+        if st.button("Portföyü Temizle", use_container_width=True):
+            st.session_state.portfolio = pd.DataFrame(columns=["ticker", "qty", "avg_cost", "stop", "tp1"])
+            try:
+                save_portfolio_df(st.session_state.portfolio)
+            except Exception:
+                pass
+            st.rerun()
 
-        fig = plot_chart(df, ticker, plan, last_price_line)
-        st.plotly_chart(fig, use_container_width=True)
+    with top_left:
+        st.markdown("### Portföy Girişi")
+        st.session_state.portfolio = st.data_editor(
+            st.session_state.portfolio,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "ticker": st.column_config.TextColumn("Ticker", required=True),
+                "qty": st.column_config.NumberColumn("Adet (opsiyonel)", min_value=0.0, step=1.0),
+                "avg_cost": st.column_config.NumberColumn("Alış Ort.", min_value=0.0, step=0.01, format="%.2f"),
+                "stop": st.column_config.NumberColumn("Stop", min_value=0.0, step=0.01, format="%.2f"),
+                "tp1": st.column_config.NumberColumn("TP1", min_value=0.0, step=0.01, format="%.2f"),
+            },
+        )
+
+        st.markdown("### Analiz")
+        interval_label_pf = st.selectbox(
+            "Portföy analiz zaman dilimi",
+            list(INTERVAL_MAP.keys()),
+            index=list(INTERVAL_MAP.keys()).index("Günlük (1day)"),
+            key="pf_interval"
+        )
+        analyze_pf = st.button("Portföyü Analiz Et", type="primary", use_container_width=True)
+
+    if analyze_pf:
+        dfp = st.session_state.portfolio.copy()
+        if dfp.empty:
+            st.warning("Portföy boş. En az 1 satır ekle.")
+        else:
+            dfp["ticker"] = dfp["ticker"].astype(str).str.upper().str.strip()
+            dfp = dfp[dfp["ticker"].str.len() > 0].copy()
+            if dfp.empty:
+                st.warning("Geçerli ticker yok.")
+            else:
+                interval = INTERVAL_MAP[interval_label_pf]
+                rows = []
+
+                with st.spinner("Portföy verileri çekiliyor ve analiz ediliyor..."):
+                    for _, r in dfp.iterrows():
+                        tkr = str(r.get("ticker", "")).upper().strip()
+                        if not tkr:
+                            continue
+
+                        qty = safe_float(r.get("qty"))
+                        avg_cost = safe_float(r.get("avg_cost"))
+                        user_stop = safe_float(r.get("stop"))
+                        user_tp1 = safe_float(r.get("tp1"))
+
+                        try:
+                            payload = td_time_series(tkr, interval, bars)
+                            dfi = parse_ohlcv(payload)
+                            dfi["ema20"] = ema(dfi["close"], 20)
+                            dfi["ema50"] = ema(dfi["close"], 50)
+                            dfi["ema150"] = ema(dfi["close"], 150)
+                            dfi["ema200"] = ema(dfi["close"], 200)
+                            dfi["rsi14"] = rsi(dfi["close"], 14)
+                            dfi["atr14"] = atr(dfi, 14)
+
+                            plan = build_trade_plan(dfi)
+
+                            candle_close = float(dfi.iloc[-1]["close"])
+                            price = candle_close
+
+                            # optional quote (extra API call)
+                            if show_quote:
+                                try:
+                                    q = td_quote(tkr)
+                                    if "price" in q:
+                                        price = float(q["price"])
+                                except Exception:
+                                    pass
+
+                            pnl_pct = pct(price, avg_cost) if np.isfinite(avg_cost) and avg_cost > 0 else np.nan
+                            dist_stop_pct = pct(price, user_stop) if np.isfinite(user_stop) and user_stop > 0 else np.nan
+                            dist_tp_pct = pct(user_tp1, price) if np.isfinite(user_tp1) and user_tp1 > 0 else np.nan
+                            rr_user = compute_rr(price, user_stop, user_tp1)
+
+                            comment = portfolio_row_comment(plan, price, user_stop, user_tp1)
+
+                            pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
+                            risk_per_share = (price - user_stop) if (np.isfinite(user_stop) and np.isfinite(price)) else np.nan
+                            risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
+
+                            rows.append({
+                                "Ticker": tkr,
+                                "Fiyat": round(price, 2),
+                                "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
+                                "P&L %": round(pnl_pct, 2) if np.isfinite(pnl_pct) else "",
+                                "Stop": round(user_stop, 2) if np.isfinite(user_stop) else "",
+                                "Stop Mesafe %": round(dist_stop_pct, 2) if np.isfinite(dist_stop_pct) else "",
+                                "TP1": round(user_tp1, 2) if np.isfinite(user_tp1) else "",
+                                "TP1 Mesafe %": round(dist_tp_pct, 2) if np.isfinite(dist_tp_pct) else "",
+                                "R (TP1/Stop)": round(rr_user, 2) if np.isfinite(rr_user) else "",
+                                "Setup": plan.setup_score,
+                                "Timing": plan.timing_score,
+                                "Durum": plan.status_tag,
+                                "Entry Bandı": f"{plan.entry_low:.2f}–{plan.entry_high:.2f}",
+                                "Entry Mesafe %": f"{plan.dist_to_entry_pct:+.2f}",
+                                "Poz. Değeri": round(pos_value, 2) if np.isfinite(pos_value) else "",
+                                "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
+                                "Not": comment
+                            })
+
+                        except Exception as e:
+                            rows.append({
+                                "Ticker": tkr,
+                                "Fiyat": "",
+                                "Alış Ort.": "",
+                                "P&L %": "",
+                                "Stop": "",
+                                "Stop Mesafe %": "",
+                                "TP1": "",
+                                "TP1 Mesafe %": "",
+                                "R (TP1/Stop)": "",
+                                "Setup": "",
+                                "Timing": "",
+                                "Durum": "HATA",
+                                "Entry Bandı": "",
+                                "Entry Mesafe %": "",
+                                "Poz. Değeri": "",
+                                "Risk $": "",
+                                "Not": f"Veri/analiz hatası: {e}"
+                            })
+
+                out = pd.DataFrame(rows)
+
+                st.markdown("### Sonuç Tablosu")
+                st.dataframe(out, use_container_width=True, hide_index=True)
+
+                # Quick summary buckets
+                st.markdown("### Hızlı Özet")
+                if not out.empty:
+                    a = out[out["Durum"].astype(str).str.startswith("🟢")]
+                    b = out[out["Durum"].astype(str).str.startswith("🟡")]
+                    c = out[out["Durum"].astype(str).str.startswith("⚫")]
+                    d = out[out["Durum"].astype(str).str.startswith("🔴")]
+
+                    colx, coly, colz, colw = st.columns(4)
+                    colx.metric("🟢 Alım Bölgesi", len(a))
+                    coly.metric("🟡 Pullback", len(b))
+                    colz.metric("⚫ Uzamış", len(c))
+                    colw.metric("🔴 Trend Bozuk", len(d))
+
+                # Download results
+                csv_bytes = out.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Portföy Analiz CSV indir",
+                    data=csv_bytes,
+                    file_name="portfolio_analysis.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
