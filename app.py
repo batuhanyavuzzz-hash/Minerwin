@@ -1,10 +1,13 @@
 import io
+import os
+import csv
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 from dataclasses import dataclass
+from datetime import datetime
 
 # PDF (ReportLab)
 from reportlab.lib.pagesizes import A4
@@ -15,8 +18,8 @@ from reportlab.lib.units import cm
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Tek Hisse Teknik Analiz (V4)", layout="wide")
-st.title("Tek Hisse Teknik Analiz — Twelve Data (V4)")
+st.set_page_config(page_title="Tek Hisse Teknik Analiz (V4.1)", layout="wide")
+st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.1 | Hafıza + CSV)")
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
 if not API_KEY:
@@ -24,12 +27,17 @@ if not API_KEY:
     st.stop()
 
 BASE_URL = "https://api.twelvedata.com"
+HISTORY_FILE = "history.csv"
 
 INTERVAL_MAP = {
     "Günlük (1day)": "1day",
     "Saatlik (1h)": "1h",
     "15 Dakika (15min)": "15min",
 }
+
+# Session memory init
+if "daily_tests" not in st.session_state:
+    st.session_state.daily_tests = []
 
 
 # =========================================================
@@ -136,6 +144,38 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
 
 
 # =========================================================
+# HISTORY (CSV) + SESSION MEMORY
+# =========================================================
+def save_to_history(row: dict):
+    file_exists = os.path.isfile(HISTORY_FILE)
+    with open(HISTORY_FILE, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def read_history_df() -> pd.DataFrame:
+    if not os.path.isfile(HISTORY_FILE):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(HISTORY_FILE)
+    except Exception:
+        return pd.DataFrame()
+
+
+def history_csv_bytes() -> bytes:
+    if not os.path.isfile(HISTORY_FILE):
+        return b""
+    with open(HISTORY_FILE, "rb") as f:
+        return f.read()
+
+
+def clear_today_session():
+    st.session_state.daily_tests = []
+
+
+# =========================================================
 # SCORING / PLAN
 # =========================================================
 @dataclass
@@ -163,8 +203,8 @@ class TradePlan:
     tp1: float
     rr: float
 
-    dist_to_entry_pct: float  # +% above entry band; negative if below band
-    watch_level: float        # simple “takip seviyesi” (entry_high)
+    dist_to_entry_pct: float
+    watch_level: float
 
     narrative: str
     scenario: str
@@ -181,20 +221,14 @@ def label_from_total(score: int) -> str:
 
 
 def _dist_to_entry_pct(price: float, entry_low: float, entry_high: float) -> float:
-    # if above band: +% from entry_high
     if price > entry_high:
         return ((price - entry_high) / entry_high) * 100
-    # if below band: -% from entry_low
     if price < entry_low:
         return -((entry_low - price) / entry_low) * 100
     return 0.0
 
 
 def _proximity_points(dist_pct: float) -> int:
-    """
-    Proximity score (0-60). 0 means far, 60 means inside entry zone.
-    dist_pct positive => above entry band; negative => below entry band.
-    """
     if dist_pct == 0:
         return 60
     d = abs(dist_pct)
@@ -208,12 +242,10 @@ def _proximity_points(dist_pct: float) -> int:
 
 
 def _extension_points(is_extended: bool) -> int:
-    # Extension score (0-40): not extended -> 40, extended -> 0
     return 0 if is_extended else 40
 
 
 def _detect_consolidation(atr_pct: float, rsi14: float) -> bool:
-    # simple: low vol + mid RSI => consolidation
     return (atr_pct < 2.0) and (45 <= rsi14 <= 55)
 
 
@@ -225,7 +257,6 @@ def _status_tag(
     in_entry: bool,
     consolidation: bool,
 ) -> str:
-    # Status is driven by TIMING (Option B), but we guard against broken trends.
     if trend_broken or setup_score < 45:
         return "🔴 TREND BOZULDU"
     if consolidation:
@@ -265,12 +296,9 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
     price_near_ema150 = close >= ema150 * 0.98
 
     extended = dist_ema50_pct > 8.0
-
     trend_broken = (close < ema200) or (not long_trend_ok and not trend_stack_ok)
 
-    # =====================================================
-    # TOTAL SCORE (legacy 0-100)
-    # =====================================================
+    # Legacy total (0-100)
     total = 0
     trend_pts = 30 if (trend_stack_ok and long_trend_ok) else (20 if trend_stack_ok else (10 if long_trend_ok else 0))
     total += trend_pts
@@ -284,7 +312,6 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
     total += e_pts
 
     label = label_from_total(total)
-
     breakdown = ScoreBreakdown(
         trend_stack=trend_pts,
         price_vs_ema150=p_pts,
@@ -293,14 +320,12 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         extension_vs_ema50=e_pts,
     )
 
-    # =====================================================
-    # ENTRY ZONE (base: EMA20-EMA50)
-    # =====================================================
+    # Entry zone (EMA20-EMA50)
     entry_low = float(min(ema20, ema50))
     entry_high = float(max(ema20, ema50))
     entry_mid = (entry_low + entry_high) / 2.0
 
-    # Breakout heuristic (kept conservative)
+    # Conservative breakout heuristic
     lookback = 20
     breakout = False
     if len(df) >= lookback + 5:
@@ -313,27 +338,19 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         entry_high = close * 1.015
         entry_mid = (entry_low + entry_high) / 2.0
 
-    # =====================================================
-    # STOP (Option C): tighter = higher stop
-    # =====================================================
+    # Stop: EMA50 vs ATR (tightest)
     stop_ema = ema50 * 0.995
     stop_atr = entry_mid - 1.2 * atr14
     stop = float(max(stop_ema, stop_atr))
     if stop >= entry_mid:
         stop = float(entry_mid * 0.99)
 
-    # =====================================================
-    # TP1 (2R)
-    # =====================================================
+    # TP1: 2R
     risk = entry_mid - stop
     tp1 = float(entry_mid + 2.0 * risk) if risk > 0 else float(entry_mid * 1.02)
     rr = (tp1 - entry_mid) / risk if risk > 0 else float("nan")
 
-    # =====================================================
-    # V4: Setup score (0-100) and Timing score (0-100)
-    # Setup quality = trend + price + momentum + vol (max 85) scaled to 100
-    # Timing score = extension(0/40) + proximity(0..60)
-    # =====================================================
+    # V4 split scores
     setup_raw = trend_pts + p_pts + m_pts + v_pts  # max 85
     setup_score = int(round(100 * setup_raw / 85)) if setup_raw > 0 else 0
 
@@ -356,9 +373,7 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
 
     watch_level = float(entry_high)
 
-    # =====================================================
-    # NARRATIVE + SCENARIO
-    # =====================================================
+    # Narrative + scenario
     trend_text = (
         "güçlü" if (trend_stack_ok and (price_above_ema150 or price_near_ema150))
         else ("zayıf" if close < ema200 else "karışık")
@@ -366,13 +381,13 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
     mom_text = "sağlıklı" if 55 <= rsi14 <= 75 else ("ısınmış" if rsi14 > 75 else "zayıf/sınır")
     vol_text = "uygun" if vol_ok else ("agresif" if vol_border else "yüksek")
 
-    timing_cmd = (
-        "ALIM ARANIR" if status_tag.startswith("🟢")
-        else "BEKLE / İZLE" if (status_tag.startswith("🟡") or status_tag.startswith("🔵"))
-        else "UZAK DUR / ŞARTLAR OLUŞSUN"
-    )
+    if status_tag.startswith("🟢"):
+        timing_cmd = "ALIM ARANIR"
+    elif status_tag.startswith("🟡") or status_tag.startswith("🔵"):
+        timing_cmd = "BEKLE / İZLE"
+    else:
+        timing_cmd = "UZAK DUR / ŞARTLAR OLUŞSUN"
 
-    # scenario text: short & actionable
     if status_tag.startswith("🟢"):
         scenario = (
             "Senaryo: Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp küçük gövdeli mumlar + "
@@ -400,7 +415,7 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         )
 
     narrative = (
-        f"**Toplam Skor:** {total}/100 → **{label}**  \n"
+        f"**Toplam Skor:** {int(total)}/100 → **{label}**  \n"
         f"**Setup Kalitesi:** {setup_score}/100  |  **Zamanlama Skoru:** {timing_score}/100  \n"
         f"**Durum:** {status_tag}  \n\n"
         f"**Güncel (Candle) Fiyat:** {close:.2f}  \n"
@@ -416,7 +431,7 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         f"**Takip Seviyesi:** {watch_level:.2f} (altına yaklaşınca yeniden değerlendir)  \n"
         f"**Stop:** {stop:.2f} (EMA50 vs ATR → sıkı olan)  \n"
         f"**TP1:** {tp1:.2f} (2R)  \n"
-        f"**R/R:** 1 : {rr:.2f}"
+        f"**R/R:** 1 : {rr:.2f}" if np.isfinite(rr) else "**R/R:** —"
     )
 
     debug = {
@@ -518,7 +533,7 @@ def build_pdf_bytes(
             c.showPage()
             y = h - 2.0 * cm
 
-    draw_line("Tek Hisse Teknik Analiz Raporu (V4)", font="Helvetica-Bold", size=16, space=18)
+    draw_line("Tek Hisse Teknik Analiz Raporu (V4.1)", font="Helvetica-Bold", size=16, space=18)
     draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
     draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
     draw_line("", size=10, space=10)
@@ -591,7 +606,7 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
     fig.add_hline(y=plan.stop, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
     fig.add_hline(y=plan.tp1, line_dash="dash", annotation_text="TP1", annotation_position="top left")
 
-    # ✅ ALWAYS show last price line
+    # Always show last price line (quote if available else candle close)
     fig.add_hline(y=float(last_price_line), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
 
     fig.update_layout(
@@ -613,7 +628,40 @@ with st.sidebar:
     interval_label = st.selectbox("Zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=0)
     bars = st.slider("Bar sayısı", min_value=120, max_value=800, value=300, step=10)
     show_quote = st.checkbox("Quote paneli (anlık özet)", value=True)
-    st.caption("Free planda 8 istek/dk. Cache (60 sn) aktif.")
+    st.caption("Free planda istek limiti var. Cache (60 sn) aktif.")
+
+    st.divider()
+    st.subheader("📌 Test Hafızası (Oturum)")
+    if st.session_state.daily_tests:
+        df_mem = pd.DataFrame(st.session_state.daily_tests)
+        show_cols = ["timestamp", "ticker", "timeframe", "price", "setup_score", "timing_score", "total_score", "status_tag", "dist_to_entry_pct"]
+        show_cols = [c for c in show_cols if c in df_mem.columns]
+        st.dataframe(df_mem[show_cols].iloc[::-1], use_container_width=True, hide_index=True)
+    else:
+        st.info("Henüz test edilen hisse yok.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Oturumu Temizle", use_container_width=True):
+            clear_today_session()
+            st.rerun()
+    with col_b:
+        hist_bytes = history_csv_bytes()
+        st.download_button(
+            "history.csv indir",
+            data=hist_bytes if hist_bytes else b"",
+            file_name="history.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=(not bool(hist_bytes)),
+        )
+
+    with st.expander("📚 Geçmiş (CSV) görüntüle"):
+        hist_df = read_history_df()
+        if hist_df.empty:
+            st.info("history.csv yok veya boş.")
+        else:
+            st.dataframe(hist_df.tail(200), use_container_width=True, hide_index=True)
 
 left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
@@ -662,14 +710,40 @@ with left:
             candle_close = float(df.iloc[-1]["close"])
             last_price_line = quote_price if (quote_price is not None and np.isfinite(quote_price)) else candle_close
 
+            # Save to session state for chart
             st.session_state["__df"] = df
             st.session_state["__ticker"] = ticker
             st.session_state["__plan"] = plan
             st.session_state["__quote"] = q
-            st.session_state["__last_price_line"] = last_price_line
+            st.session_state["__last_price_line"] = float(last_price_line)
             st.session_state["__interval_label"] = interval_label
             st.session_state["__bars"] = bars
 
+            # ---- MEMORY (Session + CSV) ----
+            record = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ticker": ticker,
+                "timeframe": INTERVAL_MAP[interval_label],
+                "price": round(float(last_price_line), 4),
+                "setup_score": int(plan.setup_score),
+                "timing_score": int(plan.timing_score),
+                "total_score": int(plan.total_score),
+                "status_tag": plan.status_tag,
+                "entry_low": round(float(plan.entry_low), 4),
+                "entry_high": round(float(plan.entry_high), 4),
+                "stop": round(float(plan.stop), 4),
+                "tp1": round(float(plan.tp1), 4),
+                "rr": round(float(plan.rr), 4) if np.isfinite(plan.rr) else "",
+                "dist_to_entry_pct": round(float(plan.dist_to_entry_pct), 4),
+                "watch_level": round(float(plan.watch_level), 4),
+            }
+            st.session_state.daily_tests.append(record)
+            try:
+                save_to_history(record)
+            except Exception as e:
+                st.warning(f"CSV'ye yazılamadı (history.csv): {e}")
+
+            # ---- UI OUTPUT ----
             st.divider()
             st.subheader("📊 Strateji Özeti")
             st.metric("Toplam Skor", f"{plan.total_score} / 100")
@@ -716,7 +790,7 @@ with left:
                 compact = {k: q[k] for k in keys if k in q}
                 st.write(compact)
 
-            # PDF button
+            # PDF
             st.subheader("📄 Rapor")
             pdf_bytes = build_pdf_bytes(
                 ticker=ticker,
