@@ -1,32 +1,28 @@
+# app.py
 import io
 import os
 import csv
-import math
+from typing import Optional, Tuple, Dict, Any
+
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
-import plotly.graph_objects as go
 from dataclasses import dataclass
 from datetime import datetime
 
-# -----------------------------
-# Optional PDF (ReportLab)
-# -----------------------------
-PDF_AVAILABLE = True
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import cm
-except Exception:
-    PDF_AVAILABLE = False
+# PDF (ReportLab)
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
 
 
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Minervini — Tek Hisse + Portföy (V5 Full)", layout="wide")
-st.title("Minervini — Tek Hisse + Portföy Analiz (V5 Full)")
+st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V4.3)", layout="wide")
+st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.3 | Portföy Analiz + Minervini 52W Filter)")
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
 if not API_KEY:
@@ -34,6 +30,8 @@ if not API_KEY:
     st.stop()
 
 BASE_URL = "https://api.twelvedata.com"
+HISTORY_FILE = "history.csv"
+PORTFOLIO_FILE = "portfolio.csv"
 
 INTERVAL_MAP = {
     "Günlük (1day)": "1day",
@@ -41,117 +39,15 @@ INTERVAL_MAP = {
     "15 Dakika (15min)": "15min",
 }
 
-# Minervini #5:
-MIN_52W_ABOVE_LOW_PCT = 25.0  # Current price >= 52W Low * 1.25
-
-# Files (Streamlit Cloud’da kalıcılık garanti değil; indir/yükle butonları var)
-HISTORY_FILE = "history.csv"
-PORTFOLIO_FILE = "portfolio.csv"
-
-# Session memory
-if "tests" not in st.session_state:
-    st.session_state.tests = []
+# Session memory init
+if "daily_tests" not in st.session_state:
+    st.session_state.daily_tests = []
 
 if "portfolio" not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame(columns=["ticker", "qty", "avg_cost", "stop", "tp1"])
-
-
-# =========================================================
-# UTILS
-# =========================================================
-def safe_float(x):
-    try:
-        if x is None:
-            return np.nan
-        if isinstance(x, str):
-            x = x.strip()
-            if x == "":
-                return np.nan
-        return float(x)
-    except Exception:
-        return np.nan
-
-
-def pct_change(a: float, b: float) -> float:
-    """(a-b)/b * 100"""
-    if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
-        return np.nan
-    return (a - b) / b * 100.0
-
-
-def rr_from_price(price: float, stop: float, tp: float) -> float:
-    if not (np.isfinite(price) and np.isfinite(stop) and np.isfinite(tp)):
-        return np.nan
-    risk = price - stop
-    reward = tp - price
-    if risk <= 0:
-        return np.nan
-    return reward / risk
-
-
-# =========================================================
-# DATA (Twelve Data)
-# =========================================================
-@st.cache_data(ttl=180)
-def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
-    r = requests.get(
-        f"{BASE_URL}/time_series",
-        params={
-            "symbol": symbol,
-            "interval": interval,
-            "outputsize": int(outputsize),
-            "apikey": API_KEY,
-            "format": "JSON",
-        },
-        timeout=25,
+    # default empty portfolio template
+    st.session_state.portfolio = pd.DataFrame(
+        columns=["ticker", "qty", "avg_cost", "stop", "tp1"]
     )
-    r.raise_for_status()
-    return r.json()
-
-
-@st.cache_data(ttl=180)
-def td_quote(symbol: str) -> dict:
-    r = requests.get(
-        f"{BASE_URL}/quote",
-        params={
-            "symbol": symbol,
-            "apikey": API_KEY,
-            "format": "JSON",
-        },
-        timeout=25,
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def parse_ohlcv(payload: dict) -> pd.DataFrame:
-    if isinstance(payload, dict) and payload.get("status") == "error":
-        raise RuntimeError(f"TwelveData: {payload.get('message')} (code={payload.get('code')})")
-
-    values = payload.get("values")
-    if not values:
-        raise RuntimeError("TwelveData: values boş döndü (ticker/interval desteklenmiyor olabilir).")
-
-    df = pd.DataFrame(values)
-
-    if "datetime" not in df.columns:
-        raise RuntimeError("TwelveData: datetime alanı yok.")
-
-    df.rename(columns={"datetime": "time"}, inplace=True)
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-
-    for col in ["open", "high", "low", "close"]:
-        if col not in df.columns:
-            raise RuntimeError(f"TwelveData: {col} alanı yok.")
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if "volume" in df.columns:
-        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
-    else:
-        df["volume"] = 0.0
-
-    df = df.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").reset_index(drop=True)
-    return df
 
 
 # =========================================================
@@ -197,57 +93,199 @@ def slope(series: pd.Series, lookback: int = 20) -> float:
     return float(np.polyfit(x, y, 1)[0])
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["ema20"] = ema(df["close"], 20)
-    df["ema50"] = ema(df["close"], 50)
-    df["ema150"] = ema(df["close"], 150)
-    df["ema200"] = ema(df["close"], 200)
-    df["rsi14"] = rsi(df["close"], 14)
-    df["atr14"] = atr(df, 14)
+# =========================================================
+# DATA (Twelve Data)
+# =========================================================
+@st.cache_data(ttl=120)
+def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
+    r = requests.get(
+        f"{BASE_URL}/time_series",
+        params={
+            "symbol": symbol,
+            "interval": interval,
+            "outputsize": int(outputsize),
+            "apikey": API_KEY,
+            "format": "JSON",
+        },
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@st.cache_data(ttl=120)
+def td_quote(symbol: str) -> dict:
+    r = requests.get(
+        f"{BASE_URL}/quote",
+        params={"symbol": symbol, "apikey": API_KEY, "format": "JSON"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def parse_ohlcv(payload: dict) -> pd.DataFrame:
+    if isinstance(payload, dict) and payload.get("status") == "error":
+        raise RuntimeError(f"TwelveData: {payload.get('message')} (code={payload.get('code')})")
+
+    values = payload.get("values")
+    if not values:
+        raise RuntimeError("TwelveData: 'values' boş döndü (ticker/interval desteklenmiyor olabilir).")
+
+    df = pd.DataFrame(values)
+    if "datetime" not in df.columns:
+        raise RuntimeError("TwelveData: datetime alanı yok (beklenmeyen format).")
+
+    df.rename(columns={"datetime": "time"}, inplace=True)
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+
+    for col in ["open", "high", "low", "close"]:
+        if col not in df.columns:
+            raise RuntimeError(f"TwelveData: {col} alanı yok.")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    else:
+        df["volume"] = 0.0
+
+    df = df.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").reset_index(drop=True)
     return df
 
 
 # =========================================================
-# MINERVINI #5 (52W Low +25%)
+# MINERVINI FILTER (52W LOW +25%)
 # =========================================================
-def calc_52w_low_rule(daily_df: pd.DataFrame, current_price: float) -> dict:
+@st.cache_data(ttl=6 * 3600)  # 6 hours; 52W low doesn't need minute-level refresh
+def td_52w_low(symbol: str) -> Tuple[float, int]:
     """
-    daily_df: daily data containing low column.
-    Uses last ~252 trading days.
+    Returns:
+      low_52w: float (min low of last 252 daily bars)
+      bars_used: int
+    Notes:
+      Uses TwelveData 1day series. Outputsize 320 to safely cover 252 trading days.
     """
-    tail = daily_df.tail(252).copy()
-    low_52w = float(tail["low"].min()) if not tail.empty else float("nan")
-    if not np.isfinite(low_52w) or low_52w <= 0 or not np.isfinite(current_price):
-        return {"low_52w": low_52w, "pct_above": float("nan"), "ok": False}
+    payload = td_time_series(symbol, "1day", 320)
+    df = parse_ohlcv(payload)
+    if df.empty:
+        return (float("nan"), 0)
 
-    pct_above = (current_price / low_52w - 1.0) * 100.0
-    ok = pct_above >= MIN_52W_ABOVE_LOW_PCT
-    return {"low_52w": low_52w, "pct_above": float(pct_above), "ok": bool(ok)}
+    # last 252 daily bars (approx 52 trading weeks)
+    tail = df.tail(252)
+    if tail.empty:
+        return (float("nan"), 0)
+
+    low_52w = float(tail["low"].min())
+    return (low_52w, int(len(tail)))
+
+
+def minervini_rule_ok(price: float, low_52w: float) -> bool:
+    # Minervini Rule #5: current price at least 25% above 52-week low
+    if not (np.isfinite(price) and np.isfinite(low_52w)) or low_52w <= 0:
+        return True  # cannot evaluate -> do not block
+    return price >= 1.25 * low_52w
 
 
 # =========================================================
-# SCORING (Split: Position Health vs Add Timing)
+# HISTORY (CSV) + SESSION MEMORY
+# =========================================================
+def save_to_history(row: dict):
+    file_exists = os.path.isfile(HISTORY_FILE)
+    with open(HISTORY_FILE, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def read_history_df() -> pd.DataFrame:
+    if not os.path.isfile(HISTORY_FILE):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(HISTORY_FILE)
+    except Exception:
+        return pd.DataFrame()
+
+
+def history_csv_bytes() -> bytes:
+    if not os.path.isfile(HISTORY_FILE):
+        return b""
+    with open(HISTORY_FILE, "rb") as f:
+        return f.read()
+
+
+def clear_today_session():
+    st.session_state.daily_tests = []
+
+
+def save_portfolio_df(df_port: pd.DataFrame):
+    df_port = df_port.copy()
+    df_port["ticker"] = df_port["ticker"].astype(str).str.upper().str.strip()
+    df_port.to_csv(PORTFOLIO_FILE, index=False)
+
+
+def load_portfolio_df() -> pd.DataFrame:
+    if not os.path.isfile(PORTFOLIO_FILE):
+        return st.session_state.portfolio.copy()
+    try:
+        dfp = pd.read_csv(PORTFOLIO_FILE)
+        expected = ["ticker", "qty", "avg_cost", "stop", "tp1"]
+        for c in expected:
+            if c not in dfp.columns:
+                dfp[c] = np.nan
+        dfp = dfp[expected]
+        return dfp
+    except Exception:
+        return st.session_state.portfolio.copy()
+
+
+def portfolio_csv_bytes() -> bytes:
+    if not os.path.isfile(PORTFOLIO_FILE):
+        return b""
+    with open(PORTFOLIO_FILE, "rb") as f:
+        return f.read()
+
+
+# =========================================================
+# SCORING / PLAN
 # =========================================================
 @dataclass
-class ScorePack:
-    position_health: int  # 0..100
-    add_timing: int       # 0..100
-    total_legacy: int     # 0..100 (eski style)
-    status_tag: str       # emoji label
-    action: str           # HOLD / NO-ADD / REDUCE / EXIT
+class ScoreBreakdown:
+    trend_stack: int
+    price_vs_ema150: int
+    momentum_rsi: int
+    volatility_atr: int
+    extension_vs_ema50: int
+    minervini_52w: int
+
+
+@dataclass
+class TradePlan:
+    total_score: int
+    label: str
+
+    setup_score: int
+    timing_score: int
+    status_tag: str
+
     entry_low: float
     entry_high: float
-    stop_suggest: float
-    tp1_suggest: float
-    rr_suggest: float
+    entry_mid: float
+    stop: float
+    tp1: float
+    rr: float
+
     dist_to_entry_pct: float
     watch_level: float
+
+    low_52w: float
+    above_52w_low_25pct: bool
+    dist_from_52w_low_pct: float
+
     narrative: str
     scenario: str
-    minervini_low_52w: float
-    minervini_pct_above_low: float
-    minervini_ok: bool
+    debug: dict
+    breakdown: ScoreBreakdown
 
 
 def label_from_total(score: int) -> str:
@@ -267,7 +305,6 @@ def _dist_to_entry_pct(price: float, entry_low: float, entry_high: float) -> flo
 
 
 def _proximity_points(dist_pct: float) -> int:
-    # 0..60
     if dist_pct == 0:
         return 60
     d = abs(dist_pct)
@@ -285,84 +322,68 @@ def _extension_points(is_extended: bool) -> int:
 
 
 def _detect_consolidation(atr_pct: float, rsi14: float) -> bool:
-    # basit sıkışma
     return (atr_pct < 2.0) and (45 <= rsi14 <= 55)
 
 
-def status_tag_for_add(timing_score: int, setup_ok: bool, trend_broken: bool, extended: bool, in_entry: bool, consolidation: bool) -> str:
-    if trend_broken or not setup_ok:
+def _status_tag(
+    timing_score: int,
+    setup_score: int,
+    trend_broken: bool,
+    is_extended: bool,
+    in_entry: bool,
+    consolidation: bool,
+    minervini_fail: bool,
+) -> str:
+    # Guards first
+    if minervini_fail:
+        return "🔴 52W DİBE YAKIN"
+    if trend_broken or setup_score < 45:
         return "🔴 TREND BOZULDU"
     if consolidation:
         return "🔵 KONSOLİDASYON"
     if in_entry and timing_score >= 70:
         return "🟢 ALIM BÖLGESİNDE"
-    if extended and timing_score < 50:
+    if is_extended and timing_score < 50:
         return "⚫ UZAMIŞ — KOVALAMA"
     return "🟡 PULLBACK BEKLENİYOR"
 
 
-def decide_action(position_health: int, status_tag: str, minervini_ok: bool) -> str:
-    """
-    Portföy yönetimi aksiyonu:
-    - minervini_ok False: genelde weak base -> NO-ADD/REDUCE
-    - trend bozuk: REDUCE/EXIT (stop planına bağlı)
-    - uzamış: HOLD / NO-ADD
-    - pullback/konsolidasyon: HOLD, add only pullback
-    """
-    if not minervini_ok:
-        # dipten yeni çıkmış / weak base
-        if "TREND BOZULDU" in status_tag:
-            return "REDUCE / EXIT"
-        return "HOLD / NO-ADD (WEAK BASE)"
-    if "TREND BOZULDU" in status_tag:
-        return "REDUCE / EXIT"
-    if "UZAMIŞ" in status_tag:
-        return "HOLD / NO-ADD"
-    if "ALIM BÖLGESİNDE" in status_tag:
-        return "HOLD / ADD-ONLY-PULLBACK"
-    if "KONSOLİDASYON" in status_tag:
-        return "HOLD / WATCH"
-    return "HOLD / WATCH"
+def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePlan:
+    last = df.iloc[-1]
+    close = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    ema150 = float(last["ema150"])
+    ema200 = float(last["ema200"])
+    rsi14 = float(last["rsi14"])
+    atr14 = float(last["atr14"])
 
+    atr_pct = (atr14 / close) * 100 if close else float("nan")
+    dist_ema50_pct = ((close - ema50) / ema50) * 100 if ema50 else float("nan")
+    dist_ema150_pct = ((close - ema150) / ema150) * 100 if ema150 else float("nan")
 
-def build_scores(df_tf: pd.DataFrame, df_daily_for_52w: pd.DataFrame, current_price: float) -> ScorePack:
-    last = df_tf.iloc[-1]
-    close = float(current_price)
+    # Minervini #5: price >= 1.25 * 52w low
+    above_25 = minervini_rule_ok(close, low_52w)
+    dist_from_52w_low_pct = ((close - low_52w) / low_52w * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
+    minervini_fail = (np.isfinite(low_52w) and low_52w > 0 and not above_25)
 
-    ema20_v = float(last["ema20"])
-    ema50_v = float(last["ema50"])
-    ema150_v = float(last["ema150"])
-    ema200_v = float(last["ema200"])
-    rsi14_v = float(last["rsi14"])
-    atr14_v = float(last["atr14"])
-
-    atr_pct = (atr14_v / close) * 100 if close else float("nan")
-    dist_ema50_pct = ((close - ema50_v) / ema50_v) * 100 if ema50_v else float("nan")
-    dist_ema150_pct = ((close - ema150_v) / ema150_v) * 100 if ema150_v else float("nan")
-
-    # Trend structure
-    trend_stack_ok = (ema50_v > ema150_v > ema200_v)
-    ema200_slope = slope(df_tf["ema200"], lookback=20)
+    trend_stack_ok = (ema50 > ema150 > ema200)
+    ema200_slope = slope(df["ema200"], lookback=20)
     long_trend_ok = (ema200_slope > 0)
 
-    trend_broken = (close < ema200_v) or ((not long_trend_ok) and (not trend_stack_ok))
+    momentum_ok = (rsi14 >= 55)
+    momentum_border = (50 <= rsi14 < 55)
 
-    # Momentum
-    momentum_ok = (rsi14_v >= 55)
-    momentum_border = (50 <= rsi14_v < 55)
-
-    # Volatility band
     vol_ok = (2.0 <= atr_pct <= 6.0)
     vol_border = (1.5 <= atr_pct < 2.0) or (6.0 < atr_pct <= 8.0)
 
-    # Price vs EMA150
-    price_above_ema150 = close >= ema150_v
-    price_near_ema150 = close >= ema150_v * 0.98
+    price_above_ema150 = close >= ema150
+    price_near_ema150 = close >= ema150 * 0.98
 
-    # Extension
     extended = dist_ema50_pct > 8.0
+    trend_broken = (close < ema200) or (not long_trend_ok and not trend_stack_ok)
 
-    # Legacy total (0..100) — eski ekranda kullandığın gibi
+    # Legacy total (0-100)
     total = 0
     trend_pts = 30 if (trend_stack_ok and long_trend_ok) else (20 if trend_stack_ok else (10 if long_trend_ok else 0))
     total += trend_pts
@@ -375,169 +396,206 @@ def build_scores(df_tf: pd.DataFrame, df_daily_for_52w: pd.DataFrame, current_pr
     e_pts = 15 if not extended else 0
     total += e_pts
 
-    # Entry zone
-    entry_low = float(min(ema20_v, ema50_v))
-    entry_high = float(max(ema20_v, ema50_v))
+    # Minervini filter points: reward pass, penalize fail
+    # (keeps total within 0-100 by applying a clamp rather than changing max distribution)
+    min_pts = 10 if above_25 else 0
+    total = min(100, total + min_pts)
+
+    label = label_from_total(int(total))
+
+    # Entry zone (EMA20-EMA50)
+    entry_low = float(min(ema20, ema50))
+    entry_high = float(max(ema20, ema50))
     entry_mid = (entry_low + entry_high) / 2.0
 
-    # Suggested stop/tp1 (generic)
-    stop_ema = ema50_v * 0.995
-    stop_atr = entry_mid - 1.2 * atr14_v
-    stop_suggest = float(max(stop_ema, stop_atr))
-    if stop_suggest >= entry_mid:
-        stop_suggest = float(entry_mid * 0.99)
+    # Stop: EMA50 vs ATR (tightest)
+    stop_ema = ema50 * 0.995
+    stop_atr = entry_mid - 1.2 * atr14
+    stop = float(max(stop_ema, stop_atr))
+    if stop >= entry_mid:
+        stop = float(entry_mid * 0.99)
 
-    risk = entry_mid - stop_suggest
-    tp1_suggest = float(entry_mid + 2.0 * risk) if risk > 0 else float(entry_mid * 1.02)
-    rr_suggest = (tp1_suggest - entry_mid) / risk if risk > 0 else float("nan")
+    # TP1: 2R
+    risk = entry_mid - stop
+    tp1 = float(entry_mid + 2.0 * risk) if risk > 0 else float(entry_mid * 1.02)
+    rr = (tp1 - entry_mid) / risk if risk > 0 else float("nan")
 
-    # -----------------------------
-    # Split scoring:
-    # Position Health (0..100) – eldeki pozisyonu taşır mıyım?
-    # Add Timing (0..100) – ekleme/giriş uygun mu?
-    # -----------------------------
-    # Position Health: trend + price position + momentum + 52w rule (Minervini #5) => 100
-    # Trend block 0..40
-    ph_trend = 40 if (trend_stack_ok and long_trend_ok) else (25 if trend_stack_ok else (15 if long_trend_ok else 0))
-    # Price position 0..20
-    ph_price = 20 if price_above_ema150 else (10 if price_near_ema150 else 0)
-    # Momentum 0..20
-    ph_mom = 20 if momentum_ok else (10 if momentum_border else 0)
-    # Volatility sanity 0..10 (çok ekstremse kırp)
-    ph_vol = 10 if vol_ok else (5 if vol_border else 0)
-    # Minervini #5 0..10
-    m5 = calc_52w_low_rule(df_daily_for_52w, close)
-    ph_m5 = 10 if m5["ok"] else 0
+    # V4 split scores
+    setup_raw = trend_pts + p_pts + m_pts + v_pts + (10 if above_25 else 0)  # max 95
+    setup_score = int(round(100 * setup_raw / 95)) if setup_raw > 0 else 0
 
-    position_health = int(ph_trend + ph_price + ph_mom + ph_vol + ph_m5)
-    position_health = max(0, min(100, position_health))
-
-    # Add Timing: proximity to entry (0..60) + extension (0..40)
     dist_entry_pct = _dist_to_entry_pct(close, entry_low, entry_high)
-    prox_pts = _proximity_points(dist_entry_pct)
-    ext_pts = _extension_points(extended)
-    add_timing = int(prox_pts + ext_pts)
-    add_timing = max(0, min(100, add_timing))
+    prox_pts = _proximity_points(dist_entry_pct)       # 0..60
+    ext_pts = _extension_points(extended)              # 0..40
+    timing_score = int(ext_pts + prox_pts)             # 0..100
+
+    # Hardening filter: if Minervini rule fails, degrade labels/scores decisively
+    if minervini_fail:
+        # Purpose: eliminate "dip-from-bottom weak names" from being suggested as valid setups.
+        total = min(int(total), 55)
+        setup_score = min(int(setup_score), 40)
+        label = "UYGUN DEĞİL"
 
     in_entry = (entry_low <= close <= entry_high)
-    consolidation = _detect_consolidation(atr_pct, rsi14_v)
-    setup_ok = position_health >= 60  # basic health gate
+    consolidation = _detect_consolidation(atr_pct, rsi14)
 
-    status_tag = status_tag_for_add(
-        timing_score=add_timing,
-        setup_ok=setup_ok,
-        trend_broken=trend_broken,
-        extended=extended,
-        in_entry=in_entry,
-        consolidation=consolidation,
+    status_tag = _status_tag(
+        timing_score=int(timing_score),
+        setup_score=int(setup_score),
+        trend_broken=bool(trend_broken),
+        is_extended=bool(extended),
+        in_entry=bool(in_entry),
+        consolidation=bool(consolidation),
+        minervini_fail=bool(minervini_fail),
     )
-
-    action = decide_action(position_health, status_tag, m5["ok"])
 
     watch_level = float(entry_high)
 
-    # Narrative
-    trend_text = "güçlü" if (trend_stack_ok and (price_above_ema150 or price_near_ema150)) else ("zayıf" if close < ema200_v else "karışık")
-    mom_text = "sağlıklı" if 55 <= rsi14_v <= 75 else ("ısınmış" if rsi14_v > 75 else "zayıf/sınır")
+    # Narrative + scenario
+    trend_text = (
+        "güçlü" if (trend_stack_ok and (price_above_ema150 or price_near_ema150))
+        else ("zayıf" if close < ema200 else "karışık")
+    )
+    mom_text = "sağlıklı" if 55 <= rsi14 <= 75 else ("ısınmış" if rsi14 > 75 else "zayıf/sınır")
     vol_text = "uygun" if vol_ok else ("agresif" if vol_border else "yüksek")
 
-    scenario = ""
-    if "🟢" in status_tag:
-        scenario = "Fiyat EMA20–EMA50 bandında. Eklemek için band içinde güç işareti (higher-low / güçlü kapanış) ara."
-    elif "🟡" in status_tag:
-        scenario = "Fiyat band dışında. Pullback ile EMA20–EMA50 bandına yaklaşmasını bekle; kovalamayı engelle."
-    elif "🔵" in status_tag:
-        scenario = "Düşük volatilite sıkışması var. Kırılım + hacim artışı görmeden agresif aksiyon yok."
-    elif "⚫" in status_tag:
-        scenario = "Uzamış. Ekleme yok. Pullback gelmeden yeni risk alma."
+    if status_tag.startswith("🟢"):
+        timing_cmd = "ALIM ARANIR"
+    elif status_tag.startswith("🟡") or status_tag.startswith("🔵"):
+        timing_cmd = "BEKLE / İZLE"
     else:
-        scenario = "Trend filtresi bozuk. Ekleme yok; stop/pozisyon azaltma planını çalıştır."
+        timing_cmd = "UZAK DUR / ŞARTLAR OLUŞSUN"
+
+    if status_tag.startswith("🔴 52W"):
+        scenario = (
+            "Senaryo: Minervini filtresi (52W dip +%25) geçilemedi. Bu tip hisseler genelde "
+            "dipten yeni çıkan ve kırılgan olur. Önce 52W dibe göre net güçlenme (dipten +%25 üstü) "
+            "ve trend metriklerinin toparlanması beklenmeli."
+        )
+    elif status_tag.startswith("🟢"):
+        scenario = (
+            "Senaryo: Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp küçük gövdeli mumlar + "
+            "hacim düşüşü ile sıkışma görülürse, trend yönünde devam denemesi yapılabilir. Stop altına sarkarsa iptal."
+        )
+    elif status_tag.startswith("🟡"):
+        scenario = (
+            "Senaryo: Fiyat şu an giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
+            "konsolidasyon beklenir. Bu gerçekleşmeden yapılan alım kovalamaya girer."
+        )
+    elif status_tag.startswith("🔵"):
+        scenario = (
+            "Senaryo: Düşük volatilite ile yatay sıkışma var. Kırılımı takip et: güçlü kapanış + hacim artışı gelirse "
+            "setup aktifleşir; aksi halde zaman kaybı."
+        )
+    elif status_tag.startswith("⚫"):
+        scenario = (
+            "Senaryo: Fiyat EMA50’ye göre uzamış. Pullback gelmeden giriş riskli. En iyi plan: giriş bandına yaklaşmasını "
+            "bekle ve orada güç işareti (higher low / güçlü kapanış) ara."
+        )
+    else:
+        scenario = (
+            "Senaryo: Trend filtresi bozulmuş. Önce yeniden EMA150/EMA200 üstüne dönüş ve ortalamaların toparlanması gerekir; "
+            "aksi halde swing setup yok."
+        )
+
+    rule_text = "GEÇTİ ✅" if above_25 else "KALDI ❌"
+    low52_txt = f"{low_52w:.2f}" if np.isfinite(low_52w) else "—"
+    dist52_txt = f"%{dist_from_52w_low_pct:.2f}" if np.isfinite(dist_from_52w_low_pct) else "—"
 
     narrative = (
-        f"**Güncel Fiyat:** {close:.2f}\n\n"
-        f"**Position Health:** {position_health}/100  |  **Add Timing:** {add_timing}/100  |  **Legacy Total:** {total}/100 ({label_from_total(total)})\n"
-        f"**Durum:** {status_tag}\n"
-        f"**Aksiyon (Portföy):** {action}\n\n"
-        f"EMA20: {ema20_v:.2f} | EMA50: {ema50_v:.2f} | EMA150: {ema150_v:.2f} | EMA200: {ema200_v:.2f}\n"
-        f"RSI14: {rsi14_v:.1f} ({mom_text}) | ATR%: {atr_pct:.2f} ({vol_text})\n"
-        f"EMA50 mesafe: {dist_ema50_pct:+.2f}% | EMA150 mesafe: {dist_ema150_pct:+.2f}%\n\n"
-        f"**Minervini #5:** 52W Low = {m5['low_52w']:.2f} | Above Low = {m5['pct_above']:.1f}% | {'PASS' if m5['ok'] else 'FAIL'}\n\n"
-        f"**Entry Bandı:** {entry_low:.2f} – {entry_high:.2f}  |  Entry Mesafe: {dist_entry_pct:+.2f}%\n"
-        f"**Stop (Öneri):** {stop_suggest:.2f}  |  **TP1 (Öneri):** {tp1_suggest:.2f}  |  **R/R (Öneri):** {('1:'+format(rr_suggest,'.2f')) if np.isfinite(rr_suggest) else '—'}\n"
+        f"**Toplam Skor:** {int(total)}/100 → **{label}**  \n"
+        f"**Setup Kalitesi:** {int(setup_score)}/100  |  **Zamanlama Skoru:** {int(timing_score)}/100  \n"
+        f"**Durum:** {status_tag}  \n\n"
+        f"**Güncel (Candle) Fiyat:** {close:.2f}  \n"
+        f"EMA20: {ema20:.2f} | EMA50: {ema50:.2f} | EMA150: {ema150:.2f} | EMA200: {ema200:.2f}  \n\n"
+        f"**Minervini #5 (52W Dip +%25):** {rule_text}  \n"
+        f"52W Dip: {low52_txt} | Dipten Uzaklık: {dist52_txt}  \n\n"
+        f"**Trend:** {trend_text} (EMA200 eğim={ema200_slope:.4f})  \n"
+        f"**Fiyat Konumu:** EMA150 uzaklık %{dist_ema150_pct:.2f}  \n"
+        f"**Momentum (RSI14):** {rsi14:.1f} → {mom_text}  \n"
+        f"**Volatilite (ATR%):** %{atr_pct:.2f} → {vol_text}  \n"
+        f"**Uzama (EMA50 mesafe):** %{dist_ema50_pct:.2f} → {'uzamış' if extended else 'normal'}  \n\n"
+        f"**Zamanlama:** **{timing_cmd}**  \n"
+        f"**Giriş Bölgesi:** {entry_low:.2f} – {entry_high:.2f}  \n"
+        f"**Giriş Bölgesine Mesafe:** {dist_entry_pct:+.2f}%  \n"
+        f"**Takip Seviyesi:** {watch_level:.2f} (altına yaklaşınca yeniden değerlendir)  \n"
+        f"**Stop:** {stop:.2f} (EMA50 vs ATR → sıkı olan)  \n"
+        f"**TP1:** {tp1:.2f} (2R)  \n"
+        f"**R/R:** 1 : {rr:.2f}" if np.isfinite(rr) else "**R/R:** —"
     )
 
-    return ScorePack(
-        position_health=position_health,
-        add_timing=add_timing,
-        total_legacy=int(total),
+    debug = {
+        "close": close,
+        "ema20": ema20,
+        "ema50": ema50,
+        "ema150": ema150,
+        "ema200": ema200,
+        "rsi14": rsi14,
+        "atr14": atr14,
+        "atr_pct": atr_pct,
+        "dist_ema50_pct": dist_ema50_pct,
+        "dist_ema150_pct": dist_ema150_pct,
+        "trend_stack_ok": trend_stack_ok,
+        "ema200_slope": ema200_slope,
+        "long_trend_ok": long_trend_ok,
+        "trend_broken": trend_broken,
+        "momentum_ok": momentum_ok,
+        "vol_ok": vol_ok,
+        "extended": extended,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "entry_mid": entry_mid,
+        "stop": stop,
+        "tp1": tp1,
+        "rr": rr,
+        "setup_score": int(setup_score),
+        "timing_score": int(timing_score),
+        "dist_to_entry_pct": dist_entry_pct,
+        "status_tag": status_tag,
+        "consolidation": consolidation,
+        "low_52w": low_52w,
+        "above_52w_low_25pct": above_25,
+        "dist_from_52w_low_pct": dist_from_52w_low_pct,
+        "minervini_fail": minervini_fail,
+    }
+
+    breakdown = ScoreBreakdown(
+        trend_stack=trend_pts,
+        price_vs_ema150=p_pts,
+        momentum_rsi=m_pts,
+        volatility_atr=v_pts,
+        extension_vs_ema50=e_pts,
+        minervini_52w=min_pts,
+    )
+
+    return TradePlan(
+        total_score=int(total),
+        label=label,
+        setup_score=int(setup_score),
+        timing_score=int(timing_score),
         status_tag=status_tag,
-        action=action,
         entry_low=float(entry_low),
         entry_high=float(entry_high),
-        stop_suggest=float(stop_suggest),
-        tp1_suggest=float(tp1_suggest),
-        rr_suggest=float(rr_suggest) if np.isfinite(rr_suggest) else float("nan"),
+        entry_mid=float(entry_mid),
+        stop=float(stop),
+        tp1=float(tp1),
+        rr=float(rr),
         dist_to_entry_pct=float(dist_entry_pct),
         watch_level=float(watch_level),
+        low_52w=float(low_52w) if np.isfinite(low_52w) else float("nan"),
+        above_52w_low_25pct=bool(above_25),
+        dist_from_52w_low_pct=float(dist_from_52w_low_pct) if np.isfinite(dist_from_52w_low_pct) else float("nan"),
         narrative=narrative,
         scenario=scenario,
-        minervini_low_52w=float(m5["low_52w"]) if np.isfinite(m5["low_52w"]) else float("nan"),
-        minervini_pct_above_low=float(m5["pct_above"]) if np.isfinite(m5["pct_above"]) else float("nan"),
-        minervini_ok=bool(m5["ok"]),
+        debug=debug,
+        breakdown=breakdown,
     )
-
-
-# =========================================================
-# HISTORY / PORTFOLIO STORAGE
-# =========================================================
-def save_history_row(row: dict):
-    file_exists = os.path.isfile(HISTORY_FILE)
-    with open(HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-
-def read_csv_df(path: str) -> pd.DataFrame:
-    if not os.path.isfile(path):
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame()
-
-
-def file_bytes(path: str) -> bytes:
-    if not os.path.isfile(path):
-        return b""
-    with open(path, "rb") as f:
-        return f.read()
-
-
-def save_portfolio_df(df_port: pd.DataFrame):
-    dfp = df_port.copy()
-    dfp["ticker"] = dfp["ticker"].astype(str).str.upper().str.strip()
-    dfp.to_csv(PORTFOLIO_FILE, index=False)
-
-
-def load_portfolio_df() -> pd.DataFrame:
-    dfp = read_csv_df(PORTFOLIO_FILE)
-    if dfp.empty:
-        return st.session_state.portfolio.copy()
-    expected = ["ticker", "qty", "avg_cost", "stop", "tp1"]
-    for c in expected:
-        if c not in dfp.columns:
-            dfp[c] = np.nan
-    dfp = dfp[expected]
-    dfp["ticker"] = dfp["ticker"].astype(str).str.upper().str.strip()
-    return dfp
 
 
 # =========================================================
 # PDF EXPORT
 # =========================================================
-def _wrap_lines(text: str, max_chars: int = 95):
+def _wrap_lines(text: str, max_chars: int = 92):
     out = []
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -551,13 +609,17 @@ def _wrap_lines(text: str, max_chars: int = 95):
     return out
 
 
-def build_pdf_bytes(symbol: str, interval_label: str, bars: int, price: float, pack: ScorePack, quote: dict | None):
-    if not PDF_AVAILABLE:
-        raise RuntimeError("PDF modülü yok (reportlab). requirements.txt içine reportlab eklemelisin.")
-
+def build_pdf_bytes(
+    ticker: str,
+    interval_label: str,
+    bars: int,
+    plan: TradePlan,
+    quote: Optional[dict],
+):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     w, h = A4
+
     x = 2.0 * cm
     y = h - 2.0 * cm
     lh = 14
@@ -571,44 +633,42 @@ def build_pdf_bytes(symbol: str, interval_label: str, bars: int, price: float, p
             c.showPage()
             y = h - 2.0 * cm
 
-    draw_line("Minervini Analiz Raporu (V5 Full)", font="Helvetica-Bold", size=16, space=18)
-    draw_line(f"Ticker: {symbol}    Zaman: {interval_label}    Bar: {bars}", size=11)
-    draw_line(f"Tarih: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", size=10)
+    draw_line("Tek Hisse Teknik Analiz Raporu (V4.3)", font="Helvetica-Bold", size=16, space=18)
+    draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
+    draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
     draw_line("", size=10, space=10)
 
     draw_line("Özet", font="Helvetica-Bold", size=13, space=16)
-    draw_line(f"Güncel Fiyat: {price:.2f}", size=11)
-    draw_line(f"Position Health: {pack.position_health}/100", size=11)
-    draw_line(f"Add Timing: {pack.add_timing}/100", size=11)
-    draw_line(f"Legacy Total: {pack.total_legacy}/100", size=11)
-    draw_line(f"Durum: {pack.status_tag}", size=11)
-    draw_line(f"Aksiyon: {pack.action}", size=11)
-    draw_line("", size=10, space=10)
+    draw_line(f"Toplam Skor: {plan.total_score}/100    Etiket: {plan.label}", size=11)
+    draw_line(f"Setup Kalitesi: {plan.setup_score}/100    Zamanlama: {plan.timing_score}/100", size=11)
+    draw_line(f"Durum: {plan.status_tag}", size=11)
 
-    draw_line("Minervini #5", font="Helvetica-Bold", size=13, space=16)
-    draw_line(f"52W Low: {pack.minervini_low_52w:.2f} | Above Low: {pack.minervini_pct_above_low:.1f}% | {'PASS' if pack.minervini_ok else 'FAIL'}", size=11)
+    low52_txt = f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"
+    draw_line(f"Minervini #5 (52W Dip +%25): {'GEÇTİ ✅' if plan.above_52w_low_25pct else 'KALDI ❌'}", size=11)
+    draw_line(f"52W Dip: {low52_txt}  | Dipten Uzaklık: {plan.dist_from_52w_low_pct:.2f}%" if np.isfinite(plan.dist_from_52w_low_pct) else f"52W Dip: {low52_txt}", size=11)
+
+    draw_line(f"Giriş: {plan.entry_low:.2f} – {plan.entry_high:.2f}", size=11)
+    draw_line(f"Giriş Mesafesi: {plan.dist_to_entry_pct:+.2f}%    Takip: {plan.watch_level:.2f}", size=11)
+    draw_line(f"Stop: {plan.stop:.2f}    TP1: {plan.tp1:.2f}", size=11)
+    rr_text = f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—"
+    draw_line(f"Risk/Reward: {rr_text}", size=11)
     draw_line("", size=10, space=10)
 
     if quote and isinstance(quote, dict):
-        draw_line("Quote (Anlık)", font="Helvetica-Bold", size=13, space=16)
-        for k in ["name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]:
+        draw_line("Quote (Anlık Özet)", font="Helvetica-Bold", size=13, space=16)
+        for k in ["name", "exchange", "currency", "close", "price", "change", "percent_change", "previous_close"]:
             if k in quote:
                 draw_line(f"{k}: {quote[k]}", size=10, space=12)
         draw_line("", size=10, space=10)
 
-    draw_line("İşlem Seviyeleri (Öneri)", font="Helvetica-Bold", size=13, space=16)
-    draw_line(f"Entry Bandı: {pack.entry_low:.2f} – {pack.entry_high:.2f}  (Mesafe {pack.dist_to_entry_pct:+.2f}%)", size=11)
-    draw_line(f"Stop: {pack.stop_suggest:.2f}  |  TP1: {pack.tp1_suggest:.2f}  |  R/R: {('1:'+format(pack.rr_suggest,'.2f')) if np.isfinite(pack.rr_suggest) else '—'}", size=11)
-    draw_line("", size=10, space=10)
-
     draw_line("Senaryo", font="Helvetica-Bold", size=13, space=16)
-    for ln in _wrap_lines(pack.scenario, 95):
+    for ln in _wrap_lines(plan.scenario, max_chars=95):
         draw_line(ln, size=10, space=12)
     draw_line("", size=10, space=10)
 
-    draw_line("Yorum", font="Helvetica-Bold", size=13, space=16)
-    plain = pack.narrative.replace("**", "")
-    for ln in _wrap_lines(plain, 95):
+    draw_line("Otomatik Teknik Yorum", font="Helvetica-Bold", size=13, space=16)
+    plain = plan.narrative.replace("**", "").replace("  \n", "\n")
+    for ln in _wrap_lines(plain, max_chars=95):
         draw_line(ln, size=10, space=12)
 
     c.save()
@@ -618,9 +678,9 @@ def build_pdf_bytes(symbol: str, interval_label: str, bars: int, price: float, p
 
 
 # =========================================================
-# CHART
+# PLOTTING
 # =========================================================
-def plot_chart(df: pd.DataFrame, symbol: str, pack: ScorePack, current_price: float):
+def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: float):
     fig = go.Figure()
 
     fig.add_trace(
@@ -639,22 +699,18 @@ def plot_chart(df: pd.DataFrame, symbol: str, pack: ScorePack, current_price: fl
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema150"], name="EMA150", mode="lines"))
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema200"], name="EMA200", mode="lines"))
 
-    # Entry band
     fig.add_hrect(
-        y0=pack.entry_low,
-        y1=pack.entry_high,
+        y0=plan.entry_low,
+        y1=plan.entry_high,
         opacity=0.15,
         line_width=0,
-        annotation_text="ENTRY",
+        annotation_text="ENTRY ZONE",
         annotation_position="top left",
     )
 
-    # Suggested stop/tp
-    fig.add_hline(y=pack.stop_suggest, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
-    fig.add_hline(y=pack.tp1_suggest, line_dash="dash", annotation_text="TP1", annotation_position="top left")
-
-    # Current price line
-    fig.add_hline(y=float(current_price), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
+    fig.add_hline(y=plan.stop, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
+    fig.add_hline(y=plan.tp1, line_dash="dash", annotation_text="TP1", annotation_position="top left")
+    fig.add_hline(y=float(last_price_line), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
 
     fig.update_layout(
         title=f"{symbol} — Candlestick + EMA'lar + Trade Levels",
@@ -668,249 +724,383 @@ def plot_chart(df: pd.DataFrame, symbol: str, pack: ScorePack, current_price: fl
 
 
 # =========================================================
-# SIDEBAR
+# PORTFOLIO ANALYSIS HELPERS
+# =========================================================
+def safe_float(x):
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return np.nan
+        return float(x)
+    except Exception:
+        return np.nan
+
+
+def compute_rr(price: float, stop: float, tp: float) -> float:
+    if not (np.isfinite(price) and np.isfinite(stop) and np.isfinite(tp)):
+        return np.nan
+    risk = price - stop
+    reward = tp - price
+    if risk <= 0:
+        return np.nan
+    return reward / risk
+
+
+def pct(a: float, b: float) -> float:
+    if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
+        return np.nan
+    return (a - b) / b * 100
+
+
+def holding_action_comment(
+    plan: TradePlan,
+    price: float,
+    avg_cost: float,
+    user_stop: float,
+    user_tp1: float,
+) -> Tuple[str, str]:
+    """
+    Portfolio için: "alım yapıyormuşuz gibi" konuşma yok.
+    Çıktı:
+      action: kısa etiket (TUT / SAT / KAR AL / STOPTA ÇIK / DİKKAT)
+      note: 1 cümlelik gerekçe
+    """
+    if not np.isfinite(price):
+        return ("DİKKAT", "Fiyat alınamadı → veri hatası olabilir.")
+
+    # If stop exists and broken -> exit discipline
+    if np.isfinite(user_stop) and user_stop > 0 and price < user_stop:
+        return ("STOPTA ÇIK", "Fiyat stop altına sarktı → disipline göre pozisyon kapat.")
+
+    # Minervini fail = weakness near 52W low
+    if np.isfinite(plan.low_52w) and (not plan.above_52w_low_25pct):
+        # For holdings: do NOT add; consider reducing risk if also trend weak
+        if plan.status_tag.startswith("🔴"):
+            return ("SAT / AZALT", "52W dip gücü zayıf + trend filtresi bozuk → riski azaltmayı düşün.")
+        return ("TUT (EKLEME YOK)", "52W dip filtresi zayıf → ekleme yapma; trend bozulursa azalt.")
+
+    # Trend broken logic
+    if plan.status_tag.startswith("🔴"):
+        return ("SAT / AZALT", "Trend filtresi bozuk → ekleme yok; riski azaltmayı değerlendir.")
+
+    # Take-profit logic (if user_tp1 defined)
+    if np.isfinite(user_tp1) and user_tp1 > 0 and price >= user_tp1:
+        return ("KAR AL", "TP1 seviyesine ulaşıldı → planın varsa kısmi kar al.")
+
+    # Distance to stop
+    if np.isfinite(user_stop) and user_stop > 0:
+        dist_stop = (price - user_stop) / price
+        if dist_stop < 0.02:
+            return ("DİKKAT", "Stop çok yakın → oynaklık stoplatabilir; pozisyon boyunu gözden geçir.")
+
+    # Extended / pullback / consolidation for holdings
+    if plan.status_tag.startswith("⚫"):
+        return ("TUT (EKLEME YOK)", "Uzamış → kovalamak yok; pullback sonrası yeniden güç ararsın.")
+    if plan.status_tag.startswith("🔵"):
+        return ("TUT / İZLE", "Konsolidasyon → yön kırılımı gelene kadar sabır.")
+    if plan.status_tag.startswith("🟡"):
+        return ("TUT / İZLE", "Pullback fazı → stopu koru; güçlenme yoksa ekleme yapma.")
+    # 🟢
+    return ("TUT", "Şartlar iyi görünüyor → plana sadık kal (ekleme kararı ayrı).")
+
+
+# =========================================================
+# SIDEBAR (Global)
 # =========================================================
 with st.sidebar:
     st.header("Genel Ayarlar")
-    default_tf_label = st.selectbox("Varsayılan zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=0)
-    bars = st.slider("Bar sayısı", min_value=120, max_value=900, value=300, step=10)
+    default_interval_label = st.selectbox("Varsayılan zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=0)
+    bars = st.slider("Bar sayısı", min_value=120, max_value=800, value=300, step=10)
 
-    # Quote is extra API call; default off
-    use_quote = st.checkbox("Quote (anlık fiyat) kullan", value=False)
-    st.caption("Quote açık → hisse başına +1 API çağrısı.")
+    # Quote = extra API call; default off to save requests.
+    show_quote = st.checkbox("Quote (anlık fiyat) kullan", value=False)
+    st.caption("Quote açarsan +1 API çağrısı (ticker başına).")
 
     st.divider()
-    st.subheader("Hafıza (Oturum)")
-    if st.session_state.tests:
-        df_mem = pd.DataFrame(st.session_state.tests)
-        cols = ["timestamp", "ticker", "timeframe", "price", "position_health", "add_timing", "status_tag", "action", "m5_ok", "m5_pct"]
-        cols = [c for c in cols if c in df_mem.columns]
-        st.dataframe(df_mem[cols].iloc[::-1], use_container_width=True, hide_index=True)
+    st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
+    if st.session_state.daily_tests:
+        df_mem = pd.DataFrame(st.session_state.daily_tests)
+        show_cols = [
+            "timestamp", "ticker", "timeframe", "price",
+            "setup_score", "timing_score", "total_score",
+            "status_tag", "dist_to_entry_pct",
+            "low_52w", "minervini_52w_ok"
+        ]
+        show_cols = [c for c in show_cols if c in df_mem.columns]
+        st.dataframe(df_mem[show_cols].iloc[::-1], use_container_width=True, hide_index=True)
     else:
-        st.info("Henüz test yok.")
+        st.info("Henüz tek hisse testi yok.")
 
-    col1, col2 = st.columns(2)
-    with col1:
+    col_a, col_b = st.columns(2)
+    with col_a:
         if st.button("Oturumu Temizle", use_container_width=True):
-            st.session_state.tests = []
+            clear_today_session()
             st.rerun()
-    with col2:
-        hb = file_bytes(HISTORY_FILE)
+    with col_b:
+        hist_bytes = history_csv_bytes()
         st.download_button(
             "history.csv indir",
-            data=hb if hb else b"",
+            data=hist_bytes if hist_bytes else b"",
             file_name="history.csv",
             mime="text/csv",
-            disabled=(not bool(hb)),
             use_container_width=True,
+            disabled=(not bool(hist_bytes)),
         )
 
-    with st.expander("history.csv (son 200)"):
-        hdf = read_csv_df(HISTORY_FILE)
-        if hdf.empty:
-            st.info("history.csv yok/boş.")
+    with st.expander("📚 Geçmiş (history.csv)"):
+        hist_df = read_history_df()
+        if hist_df.empty:
+            st.info("history.csv yok veya boş.")
         else:
-            st.dataframe(hdf.tail(200), use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.subheader("Portföy Dosyası")
-    c3, c4 = st.columns(2)
-    with c3:
-        if st.button("portfolio.csv yükle", use_container_width=True):
-            st.session_state.portfolio = load_portfolio_df()
-            st.rerun()
-    with c4:
-        pb = file_bytes(PORTFOLIO_FILE)
-        st.download_button(
-            "portfolio.csv indir",
-            data=pb if pb else b"",
-            file_name="portfolio.csv",
-            mime="text/csv",
-            disabled=(not bool(pb)),
-            use_container_width=True,
-        )
+            st.dataframe(hist_df.tail(200), use_container_width=True, hide_index=True)
 
 
 # =========================================================
 # MAIN TABS
 # =========================================================
-tab_single, tab_portfolio = st.tabs(["📈 Tek Hisse", "🧳 Portföy (Eldeki)"])
-
+tab_single, tab_portfolio = st.tabs(["📈 Tek Hisse Analiz", "🧳 Portföy Analiz"])
 
 # =========================================================
-# TAB: SINGLE
+# TAB 1: SINGLE STOCK
 # =========================================================
 with tab_single:
     left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
     with left:
-        st.subheader("Tek Hisse Analizi")
-        ticker = st.text_input("Ticker", placeholder="NVDA / TSLA / PLTR").strip().upper()
-        tf_label = st.selectbox("Zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=list(INTERVAL_MAP.keys()).index(default_tf_label))
+        st.subheader("Hisse")
+        ticker = st.text_input("Ticker", placeholder="Örn: NVDA, TSLA, PLTR").strip().upper()
+        interval_label = st.selectbox(
+            "Zaman çözünürlüğü",
+            list(INTERVAL_MAP.keys()),
+            index=list(INTERVAL_MAP.keys()).index(default_interval_label),
+        )
         run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
 
         if run:
             if not ticker:
                 st.warning("Ticker gir.")
             else:
-                interval = INTERVAL_MAP[tf_label]
-
-                # 52w rule needs daily regardless. We'll fetch daily once.
-                with st.spinner("Veriler çekiliyor..."):
+                interval = INTERVAL_MAP[interval_label]
+                with st.spinner("Veri çekiliyor..."):
                     try:
-                        daily_payload = td_time_series(ticker, "1day", max(260, bars))
-                        df_daily = parse_ohlcv(daily_payload)
-                        df_daily = add_indicators(df_daily)
+                        payload = td_time_series(ticker, interval, bars)
+                        df = parse_ohlcv(payload)
                     except Exception as e:
-                        st.error(f"Daily veri alınamadı: {e}")
+                        st.error(f"Veri alınamadı: {e}")
                         st.stop()
 
-                    # TF data:
-                    try:
-                        if interval == "1day":
-                            df_tf = df_daily.copy()
-                        else:
-                            tf_payload = td_time_series(ticker, interval, bars)
-                            df_tf = parse_ohlcv(tf_payload)
-                            df_tf = add_indicators(df_tf)
-                    except Exception as e:
-                        st.error(f"{tf_label} veri alınamadı: {e}")
-                        st.stop()
+                df["ema20"] = ema(df["close"], 20)
+                df["ema50"] = ema(df["close"], 50)
+                df["ema150"] = ema(df["close"], 150)
+                df["ema200"] = ema(df["close"], 200)
+                df["rsi14"] = rsi(df["close"], 14)
+                df["atr14"] = atr(df, 14)
 
-                # price
-                candle_close = float(df_tf.iloc[-1]["close"])
-                quote = {}
-                price = candle_close
-                if use_quote:
+                # 52W low: if daily bars present, compute locally; else fetch cached daily
+                low52 = float("nan")
+                if interval == "1day" and len(df) >= 252:
+                    low52 = float(df.tail(252)["low"].min())
+                else:
                     try:
-                        quote = td_quote(ticker)
-                        # TwelveData quote fields vary; use price first
-                        if "price" in quote and safe_float(quote["price"]) > 0:
-                            price = float(quote["price"])
-                        elif "close" in quote and safe_float(quote["close"]) > 0:
-                            price = float(quote["close"])
+                        low52, _ = td_52w_low(ticker)
                     except Exception:
-                        quote = {}
+                        low52 = float("nan")
 
-                pack = build_scores(df_tf=df_tf, df_daily_for_52w=df_daily, current_price=price)
+                plan = build_trade_plan(df, low_52w=low52)
 
-                # Save to session + history
-                row = {
+                q: Dict[str, Any] = {}
+                quote_price: Optional[float] = None
+                if show_quote:
+                    try:
+                        q = td_quote(ticker)
+                        for key in ["price", "close"]:
+                            if key in q:
+                                try:
+                                    quote_price = float(q[key])
+                                    break
+                                except Exception:
+                                    pass
+                    except Exception:
+                        q = {}
+
+                candle_close = float(df.iloc[-1]["close"])
+                last_price_line = quote_price if (quote_price is not None and np.isfinite(quote_price)) else candle_close
+
+                # Save for chart
+                st.session_state["__df"] = df
+                st.session_state["__ticker"] = ticker
+                st.session_state["__plan"] = plan
+                st.session_state["__quote"] = q
+                st.session_state["__last_price_line"] = float(last_price_line)
+                st.session_state["__interval_label"] = interval_label
+                st.session_state["__bars"] = bars
+
+                # Memory record (session + csv)
+                record = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "ticker": ticker,
                     "timeframe": interval,
-                    "price": round(price, 4),
-                    "position_health": pack.position_health,
-                    "add_timing": pack.add_timing,
-                    "legacy_total": pack.total_legacy,
-                    "status_tag": pack.status_tag,
-                    "action": pack.action,
-                    "entry_low": round(pack.entry_low, 4),
-                    "entry_high": round(pack.entry_high, 4),
-                    "dist_to_entry_pct": round(pack.dist_to_entry_pct, 4),
-                    "m5_ok": int(pack.minervini_ok),
-                    "m5_low_52w": round(pack.minervini_low_52w, 4) if np.isfinite(pack.minervini_low_52w) else "",
-                    "m5_pct": round(pack.minervini_pct_above_low, 2) if np.isfinite(pack.minervini_pct_above_low) else "",
+                    "price": round(float(last_price_line), 4),
+                    "setup_score": int(plan.setup_score),
+                    "timing_score": int(plan.timing_score),
+                    "total_score": int(plan.total_score),
+                    "status_tag": plan.status_tag,
+                    "entry_low": round(float(plan.entry_low), 4),
+                    "entry_high": round(float(plan.entry_high), 4),
+                    "stop": round(float(plan.stop), 4),
+                    "tp1": round(float(plan.tp1), 4),
+                    "rr": round(float(plan.rr), 4) if np.isfinite(plan.rr) else "",
+                    "dist_to_entry_pct": round(float(plan.dist_to_entry_pct), 4),
+                    "watch_level": round(float(plan.watch_level), 4),
+                    "low_52w": round(float(plan.low_52w), 4) if np.isfinite(plan.low_52w) else "",
+                    "minervini_52w_ok": "YES" if plan.above_52w_low_25pct else "NO",
                 }
-                st.session_state.tests.append(row)
+                st.session_state.daily_tests.append(record)
                 try:
-                    save_history_row(row)
-                except Exception:
-                    pass
+                    save_to_history(record)
+                except Exception as e:
+                    st.warning(f"history.csv yazılamadı: {e}")
 
+                # UI outputs
                 st.divider()
-                st.subheader("Özet")
-                st.metric("Güncel Fiyat", f"${price:,.2f}")
-                st.metric("Position Health", f"{pack.position_health} / 100")
-                st.metric("Add Timing", f"{pack.add_timing} / 100")
-                st.metric("Durum", pack.status_tag)
-                st.metric("Aksiyon (Portföy Mantığı)", pack.action)
+                st.subheader("📊 Strateji Özeti")
+                st.metric("Toplam Skor", f"{plan.total_score} / 100")
+                st.metric("Setup Kalitesi", f"{plan.setup_score} / 100")
+                st.metric("Zamanlama", f"{plan.timing_score} / 100")
+                st.metric("Durum", plan.status_tag)
 
-                st.subheader("Minervini #5 (52W Low +25%)")
-                if np.isfinite(pack.minervini_low_52w):
-                    st.write(f"52W Low: **{pack.minervini_low_52w:.2f}** | Above Low: **{pack.minervini_pct_above_low:.1f}%** | **{'PASS' if pack.minervini_ok else 'FAIL'}**")
-                else:
-                    st.warning("52W Low hesaplanamadı (daily veri yetersiz olabilir).")
-
-                st.subheader("İşlem Seviyeleri (Öneri)")
-                plan_table = pd.DataFrame(
+                st.subheader("📌 İşlem Planı")
+                table = pd.DataFrame(
                     {
-                        "Parametre": ["Entry Bandı", "Entry Mesafe %", "Takip", "Stop (Öneri)", "TP1 (Öneri)", "R/R (Öneri)"],
+                        "Parametre": [
+                            "Minervini #5 (52W Dip +%25)",
+                            "52W Dip",
+                            "Dipten Uzaklık",
+                            "Giriş Bölgesi",
+                            "Giriş Mesafesi",
+                            "Takip Seviyesi",
+                            "Stop",
+                            "TP1",
+                            "Risk/Reward",
+                        ],
                         "Değer": [
-                            f"{pack.entry_low:.2f} – {pack.entry_high:.2f}",
-                            f"{pack.dist_to_entry_pct:+.2f}%",
-                            f"{pack.watch_level:.2f}",
-                            f"{pack.stop_suggest:.2f}",
-                            f"{pack.tp1_suggest:.2f}",
-                            (f"1 : {pack.rr_suggest:.2f}" if np.isfinite(pack.rr_suggest) else "—"),
+                            "GEÇTİ ✅" if plan.above_52w_low_25pct else "KALDI ❌",
+                            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—",
+                            f"%{plan.dist_from_52w_low_pct:.2f}" if np.isfinite(plan.dist_from_52w_low_pct) else "—",
+                            f"{plan.entry_low:.2f} – {plan.entry_high:.2f}",
+                            f"{plan.dist_to_entry_pct:+.2f}%",
+                            f"{plan.watch_level:.2f}",
+                            f"{plan.stop:.2f}",
+                            f"{plan.tp1:.2f}",
+                            f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—",
                         ],
                     }
                 )
-                st.table(plan_table)
+                st.table(table)
 
-                st.subheader("Senaryo")
-                st.write(pack.scenario)
+                st.subheader("🧠 Skor Dağılımı (Legacy + Minervini)")
+                b = plan.breakdown
+                bdf = pd.DataFrame(
+                    {
+                        "Bileşen": [
+                            "Trend",
+                            "Fiyat/EMA150",
+                            "Momentum (RSI)",
+                            "Volatilite (ATR%)",
+                            "Uzama (EMA50)",
+                            "Minervini #5 (52W Dip +%25)",
+                        ],
+                        "Puan": [
+                            b.trend_stack,
+                            b.price_vs_ema150,
+                            b.momentum_rsi,
+                            b.volatility_atr,
+                            b.extension_vs_ema50,
+                            b.minervini_52w,
+                        ],
+                        "Not": [
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "Fail ise hard filter uygular (zayıf dipten çıkışları eler).",
+                        ],
+                    }
+                )
+                st.table(bdf)
 
-                st.subheader("Otomatik Yorum")
-                st.markdown(pack.narrative)
+                st.subheader("🧭 Senaryo")
+                st.write(plan.scenario)
 
-                if use_quote and quote:
-                    st.subheader("Quote")
+                st.subheader("📝 Otomatik Teknik Yorum")
+                st.markdown(plan.narrative)
+
+                if show_quote and q:
+                    st.subheader("⚡ Quote (Anlık Özet)")
                     keys = ["symbol", "name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]
-                    compact = {k: quote[k] for k in keys if k in quote}
+                    compact = {k: q[k] for k in keys if k in q}
                     st.write(compact)
 
-                st.subheader("Rapor (PDF)")
-                if not PDF_AVAILABLE:
-                    st.warning("PDF için requirements.txt içine `reportlab` eklemelisin (aşağıda not var).")
-                else:
-                    pdf_bytes = build_pdf_bytes(
-                        symbol=ticker,
-                        interval_label=tf_label,
-                        bars=bars,
-                        price=price,
-                        pack=pack,
-                        quote=(quote if use_quote else None),
-                    )
-                    st.download_button(
-                        "Raporu PDF'e Çevir (İndir)",
-                        data=pdf_bytes,
-                        file_name=f"{ticker}_{interval}_report.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
+                st.subheader("📄 Rapor")
+                pdf_bytes = build_pdf_bytes(
+                    ticker=ticker,
+                    interval_label=interval_label,
+                    bars=bars,
+                    plan=plan,
+                    quote=(q if show_quote else None),
+                )
+                st.download_button(
+                    label="Raporu PDF'e Çevir (İndir)",
+                    data=pdf_bytes,
+                    file_name=f"{ticker}_{interval}_rapor.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
 
-                # store for chart on right
-                st.session_state["__single_df"] = df_tf
-                st.session_state["__single_ticker"] = ticker
-                st.session_state["__single_pack"] = pack
-                st.session_state["__single_price"] = price
+                with st.expander("Detay (debug)"):
+                    st.json(plan.debug)
 
     with right:
         st.subheader("Grafik")
-        if "__single_df" not in st.session_state:
+        if "__df" not in st.session_state:
             st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
         else:
-            df_tf = st.session_state["__single_df"]
-            ticker = st.session_state["__single_ticker"]
-            pack = st.session_state["__single_pack"]
-            price = float(st.session_state["__single_price"])
-            fig = plot_chart(df_tf, ticker, pack, price)
+            df = st.session_state["__df"]
+            ticker = st.session_state["__ticker"]
+            plan = st.session_state["__plan"]
+            last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
+            fig = plot_chart(df, ticker, plan, last_price_line)
             st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
-# TAB: PORTFOLIO (Eldeki)
+# TAB 2: PORTFOLIO
 # =========================================================
 with tab_portfolio:
-    st.subheader("Portföy Analizi (Eldeki Pozisyon Yönetimi)")
-    st.caption("Burada amaç yeni alım değil; **eldeki pozisyonlar** için HOLD / NO-ADD / REDUCE/EXIT kararını netleştirmek.")
+    st.subheader("🧳 Portföy Analiz")
+    st.caption("Portföy satırlarını gir: ticker, alış ort., stop ve TP1. Sonra analiz et → her hisse için strateji + risk tablosu.")
 
     top_left, top_right = st.columns([0.65, 0.35], vertical_alignment="top")
 
     with top_right:
-        st.markdown("### Dosya / Hızlı İşlemler")
-        if st.button("Portföyü Kaydet (portfolio.csv)", type="primary", use_container_width=True):
+        st.markdown("### Portföy Dosyası")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Portföyü Yükle (portfolio.csv)", use_container_width=True):
+                st.session_state.portfolio = load_portfolio_df()
+                st.rerun()
+        with col2:
+            st.download_button(
+                "portfolio.csv indir",
+                data=portfolio_csv_bytes() if portfolio_csv_bytes() else b"",
+                file_name="portfolio.csv",
+                mime="text/csv",
+                use_container_width=True,
+                disabled=(not bool(portfolio_csv_bytes())),
+            )
+
+        st.markdown("### Hızlı İşlemler")
+        if st.button("Portföyü Kaydet", type="primary", use_container_width=True):
             try:
                 save_portfolio_df(st.session_state.portfolio)
                 st.success("portfolio.csv kaydedildi.")
@@ -924,9 +1114,6 @@ with tab_portfolio:
             except Exception:
                 pass
             st.rerun()
-
-        st.markdown("### Not")
-        st.write("Portföy analiz **default Daily** çalışır. (API tasarrufu + 52W low için şart)")
 
     with top_left:
         st.markdown("### Portföy Girişi")
@@ -945,6 +1132,12 @@ with tab_portfolio:
         )
 
         st.markdown("### Analiz")
+        interval_label_pf = st.selectbox(
+            "Portföy analiz zaman dilimi",
+            list(INTERVAL_MAP.keys()),
+            index=list(INTERVAL_MAP.keys()).index("Günlük (1day)"),
+            key="pf_interval"
+        )
         analyze_pf = st.button("Portföyü Analiz Et", type="primary", use_container_width=True)
 
     if analyze_pf:
@@ -957,60 +1150,67 @@ with tab_portfolio:
             if dfp.empty:
                 st.warning("Geçerli ticker yok.")
             else:
+                interval = INTERVAL_MAP[interval_label_pf]
                 rows = []
-                with st.spinner("Portföy verileri çekiliyor..."):
+
+                with st.spinner("Portföy verileri çekiliyor ve analiz ediliyor..."):
                     for _, r in dfp.iterrows():
                         tkr = str(r.get("ticker", "")).upper().strip()
+                        if not tkr:
+                            continue
+
                         qty = safe_float(r.get("qty"))
                         avg_cost = safe_float(r.get("avg_cost"))
                         user_stop = safe_float(r.get("stop"))
                         user_tp1 = safe_float(r.get("tp1"))
 
                         try:
-                            # Daily only (API friendly + 52W required)
-                            payload = td_time_series(tkr, "1day", max(260, bars))
-                            df = parse_ohlcv(payload)
-                            df = add_indicators(df)
+                            payload = td_time_series(tkr, interval, bars)
+                            dfi = parse_ohlcv(payload)
+                            dfi["ema20"] = ema(dfi["close"], 20)
+                            dfi["ema50"] = ema(dfi["close"], 50)
+                            dfi["ema150"] = ema(dfi["close"], 150)
+                            dfi["ema200"] = ema(dfi["close"], 200)
+                            dfi["rsi14"] = rsi(dfi["close"], 14)
+                            dfi["atr14"] = atr(dfi, 14)
 
-                            candle_close = float(df.iloc[-1]["close"])
+                            # 52W low
+                            low52 = float("nan")
+                            if interval == "1day" and len(dfi) >= 252:
+                                low52 = float(dfi.tail(252)["low"].min())
+                            else:
+                                try:
+                                    low52, _ = td_52w_low(tkr)
+                                except Exception:
+                                    low52 = float("nan")
+
+                            plan = build_trade_plan(dfi, low_52w=low52)
+
+                            candle_close = float(dfi.iloc[-1]["close"])
                             price = candle_close
 
-                            quote = {}
-                            if use_quote:
+                            # optional quote (extra API call)
+                            if show_quote:
                                 try:
-                                    quote = td_quote(tkr)
-                                    if "price" in quote and safe_float(quote["price"]) > 0:
-                                        price = float(quote["price"])
-                                    elif "close" in quote and safe_float(quote["close"]) > 0:
-                                        price = float(quote["close"])
+                                    q = td_quote(tkr)
+                                    if "price" in q:
+                                        price = float(q["price"])
                                 except Exception:
-                                    quote = {}
+                                    pass
 
-                            pack = build_scores(df_tf=df, df_daily_for_52w=df, current_price=price)
+                            pnl_pct = pct(price, avg_cost) if np.isfinite(avg_cost) and avg_cost > 0 else np.nan
+                            dist_stop_pct = pct(price, user_stop) if np.isfinite(user_stop) and user_stop > 0 else np.nan
+                            dist_tp_pct = pct(user_tp1, price) if np.isfinite(user_tp1) and user_tp1 > 0 else np.nan
+                            rr_user = compute_rr(price, user_stop, user_tp1)
 
-                            pnl_pct = pct_change(price, avg_cost) if np.isfinite(avg_cost) and avg_cost > 0 else np.nan
-                            stop_dist_pct = pct_change(price, user_stop) if np.isfinite(user_stop) and user_stop > 0 else np.nan
-                            tp_dist_pct = pct_change(user_tp1, price) if np.isfinite(user_tp1) and user_tp1 > 0 else np.nan
-                            rr_user = rr_from_price(price, user_stop, user_tp1)
+                            action, note = holding_action_comment(plan, price, avg_cost, user_stop, user_tp1)
 
                             pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
                             risk_per_share = (price - user_stop) if (np.isfinite(user_stop) and np.isfinite(price)) else np.nan
                             risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
 
-                            # kısa not:
-                            if "TREND BOZULDU" in pack.status_tag:
-                                note = "Trend bozuk → ekleme yok; stop/riski azalt planı."
-                            elif "UZAMIŞ" in pack.status_tag:
-                                note = "Uzamış → ekleme yok; pullback bekle."
-                            elif "PULLBACK" in pack.status_tag:
-                                note = "Pullback → entry bandı yaklaşınca yeniden değerlendir."
-                            elif "KONSOLİDASYON" in pack.status_tag:
-                                note = "Sıkışma → kırılım/hacim onayı bekle."
-                            else:
-                                note = "İzle."
-
-                            if not pack.minervini_ok:
-                                note = (note + " | Minervini #5 FAIL → weak base (NO-ADD).").strip()
+                            low52_txt = f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else ""
+                            min_ok = "YES" if plan.above_52w_low_25pct else "NO"
 
                             rows.append({
                                 "Ticker": tkr,
@@ -1018,21 +1218,21 @@ with tab_portfolio:
                                 "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
                                 "P&L %": round(pnl_pct, 2) if np.isfinite(pnl_pct) else "",
                                 "Stop": round(user_stop, 2) if np.isfinite(user_stop) else "",
-                                "Stop Mesafe %": round(stop_dist_pct, 2) if np.isfinite(stop_dist_pct) else "",
+                                "Stop Mesafe %": round(dist_stop_pct, 2) if np.isfinite(dist_stop_pct) else "",
                                 "TP1": round(user_tp1, 2) if np.isfinite(user_tp1) else "",
-                                "TP1 Mesafe %": round(tp_dist_pct, 2) if np.isfinite(tp_dist_pct) else "",
+                                "TP1 Mesafe %": round(dist_tp_pct, 2) if np.isfinite(dist_tp_pct) else "",
                                 "R (TP1/Stop)": round(rr_user, 2) if np.isfinite(rr_user) else "",
-                                "Position Health": pack.position_health,
-                                "Add Timing": pack.add_timing,
-                                "Durum": pack.status_tag,
-                                "Aksiyon": pack.action,
-                                "Minervini #5": ("PASS" if pack.minervini_ok else "FAIL"),
-                                "52W Above %": round(pack.minervini_pct_above_low, 1) if np.isfinite(pack.minervini_pct_above_low) else "",
-                                "Entry Bandı": f"{pack.entry_low:.2f}–{pack.entry_high:.2f}",
-                                "Entry Mesafe %": f"{pack.dist_to_entry_pct:+.2f}",
+                                "52W Dip": low52_txt,
+                                "Minervini#5": min_ok,
+                                "Setup": plan.setup_score,
+                                "Timing": plan.timing_score,
+                                "Durum": plan.status_tag,
+                                "Aksiyon": action,
+                                "Entry Bandı": f"{plan.entry_low:.2f}–{plan.entry_high:.2f}",
+                                "Entry Mesafe %": f"{plan.dist_to_entry_pct:+.2f}",
                                 "Poz. Değeri": round(pos_value, 2) if np.isfinite(pos_value) else "",
                                 "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
-                                "Not": note,
+                                "Not": note
                             })
 
                         except Exception as e:
@@ -1046,17 +1246,17 @@ with tab_portfolio:
                                 "TP1": "",
                                 "TP1 Mesafe %": "",
                                 "R (TP1/Stop)": "",
-                                "Position Health": "",
-                                "Add Timing": "",
+                                "52W Dip": "",
+                                "Minervini#5": "",
+                                "Setup": "",
+                                "Timing": "",
                                 "Durum": "HATA",
-                                "Aksiyon": "",
-                                "Minervini #5": "",
-                                "52W Above %": "",
+                                "Aksiyon": "DİKKAT",
                                 "Entry Bandı": "",
                                 "Entry Mesafe %": "",
                                 "Poz. Değeri": "",
                                 "Risk $": "",
-                                "Not": f"Veri/analiz hatası: {e}",
+                                "Not": f"Veri/analiz hatası: {e}"
                             })
 
                 out = pd.DataFrame(rows)
@@ -1064,15 +1264,21 @@ with tab_portfolio:
                 st.markdown("### Sonuç Tablosu")
                 st.dataframe(out, use_container_width=True, hide_index=True)
 
-                # quick summary
+                # Quick summary buckets
                 st.markdown("### Hızlı Özet")
                 if not out.empty:
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("🟢 Alım Bandına Yakın", int((out["Durum"].astype(str).str.contains("ALIM BÖLGESİNDE")).sum()))
-                    c2.metric("🟡 Pullback", int((out["Durum"].astype(str).str.contains("PULLBACK")).sum()))
-                    c3.metric("⚫ Uzamış", int((out["Durum"].astype(str).str.contains("UZAMIŞ")).sum()))
-                    c4.metric("🔴 Trend Bozuk", int((out["Durum"].astype(str).str.contains("TREND BOZULDU")).sum()))
+                    a = out[out["Durum"].astype(str).str.startswith("🟢")]
+                    b = out[out["Durum"].astype(str).str.startswith("🟡")]
+                    c = out[out["Durum"].astype(str).str.startswith("⚫")]
+                    d = out[out["Durum"].astype(str).str.startswith("🔴")]
 
+                    colx, coly, colz, colw = st.columns(4)
+                    colx.metric("🟢 Alım Bölgesi", len(a))
+                    coly.metric("🟡 Pullback", len(b))
+                    colz.metric("⚫ Uzamış", len(c))
+                    colw.metric("🔴 Kırmızı", len(d))
+
+                # Download results
                 csv_bytes = out.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Portföy Analiz CSV indir",
@@ -1081,12 +1287,3 @@ with tab_portfolio:
                     mime="text/csv",
                     use_container_width=True,
                 )
-
-
-# =========================================================
-# Footer info
-# =========================================================
-st.caption(
-    "Not: PDF butonu çalışmıyorsa requirements.txt içine `reportlab` ekle. "
-    "Quote açıkken her hisse için +1 API çağrısı yapılır."
-)
