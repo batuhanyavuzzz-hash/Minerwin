@@ -1,10 +1,3 @@
-# app.py — Tek Hisse + Portföy Analiz (V4.4)
-# Değişiklikler:
-# 1) Minervini #5 (Fiyat >= 52W dip * 1.25) eklendi + hard filter
-# 2) Portföy teknik yorumları "eldeki pozisyon" diliyle: TUT / AZALT / KAR AL / STOPTA ÇIK
-# 3) Tek hisse skor/metrik alanında "Güncel Fiyat" görünür eklendi
-# 4) Grafiğe "Fiyat (Line)" eklendi (mumlardan ve EMA’lardan bağımsız; legend ile diğerleri kapanınca line kalır)
-
 import io
 import os
 import csv
@@ -27,8 +20,8 @@ from reportlab.lib.units import cm
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V4.4)", layout="wide")
-st.title("Tek Hisse Teknik Analiz — Twelve Data (V4.4 | Portföy Analiz + Minervini 52W)")
+st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V5.0)", layout="wide")
+st.title("Tek Hisse Teknik Analiz — Twelve Data (V5.0 | Portföy + Minervini + Dinamik Yönetim)")
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
 if not API_KEY:
@@ -52,7 +45,7 @@ if "daily_tests" not in st.session_state:
 if "portfolio" not in st.session_state:
     # default empty portfolio template
     st.session_state.portfolio = pd.DataFrame(
-        columns=["ticker", "qty", "avg_cost", "stop", "tp1"]
+        columns=["ticker", "qty", "avg_cost", "stop", "tp1", "tp2"]
     )
 
 
@@ -231,7 +224,7 @@ def load_portfolio_df() -> pd.DataFrame:
         return st.session_state.portfolio.copy()
     try:
         dfp = pd.read_csv(PORTFOLIO_FILE)
-        expected = ["ticker", "qty", "avg_cost", "stop", "tp1"]
+        expected = ["ticker", "qty", "avg_cost", "stop", "tp1", "tp2"]
         for c in expected:
             if c not in dfp.columns:
                 dfp[c] = np.nan
@@ -275,7 +268,9 @@ class TradePlan:
     entry_mid: float
     stop: float
     tp1: float
-    rr: float
+    tp2: float
+    rr1: float
+    rr2: float
 
     dist_to_entry_pct: float
     watch_level: float
@@ -349,6 +344,15 @@ def _status_tag(
     return "🟡 PULLBACK BEKLENİYOR"
 
 
+def _rr(entry: float, stop: float, tp: float) -> float:
+    if not (np.isfinite(entry) and np.isfinite(stop) and np.isfinite(tp)):
+        return float("nan")
+    risk = entry - stop
+    if risk <= 0:
+        return float("nan")
+    return (tp - entry) / risk
+
+
 def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePlan:
     last = df.iloc[-1]
     close = float(last["close"])
@@ -408,17 +412,23 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
     entry_high = float(max(ema20, ema50))
     entry_mid = (entry_low + entry_high) / 2.0
 
-    # Stop: EMA50 vs ATR
+    # Stop: EMA50 vs ATR (tightest)
     stop_ema = ema50 * 0.995
     stop_atr = entry_mid - 1.2 * atr14
     stop = float(max(stop_ema, stop_atr))
     if stop >= entry_mid:
         stop = float(entry_mid * 0.99)
 
-    # TP1: 2R
+    # Targets:
+    # TP1: 2R (kontrol/ilk realize)
     risk = entry_mid - stop
     tp1 = float(entry_mid + 2.0 * risk) if risk > 0 else float(entry_mid * 1.02)
-    rr = (tp1 - entry_mid) / risk if risk > 0 else float("nan")
+
+    # TP2: 3.5R (daha gerçekçi swing devamı) — yine “potansiyel” hedef
+    tp2 = float(entry_mid + 3.5 * risk) if risk > 0 else float(entry_mid * 1.05)
+
+    rr1 = _rr(entry_mid, stop, tp1)
+    rr2 = _rr(entry_mid, stop, tp2)
 
     # Split scores
     setup_raw = trend_pts + p_pts + m_pts + v_pts + (10 if above_25 else 0)  # max 95
@@ -467,17 +477,17 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
 
     if status_tag.startswith("🔴 52W"):
         scenario = (
-            "Senaryo: Minervini filtresi (52W dip +%25) geçilemedi. Bu tip hisseler genelde dipten yeni çıkan ve kırılgan olur. "
+            "Senaryo: Minervini filtresi (52W dip +%25) geçilemedi. Dipten yeni çıkan zayıf hisseler elenir. "
             "Önce 52W dibe göre net güçlenme (dipten +%25 üstü) ve trend metriklerinin toparlanması beklenmeli."
         )
     elif status_tag.startswith("🟢"):
         scenario = (
-            "Senaryo: Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp küçük gövdeli mumlar + "
-            "hacim düşüşü ile sıkışma görülürse, trend yönünde devam denemesi yapılabilir. Stop altına sarkarsa iptal."
+            "Senaryo: Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp sıkışma görülürse "
+            "trend yönünde devam denemesi yapılabilir. Stop altına sarkarsa disiplin gereği çıkış."
         )
     elif status_tag.startswith("🟡"):
         scenario = (
-            "Senaryo: Fiyat şu an giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
+            "Senaryo: Fiyat giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
             "konsolidasyon beklenir. Bu gerçekleşmeden yapılan alım kovalamaya girer."
         )
     elif status_tag.startswith("🔵"):
@@ -516,10 +526,13 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
         f"**Zamanlama:** **{timing_cmd}**  \n"
         f"**Giriş Bölgesi:** {entry_low:.2f} – {entry_high:.2f}  \n"
         f"**Giriş Bölgesine Mesafe:** {dist_entry_pct:+.2f}%  \n"
-        f"**Takip Seviyesi:** {watch_level:.2f} (altına yaklaşınca yeniden değerlendir)  \n"
-        f"**Stop:** {stop:.2f} (EMA50 vs ATR → sıkı olan)  \n"
-        f"**TP1:** {tp1:.2f} (2R)  \n"
-        f"**R/R:** 1 : {rr:.2f}" if np.isfinite(rr) else "**R/R:** —"
+        f"**Takip Seviyesi:** {watch_level:.2f}  \n"
+        f"**Stop:** {stop:.2f}  \n"
+        f"**TP1:** {tp1:.2f} (2R kontrol)  \n"
+        f"**TP2:** {tp2:.2f} (trend devam potansiyeli)  \n"
+        f"**R/R (TP1):** 1 : {rr1:.2f}   |   **R/R (TP2):** 1 : {rr2:.2f}"
+        if np.isfinite(rr1) and np.isfinite(rr2) else
+        "**R/R:** —"
     )
 
     debug = {
@@ -545,7 +558,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
         "entry_mid": entry_mid,
         "stop": stop,
         "tp1": tp1,
-        "rr": rr,
+        "tp2": tp2,
+        "rr1": rr1,
+        "rr2": rr2,
         "setup_score": int(setup_score),
         "timing_score": int(timing_score),
         "dist_to_entry_pct": dist_entry_pct,
@@ -577,7 +592,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
         entry_mid=float(entry_mid),
         stop=float(stop),
         tp1=float(tp1),
-        rr=float(rr),
+        tp2=float(tp2),
+        rr1=float(rr1) if np.isfinite(rr1) else float("nan"),
+        rr2=float(rr2) if np.isfinite(rr2) else float("nan"),
         dist_to_entry_pct=float(dist_entry_pct),
         watch_level=float(watch_level),
         low_52w=float(low_52w) if np.isfinite(low_52w) else float("nan"),
@@ -588,6 +605,282 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float = float("nan")) -> TradePl
         debug=debug,
         breakdown=breakdown,
     )
+
+
+# =========================================================
+# DYNAMIC TRADE MANAGEMENT (Stop + TP1/TP2 Update)
+# =========================================================
+def safe_float(x):
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return np.nan
+        return float(x)
+    except Exception:
+        return np.nan
+
+
+def pct(a: float, b: float) -> float:
+    if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
+        return np.nan
+    return (a - b) / b * 100
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, v)))
+
+
+def technical_strength_flags(plan: TradePlan, df: pd.DataFrame) -> Dict[str, bool]:
+    """
+    Teknik bazlı kararlar için basit bayraklar.
+    """
+    last = df.iloc[-1]
+    close = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    rsi14 = float(last["rsi14"])
+
+    dist_ema50_pct = ((close - ema50) / ema50) * 100 if ema50 else float("nan")
+    extended = bool(np.isfinite(dist_ema50_pct) and dist_ema50_pct > 10.0)  # daha sıkı
+    hot = bool(np.isfinite(rsi14) and rsi14 > 75.0)
+    strong = bool(plan.setup_score >= 65 and plan.timing_score >= 55 and not plan.status_tag.startswith("🔴"))
+
+    above_ema20 = bool(np.isfinite(close) and np.isfinite(ema20) and close >= ema20)
+    above_ema50 = bool(np.isfinite(close) and np.isfinite(ema50) and close >= ema50)
+
+    return {
+        "strong": strong,
+        "hot": hot,
+        "extended": extended,
+        "above_ema20": above_ema20,
+        "above_ema50": above_ema50,
+    }
+
+
+def propose_trailing_stop(
+    df: pd.DataFrame,
+    current_stop: float,
+    entry_price: float,
+    profit_pct: float,
+    flags: Dict[str, bool],
+) -> float:
+    """
+    Stop'u teknik temelli yukarı çekme önerisi.
+    - Profit >= ~%5 ise: stop'u "entry altı -> risk azalt" veya EMA20 altına yaklaştır.
+    - Trend güçlü ise EMA20 tabanlı daha agresif; değilse EMA50 tabanlı daha yumuşak.
+    """
+    last = df.iloc[-1]
+    close = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    atr14 = float(last["atr14"])
+
+    if not np.isfinite(current_stop):
+        current_stop = float("nan")
+
+    # Korumacı taban stoplar
+    stop_floor = current_stop if np.isfinite(current_stop) else -np.inf
+
+    # Profit eşiği: %5 üstü -> stop sıkılaştır
+    if not np.isfinite(profit_pct):
+        return float(stop_floor if np.isfinite(stop_floor) else current_stop)
+
+    if profit_pct < 5.0:
+        # erken dönem: sadece teknik bozulmadıkça dokunma (giriş planı geçerli)
+        return float(stop_floor)
+
+    # Risk-free / risk azalt mod:
+    # 1) entry'nin hafif altı (spread + stop hunt payı)
+    rf_stop = entry_price * 0.995 if np.isfinite(entry_price) else float("nan")
+
+    # 2) EMA20 tabanlı trailing (EMA20'nin biraz altı) — güçlü trendte
+    ema20_stop = ema20 * 0.995 if np.isfinite(ema20) else float("nan")
+
+    # 3) EMA50 tabanlı trailing — daha gevşek
+    ema50_stop = ema50 * 0.995 if np.isfinite(ema50) else float("nan")
+
+    # 4) ATR tabanlı (kırılmayı tolere etmek için)
+    atr_stop = close - 1.5 * atr14 if (np.isfinite(close) and np.isfinite(atr14)) else float("nan")
+
+    candidates = []
+
+    # Güçlü ise: EMA20 ve ATR stop'u daha öncelikli
+    if flags.get("strong", False) and flags.get("above_ema20", False):
+        for v in [rf_stop, ema20_stop, atr_stop]:
+            if np.isfinite(v):
+                candidates.append(v)
+    else:
+        for v in [rf_stop, ema50_stop, atr_stop]:
+            if np.isfinite(v):
+                candidates.append(v)
+
+    # Eğer aşırı ısınmış/uzamışsa: stop'u biraz daha yukarı çek (kârı kilitle)
+    if flags.get("hot", False) or flags.get("extended", False):
+        # close'un %3-4 altı
+        hot_stop = close * 0.965 if np.isfinite(close) else float("nan")
+        if np.isfinite(hot_stop):
+            candidates.append(hot_stop)
+
+    if not candidates:
+        return float(stop_floor)
+
+    proposed = float(max(stop_floor, max(candidates)))
+    # Stop mantıksız şekilde fiyatın üstüne çıkmasın (çok nadir)
+    if np.isfinite(close) and proposed >= close:
+        proposed = float(close * 0.99)
+
+    return float(proposed)
+
+
+def propose_targets_update(
+    current_tp1: float,
+    current_tp2: float,
+    price: float,
+    entry_price: float,
+    profit_pct: float,
+    flags: Dict[str, bool],
+) -> Tuple[float, float, str]:
+    """
+    TP1/TP2 dinamik güncelleme önerisi:
+    - TP1/TP2 girişte "potansiyel kâr noktaları"dır, ama trend güçlü ise yukarı taşınabilir.
+    - Profit >= %5 ve teknik güçlü: TP1'i TP1-TP2 bandında yukarı iter; TP2'yi de bir miktar yukarı iter.
+    - Aşırı ısınmış/uzamışsa: TP yukarı itmek yerine "kâr al / stop kilitle" yaklaşımı (TP'leri sabit bırakır).
+    """
+    note = []
+
+    tp1 = current_tp1
+    tp2 = current_tp2
+
+    if not (np.isfinite(tp1) and np.isfinite(tp2) and tp2 > tp1):
+        return (tp1, tp2, "")
+
+    if not np.isfinite(profit_pct) or profit_pct < 5.0:
+        return (tp1, tp2, "")
+
+    # Eğer uzamış/ısınmış: hedefleri kovalamak yerine kârı koru (TP sabit)
+    if flags.get("hot", False) or flags.get("extended", False):
+        note.append("Isınma/uzama var → TP'leri agresif yukarı taşımak yerine stop'u kârı kilitleyecek şekilde sıkılaştır.")
+        return (tp1, tp2, " ".join(note))
+
+    # Trend güçlü ise: TP1'i TP1-TP2 arasına çek (kontrol noktası ileri taşınır)
+    if flags.get("strong", False):
+        # profit %5 -> bandın %30'u, %10 -> %50, %15 -> %70
+        # 5..15 arası lineer
+        w = _clamp((profit_pct - 5.0) / 10.0, 0.0, 1.0)  # 0..1
+        alpha = 0.30 + 0.40 * w  # 0.30..0.70
+        new_tp1 = tp1 + alpha * (tp2 - tp1)
+
+        # TP2'yi de bir miktar yukarı it: mevcut tp2 ile entry+%20 arasında min olarak, ama aşırıya kaçmadan
+        if np.isfinite(entry_price) and entry_price > 0:
+            tp2_cap = entry_price * 1.35  # güvenli tavan (çok agresif olmasın)
+            # tp2 push: profit artınca %3..%8 ek
+            push = 0.03 + 0.05 * w
+            new_tp2 = tp2 * (1.0 + push)
+            new_tp2 = min(new_tp2, tp2_cap)
+        else:
+            new_tp2 = tp2
+
+        # Güncelleme ancak mantıklıysa
+        if new_tp1 > tp1 and new_tp1 < new_tp2:
+            note.append(f"Trend güçlü → TP1 ileri taşındı (TP1-TP2 bandında).")
+            tp1 = float(new_tp1)
+
+        if new_tp2 > tp2 and new_tp2 > tp1:
+            note.append("Trend güçlü → TP2 de yukarı revize edildi.")
+            tp2 = float(new_tp2)
+
+    return (tp1, tp2, " ".join(note))
+
+
+def manage_open_trade(
+    df: pd.DataFrame,
+    plan: TradePlan,
+    price: float,
+    entry_price: float,
+    user_stop: float,
+    user_tp1: float,
+    user_tp2: float,
+) -> Dict[str, Any]:
+    """
+    Açık pozisyon yönetimi önerisi:
+    - Stop yukarı çekme
+    - TP1/TP2 revizyonu (trend güçlü ise)
+    - Aksiyon: TUT / KISMİ KAR / KAR AL / AZALT / ÇIKIŞ
+    """
+    out: Dict[str, Any] = {}
+    if not np.isfinite(price):
+        return {"action": "DİKKAT", "note": "Fiyat alınamadı."}
+
+    # Trend bozulması / stop altı
+    if np.isfinite(user_stop) and price < user_stop:
+        return {"action": "STOPTA ÇIK", "note": "Fiyat stop altına indi → disiplin gereği çıkış."}
+
+    flags = technical_strength_flags(plan, df)
+
+    # Profit %
+    profit_pct = pct(price, entry_price) if (np.isfinite(entry_price) and entry_price > 0) else float("nan")
+
+    # Stop önerisi
+    proposed_stop = propose_trailing_stop(
+        df=df,
+        current_stop=user_stop,
+        entry_price=entry_price,
+        profit_pct=profit_pct,
+        flags=flags,
+    )
+
+    # TP önerisi
+    proposed_tp1, proposed_tp2, tp_note = propose_targets_update(
+        current_tp1=user_tp1,
+        current_tp2=user_tp2,
+        price=price,
+        entry_price=entry_price,
+        profit_pct=profit_pct,
+        flags=flags,
+    )
+
+    # Aksiyon mantığı
+    # 1) Trend bozuksa azalt/çık
+    if plan.status_tag.startswith("🔴"):
+        action = "AZALT / ÇIKIŞA HAZIR"
+        note = "Trend filtresi zayıf → ekleme yok; risk azaltmayı düşün."
+    else:
+        action = "TUT"
+        note = "Trend korunuyor → pozisyon taşınabilir."
+
+    # 2) TP1/TP2 yakınları: teknik sinyale göre kar al / kısmi kar
+    # TP1: ilk kontrol/realize
+    if np.isfinite(user_tp1) and price >= user_tp1:
+        if flags.get("hot", False) or flags.get("extended", False) or plan.timing_score < 45:
+            action = "KISMİ KAR AL"
+            note = "TP1 görüldü + ısınma/uzama/zayıflama işareti → kısmi kâr mantıklı."
+        else:
+            action = "TUT / TRAIL"
+            note = "TP1 görüldü ama teknik güçlü → stop'u yukarı çekerek taşınabilir."
+
+    # TP2: daha kuvvetli realize alanı
+    if np.isfinite(user_tp2) and price >= user_tp2:
+        if flags.get("strong", False) and not (flags.get("hot", False) or flags.get("extended", False)):
+            action = "TUT (RUNNER)"
+            note = "TP2 görüldü, trend hâlâ güçlü → runner bırakıp trailing ile taşıyabilirsin."
+        else:
+            action = "KAR AL"
+            note = "TP2 görüldü + risk/ısınma → realize etmek mantıklı."
+
+    # 3) Profit >=5% ve stop önerisi yükseldiyse: risk-free mode notu
+    rf_note = ""
+    if np.isfinite(profit_pct) and profit_pct >= 5.0 and np.isfinite(proposed_stop) and np.isfinite(user_stop) and proposed_stop > user_stop:
+        rf_note = "Kâr %5+ → stop yukarı çekilerek risk azaltma (risk-free mod) uygulanabilir."
+
+    out.update({
+        "profit_pct": float(profit_pct) if np.isfinite(profit_pct) else np.nan,
+        "flags": flags,
+        "proposed_stop": float(proposed_stop) if np.isfinite(proposed_stop) else np.nan,
+        "proposed_tp1": float(proposed_tp1) if np.isfinite(proposed_tp1) else np.nan,
+        "proposed_tp2": float(proposed_tp2) if np.isfinite(proposed_tp2) else np.nan,
+        "action": action,
+        "note": " ".join([note, rf_note, tp_note]).strip(),
+    })
+    return out
 
 
 # =========================================================
@@ -631,7 +924,7 @@ def build_pdf_bytes(
             c.showPage()
             y = h - 2.0 * cm
 
-    draw_line("Tek Hisse Teknik Analiz Raporu (V4.4)", font="Helvetica-Bold", size=16, space=18)
+    draw_line("Tek Hisse Teknik Analiz Raporu (V5.0)", font="Helvetica-Bold", size=16, space=18)
     draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
     draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
     draw_line("", size=10, space=10)
@@ -648,11 +941,11 @@ def build_pdf_bytes(
     else:
         draw_line(f"52W Dip: {low52_txt}", size=11)
 
-    draw_line(f"Giriş: {plan.entry_low:.2f} – {plan.entry_high:.2f}", size=11)
-    draw_line(f"Giriş Mesafesi: {plan.dist_to_entry_pct:+.2f}%    Takip: {plan.watch_level:.2f}", size=11)
-    draw_line(f"Stop: {plan.stop:.2f}    TP1: {plan.tp1:.2f}", size=11)
-    rr_text = f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—"
-    draw_line(f"Risk/Reward: {rr_text}", size=11)
+    draw_line(f"Giriş: {plan.entry_low:.2f} – {plan.entry_high:.2f} (mid={plan.entry_mid:.2f})", size=11)
+    draw_line(f"Stop: {plan.stop:.2f}    TP1: {plan.tp1:.2f}    TP2: {plan.tp2:.2f}", size=11)
+    rr1 = f"1:{plan.rr1:.2f}" if np.isfinite(plan.rr1) else "—"
+    rr2 = f"1:{plan.rr2:.2f}" if np.isfinite(plan.rr2) else "—"
+    draw_line(f"R/R TP1={rr1}   |   R/R TP2={rr2}", size=11)
     draw_line("", size=10, space=10)
 
     if quote and isinstance(quote, dict):
@@ -681,7 +974,8 @@ def build_pdf_bytes(
 # =========================================================
 # PLOTTING
 # =========================================================
-def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: float):
+def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: float,
+               user_stop: Optional[float] = None, user_tp1: Optional[float] = None, user_tp2: Optional[float] = None):
     fig = go.Figure()
 
     # ✅ Fiyat (Line) — legend'da diğerleri kapatılsa bile bu trace kalabilir
@@ -720,8 +1014,14 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
         annotation_position="top left",
     )
 
-    fig.add_hline(y=plan.stop, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
-    fig.add_hline(y=plan.tp1, line_dash="dash", annotation_text="TP1", annotation_position="top left")
+    # User levels prefered (if provided), else plan levels
+    stop_level = float(user_stop) if (user_stop is not None and np.isfinite(user_stop)) else float(plan.stop)
+    tp1_level = float(user_tp1) if (user_tp1 is not None and np.isfinite(user_tp1)) else float(plan.tp1)
+    tp2_level = float(user_tp2) if (user_tp2 is not None and np.isfinite(user_tp2)) else float(plan.tp2)
+
+    fig.add_hline(y=stop_level, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
+    fig.add_hline(y=tp1_level, line_dash="dash", annotation_text="TP1", annotation_position="top left")
+    fig.add_hline(y=tp2_level, line_dash="dash", annotation_text="TP2", annotation_position="top left")
     fig.add_hline(y=float(last_price_line), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
 
     fig.update_layout(
@@ -733,77 +1033,6 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price_line: 
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return fig
-
-
-# =========================================================
-# PORTFOLIO ANALYSIS HELPERS
-# =========================================================
-def safe_float(x):
-    try:
-        if x is None or (isinstance(x, float) and np.isnan(x)):
-            return np.nan
-        return float(x)
-    except Exception:
-        return np.nan
-
-
-def compute_rr(price: float, stop: float, tp: float) -> float:
-    if not (np.isfinite(price) and np.isfinite(stop) and np.isfinite(tp)):
-        return np.nan
-    risk = price - stop
-    reward = tp - price
-    if risk <= 0:
-        return np.nan
-    return reward / risk
-
-
-def pct(a: float, b: float) -> float:
-    if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
-        return np.nan
-    return (a - b) / b * 100
-
-
-def holding_action_comment(
-    plan: TradePlan,
-    price: float,
-    avg_cost: float,
-    user_stop: float,
-    user_tp1: float,
-) -> Tuple[str, str]:
-    """
-    Portföy yorum dili: "eldeki pozisyon" aksiyonu.
-    Çıktı: (Aksiyon etiketi, kısa gerekçe)
-    """
-    if not np.isfinite(price):
-        return ("DİKKAT", "Fiyat alınamadı → veri hatası olabilir.")
-
-    if np.isfinite(user_stop) and user_stop > 0 and price < user_stop:
-        return ("STOPTA ÇIK", "Fiyat stop altına sarktı → disipline göre pozisyon kapat.")
-
-    if np.isfinite(plan.low_52w) and (not plan.above_52w_low_25pct):
-        if plan.status_tag.startswith("🔴"):
-            return ("SAT / AZALT", "52W dip gücü zayıf + trend filtresi bozuk → riski azaltmayı düşün.")
-        return ("TUT (EKLEME YOK)", "52W dip filtresi zayıf → ekleme yapma; trend bozulursa azalt.")
-
-    if plan.status_tag.startswith("🔴"):
-        return ("SAT / AZALT", "Trend filtresi bozuk → ekleme yok; riski azaltmayı değerlendir.")
-
-    if np.isfinite(user_tp1) and user_tp1 > 0 and price >= user_tp1:
-        return ("KAR AL", "TP1 seviyesine ulaşıldı → planın varsa kısmi kar al.")
-
-    if np.isfinite(user_stop) and user_stop > 0:
-        dist_stop = (price - user_stop) / price
-        if dist_stop < 0.02:
-            return ("DİKKAT", "Stop çok yakın → oynaklık stoplatabilir; pozisyon boyunu gözden geçir.")
-
-    if plan.status_tag.startswith("⚫"):
-        return ("TUT (EKLEME YOK)", "Uzamış → kovalamak yok; pullback sonrası yeniden güç ararsın.")
-    if plan.status_tag.startswith("🔵"):
-        return ("TUT / İZLE", "Konsolidasyon → yön kırılımı gelene kadar sabır.")
-    if plan.status_tag.startswith("🟡"):
-        return ("TUT / İZLE", "Pullback fazı → stopu koru; güçlenme yoksa ekleme yapma.")
-
-    return ("TUT", "Şartlar iyi görünüyor → plana sadık kal (ekleme kararı ayrı).")
 
 
 # =========================================================
@@ -862,20 +1091,17 @@ with st.sidebar:
 # =========================================================
 tab_single, tab_portfolio = st.tabs(["📈 Tek Hisse Analiz", "🧳 Portföy Analiz"])
 
+
 # =========================================================
 # TAB 1: SINGLE STOCK
 # =========================================================
 with tab_single:
-    left, right = st.columns([0.36, 0.64], vertical_alignment="top")
+    left, right = st.columns([0.38, 0.62], vertical_alignment="top")
 
     with left:
         st.subheader("Hisse")
         ticker = st.text_input("Ticker", placeholder="Örn: NVDA, TSLA, PLTR").strip().upper()
-        interval_label = st.selectbox(
-            "Zaman çözünürlüğü",
-            list(INTERVAL_MAP.keys()),
-            index=list(INTERVAL_MAP.keys()).index(default_interval_label),
-        )
+        interval_label = st.selectbox("Zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=list(INTERVAL_MAP.keys()).index(default_interval_label))
         run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
 
         if run:
@@ -910,8 +1136,8 @@ with tab_single:
 
                 plan = build_trade_plan(df, low_52w=low52)
 
-                q: Dict[str, Any] = {}
-                quote_price: Optional[float] = None
+                q = {}
+                quote_price = None
                 if show_quote:
                     try:
                         q = td_quote(ticker)
@@ -937,6 +1163,12 @@ with tab_single:
                 st.session_state["__interval_label"] = interval_label
                 st.session_state["__bars"] = bars
 
+                # Default trade inputs (user-editable)
+                st.session_state["__entry_price"] = float(plan.entry_mid)  # varsayılan
+                st.session_state["__user_stop"] = float(plan.stop)
+                st.session_state["__user_tp1"] = float(plan.tp1)
+                st.session_state["__user_tp2"] = float(plan.tp2)
+
                 # Memory record (session + csv)
                 record = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -949,9 +1181,10 @@ with tab_single:
                     "status_tag": plan.status_tag,
                     "entry_low": round(float(plan.entry_low), 4),
                     "entry_high": round(float(plan.entry_high), 4),
-                    "stop": round(float(plan.stop), 4),
-                    "tp1": round(float(plan.tp1), 4),
-                    "rr": round(float(plan.rr), 4) if np.isfinite(plan.rr) else "",
+                    "entry_mid": round(float(plan.entry_mid), 4),
+                    "stop_plan": round(float(plan.stop), 4),
+                    "tp1_plan": round(float(plan.tp1), 4),
+                    "tp2_plan": round(float(plan.tp2), 4),
                     "dist_to_entry_pct": round(float(plan.dist_to_entry_pct), 4),
                     "watch_level": round(float(plan.watch_level), 4),
                     "low_52w": round(float(plan.low_52w), 4) if np.isfinite(plan.low_52w) else "",
@@ -963,11 +1196,9 @@ with tab_single:
                 except Exception as e:
                     st.warning(f"history.csv yazılamadı: {e}")
 
-                # UI outputs
                 st.divider()
                 st.subheader("📊 Strateji Özeti")
 
-                # ✅ İSTEK #1: Güncel fiyat skorların yanında görünür
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Güncel Fiyat", f"{float(last_price_line):.2f}")
                 c2.metric("Toplam Skor", f"{plan.total_score} / 100")
@@ -976,36 +1207,42 @@ with tab_single:
 
                 st.metric("Durum", plan.status_tag)
 
-                st.subheader("📌 İşlem Planı")
+                st.subheader("📌 Plan (Giriş / Stop / TP1 / TP2)")
                 table = pd.DataFrame(
                     {
                         "Parametre": [
                             "Minervini #5 (52W Dip +%25)",
                             "52W Dip",
                             "Dipten Uzaklık",
-                            "Giriş Bölgesi",
+                            "Giriş Bölgesi (EMA20–EMA50)",
+                            "Giriş Mid",
                             "Giriş Mesafesi",
                             "Takip Seviyesi",
-                            "Stop",
-                            "TP1",
-                            "Risk/Reward",
+                            "Stop (plan)",
+                            "TP1 (plan)",
+                            "TP2 (plan)",
+                            "R/R (TP1)",
+                            "R/R (TP2)",
                         ],
                         "Değer": [
                             "GEÇTİ ✅" if plan.above_52w_low_25pct else "KALDI ❌",
                             f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—",
                             f"%{plan.dist_from_52w_low_pct:.2f}" if np.isfinite(plan.dist_from_52w_low_pct) else "—",
                             f"{plan.entry_low:.2f} – {plan.entry_high:.2f}",
+                            f"{plan.entry_mid:.2f}",
                             f"{plan.dist_to_entry_pct:+.2f}%",
                             f"{plan.watch_level:.2f}",
                             f"{plan.stop:.2f}",
                             f"{plan.tp1:.2f}",
-                            f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—",
+                            f"{plan.tp2:.2f}",
+                            f"1:{plan.rr1:.2f}" if np.isfinite(plan.rr1) else "—",
+                            f"1:{plan.rr2:.2f}" if np.isfinite(plan.rr2) else "—",
                         ],
                     }
                 )
                 st.table(table)
 
-                st.subheader("🧠 Skor Dağılımı (Legacy + Minervini)")
+                st.subheader("🧠 Skor Dağılımı")
                 b = plan.breakdown
                 bdf = pd.DataFrame(
                     {
@@ -1025,14 +1262,6 @@ with tab_single:
                             b.extension_vs_ema50,
                             b.minervini_52w,
                         ],
-                        "Not": [
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "Fail ise hard filter uygular (dipten yeni çıkan zayıfları eler).",
-                        ],
                     }
                 )
                 st.table(bdf)
@@ -1048,6 +1277,56 @@ with tab_single:
                     keys = ["symbol", "name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]
                     compact = {k: q[k] for k in keys if k in q}
                     st.write(compact)
+
+                st.subheader("🎯 İşlem Yönetimi (Dinamik Stop + TP Revizyonu)")
+                # User can input their real entry/stop/tps
+                colx1, colx2 = st.columns(2)
+                with colx1:
+                    entry_price = st.number_input("Entry (Gerçek Alış / Planlanan Entry)", value=float(st.session_state.get("__entry_price", plan.entry_mid)), step=0.01, format="%.2f")
+                    user_stop = st.number_input("Stop Loss (Senin)", value=float(st.session_state.get("__user_stop", plan.stop)), step=0.01, format="%.2f")
+                with colx2:
+                    user_tp1 = st.number_input("TP1 (Senin)", value=float(st.session_state.get("__user_tp1", plan.tp1)), step=0.01, format="%.2f")
+                    user_tp2 = st.number_input("TP2 (Senin)", value=float(st.session_state.get("__user_tp2", plan.tp2)), step=0.01, format="%.2f")
+
+                st.session_state["__entry_price"] = float(entry_price)
+                st.session_state["__user_stop"] = float(user_stop)
+                st.session_state["__user_tp1"] = float(user_tp1)
+                st.session_state["__user_tp2"] = float(user_tp2)
+
+                mgmt = manage_open_trade(
+                    df=df,
+                    plan=plan,
+                    price=float(last_price_line),
+                    entry_price=float(entry_price),
+                    user_stop=float(user_stop),
+                    user_tp1=float(user_tp1),
+                    user_tp2=float(user_tp2),
+                )
+
+                # Display management recommendation
+                m1, m2, m3, m4 = st.columns(4)
+                prof = mgmt.get("profit_pct", np.nan)
+                m1.metric("Kâr/Zarar % (Entry → Fiyat)", f"{prof:.2f}%" if np.isfinite(prof) else "—")
+                m2.metric("Önerilen Stop", f"{mgmt.get('proposed_stop', np.nan):.2f}" if np.isfinite(mgmt.get("proposed_stop", np.nan)) else "—")
+                m3.metric("Önerilen TP1", f"{mgmt.get('proposed_tp1', np.nan):.2f}" if np.isfinite(mgmt.get("proposed_tp1", np.nan)) else "—")
+                m4.metric("Önerilen TP2", f"{mgmt.get('proposed_tp2', np.nan):.2f}" if np.isfinite(mgmt.get("proposed_tp2", np.nan)) else "—")
+
+                st.info(f"**Aksiyon:** {mgmt.get('action','—')}  \n{mgmt.get('note','')}")
+
+                # Quick buttons to apply proposal into inputs (session only)
+                apply_cols = st.columns(3)
+                with apply_cols[0]:
+                    if st.button("Önerilen Stop'u Uygula", use_container_width=True, disabled=not np.isfinite(mgmt.get("proposed_stop", np.nan))):
+                        st.session_state["__user_stop"] = float(mgmt["proposed_stop"])
+                        st.rerun()
+                with apply_cols[1]:
+                    if st.button("Önerilen TP1'i Uygula", use_container_width=True, disabled=not np.isfinite(mgmt.get("proposed_tp1", np.nan))):
+                        st.session_state["__user_tp1"] = float(mgmt["proposed_tp1"])
+                        st.rerun()
+                with apply_cols[2]:
+                    if st.button("Önerilen TP2'yi Uygula", use_container_width=True, disabled=not np.isfinite(mgmt.get("proposed_tp2", np.nan))):
+                        st.session_state["__user_tp2"] = float(mgmt["proposed_tp2"])
+                        st.rerun()
 
                 st.subheader("📄 Rapor")
                 pdf_bytes = build_pdf_bytes(
@@ -1077,7 +1356,12 @@ with tab_single:
             ticker = st.session_state["__ticker"]
             plan = st.session_state["__plan"]
             last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
-            fig = plot_chart(df, ticker, plan, last_price_line)
+
+            user_stop = st.session_state.get("__user_stop", None)
+            user_tp1 = st.session_state.get("__user_tp1", None)
+            user_tp2 = st.session_state.get("__user_tp2", None)
+
+            fig = plot_chart(df, ticker, plan, last_price_line, user_stop=user_stop, user_tp1=user_tp1, user_tp2=user_tp2)
             st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1086,7 +1370,7 @@ with tab_single:
 # =========================================================
 with tab_portfolio:
     st.subheader("🧳 Portföy Analiz")
-    st.caption("Portföy satırlarını gir: ticker, alış ort., stop ve TP1. Sonra analiz et → her hisse için strateji + risk tablosu.")
+    st.caption("Portföy satırlarını gir: ticker, alış ort., stop, TP1, TP2. Sonra analiz et → her hisse için teknik + risk + dinamik yönetim önerisi.")
 
     top_left, top_right = st.columns([0.65, 0.35], vertical_alignment="top")
 
@@ -1116,7 +1400,7 @@ with tab_portfolio:
                 st.error(f"Kaydedilemedi: {e}")
 
         if st.button("Portföyü Temizle", use_container_width=True):
-            st.session_state.portfolio = pd.DataFrame(columns=["ticker", "qty", "avg_cost", "stop", "tp1"])
+            st.session_state.portfolio = pd.DataFrame(columns=["ticker", "qty", "avg_cost", "stop", "tp1", "tp2"])
             try:
                 save_portfolio_df(st.session_state.portfolio)
             except Exception:
@@ -1132,10 +1416,11 @@ with tab_portfolio:
             hide_index=True,
             column_config={
                 "ticker": st.column_config.TextColumn("Ticker", required=True),
-                "qty": st.column_config.NumberColumn("Adet (opsiyonel)", min_value=0.0, step=1.0),
+                "qty": st.column_config.NumberColumn("Adet", min_value=0.0, step=1.0),
                 "avg_cost": st.column_config.NumberColumn("Alış Ort.", min_value=0.0, step=0.01, format="%.2f"),
                 "stop": st.column_config.NumberColumn("Stop", min_value=0.0, step=0.01, format="%.2f"),
                 "tp1": st.column_config.NumberColumn("TP1", min_value=0.0, step=0.01, format="%.2f"),
+                "tp2": st.column_config.NumberColumn("TP2", min_value=0.0, step=0.01, format="%.2f"),
             },
         )
 
@@ -1171,6 +1456,7 @@ with tab_portfolio:
                         avg_cost = safe_float(r.get("avg_cost"))
                         user_stop = safe_float(r.get("stop"))
                         user_tp1 = safe_float(r.get("tp1"))
+                        user_tp2 = safe_float(r.get("tp2"))
 
                         try:
                             payload = td_time_series(tkr, interval, bars)
@@ -1208,60 +1494,75 @@ with tab_portfolio:
 
                             pnl_pct = pct(price, avg_cost) if np.isfinite(avg_cost) and avg_cost > 0 else np.nan
                             dist_stop_pct = pct(price, user_stop) if np.isfinite(user_stop) and user_stop > 0 else np.nan
-                            dist_tp_pct = pct(user_tp1, price) if np.isfinite(user_tp1) and user_tp1 > 0 else np.nan
-                            rr_user = compute_rr(price, user_stop, user_tp1)
-
-                            action, note = holding_action_comment(plan, price, avg_cost, user_stop, user_tp1)
+                            dist_tp1_pct = pct(user_tp1, price) if np.isfinite(user_tp1) and user_tp1 > 0 else np.nan
+                            dist_tp2_pct = pct(user_tp2, price) if np.isfinite(user_tp2) and user_tp2 > 0 else np.nan
 
                             pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
                             risk_per_share = (price - user_stop) if (np.isfinite(user_stop) and np.isfinite(price)) else np.nan
                             risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
 
-                            low52_txt = f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else ""
-                            min_ok = "YES" if plan.above_52w_low_25pct else "NO"
+                            # If user didn't fill stop/tps, fall back to plan levels
+                            eff_stop = user_stop if np.isfinite(user_stop) and user_stop > 0 else plan.stop
+                            eff_tp1 = user_tp1 if np.isfinite(user_tp1) and user_tp1 > 0 else plan.tp1
+                            eff_tp2 = user_tp2 if np.isfinite(user_tp2) and user_tp2 > 0 else plan.tp2
+                            eff_entry = avg_cost if (np.isfinite(avg_cost) and avg_cost > 0) else plan.entry_mid
+
+                            mgmt = manage_open_trade(
+                                df=dfi,
+                                plan=plan,
+                                price=float(price),
+                                entry_price=float(eff_entry),
+                                user_stop=float(eff_stop),
+                                user_tp1=float(eff_tp1),
+                                user_tp2=float(eff_tp2),
+                            )
 
                             rows.append({
                                 "Ticker": tkr,
                                 "Fiyat": round(price, 2),
-                                "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
+                                "Entry": round(eff_entry, 2) if np.isfinite(eff_entry) else "",
                                 "P&L %": round(pnl_pct, 2) if np.isfinite(pnl_pct) else "",
-                                "Stop": round(user_stop, 2) if np.isfinite(user_stop) else "",
+                                "Stop": round(eff_stop, 2) if np.isfinite(eff_stop) else "",
                                 "Stop Mesafe %": round(dist_stop_pct, 2) if np.isfinite(dist_stop_pct) else "",
-                                "TP1": round(user_tp1, 2) if np.isfinite(user_tp1) else "",
-                                "TP1 Mesafe %": round(dist_tp_pct, 2) if np.isfinite(dist_tp_pct) else "",
-                                "R (TP1/Stop)": round(rr_user, 2) if np.isfinite(rr_user) else "",
-                                "52W Dip": low52_txt,
-                                "Minervini#5": min_ok,
+                                "TP1": round(eff_tp1, 2) if np.isfinite(eff_tp1) else "",
+                                "TP1 Mesafe %": round(dist_tp1_pct, 2) if np.isfinite(dist_tp1_pct) else "",
+                                "TP2": round(eff_tp2, 2) if np.isfinite(eff_tp2) else "",
+                                "TP2 Mesafe %": round(dist_tp2_pct, 2) if np.isfinite(dist_tp2_pct) else "",
+                                "52W Dip": round(plan.low_52w, 2) if np.isfinite(plan.low_52w) else "",
+                                "Minervini#5": "YES" if plan.above_52w_low_25pct else "NO",
                                 "Setup": plan.setup_score,
                                 "Timing": plan.timing_score,
                                 "Durum": plan.status_tag,
-                                "Aksiyon": action,
-                                "Entry Bandı": f"{plan.entry_low:.2f}–{plan.entry_high:.2f}",
-                                "Entry Mesafe %": f"{plan.dist_to_entry_pct:+.2f}",
+                                "Öneri Aksiyon": mgmt.get("action", ""),
+                                "Öneri Stop": round(mgmt.get("proposed_stop", np.nan), 2) if np.isfinite(mgmt.get("proposed_stop", np.nan)) else "",
+                                "Öneri TP1": round(mgmt.get("proposed_tp1", np.nan), 2) if np.isfinite(mgmt.get("proposed_tp1", np.nan)) else "",
+                                "Öneri TP2": round(mgmt.get("proposed_tp2", np.nan), 2) if np.isfinite(mgmt.get("proposed_tp2", np.nan)) else "",
                                 "Poz. Değeri": round(pos_value, 2) if np.isfinite(pos_value) else "",
                                 "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
-                                "Not": note
+                                "Not": mgmt.get("note", ""),
                             })
 
                         except Exception as e:
                             rows.append({
                                 "Ticker": tkr,
                                 "Fiyat": "",
-                                "Alış Ort.": "",
+                                "Entry": "",
                                 "P&L %": "",
                                 "Stop": "",
                                 "Stop Mesafe %": "",
                                 "TP1": "",
                                 "TP1 Mesafe %": "",
-                                "R (TP1/Stop)": "",
+                                "TP2": "",
+                                "TP2 Mesafe %": "",
                                 "52W Dip": "",
                                 "Minervini#5": "",
                                 "Setup": "",
                                 "Timing": "",
                                 "Durum": "HATA",
-                                "Aksiyon": "DİKKAT",
-                                "Entry Bandı": "",
-                                "Entry Mesafe %": "",
+                                "Öneri Aksiyon": "DİKKAT",
+                                "Öneri Stop": "",
+                                "Öneri TP1": "",
+                                "Öneri TP2": "",
                                 "Poz. Değeri": "",
                                 "Risk $": "",
                                 "Not": f"Veri/analiz hatası: {e}"
@@ -1285,6 +1586,7 @@ with tab_portfolio:
                     colz.metric("⚫ Uzamış", len(c))
                     colw.metric("🔴 Kırmızı", len(d))
 
+                # Download results
                 csv_bytes = out.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Portföy Analiz CSV indir",
