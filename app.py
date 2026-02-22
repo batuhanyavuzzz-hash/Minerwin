@@ -1,9 +1,15 @@
+import io
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 from dataclasses import dataclass
+
+# PDF (ReportLab)
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
 
 
 # =========================================================
@@ -101,8 +107,6 @@ def td_quote(symbol: str) -> dict:
 
 
 def parse_ohlcv(payload: dict) -> pd.DataFrame:
-    # Twelve Data error format:
-    # {"code": 400, "message": "...", "status": "error"}
     if isinstance(payload, dict) and payload.get("status") == "error":
         raise RuntimeError(f"TwelveData: {payload.get('message')} (code={payload.get('code')})")
 
@@ -180,49 +184,36 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
     dist_ema50_pct = ((close - ema50) / ema50) * 100 if ema50 else float("nan")
     dist_ema150_pct = ((close - ema150) / ema150) * 100 if ema150 else float("nan")
 
-    # --- Trend signals
     trend_stack_ok = (ema50 > ema150 > ema200)
     ema200_slope = slope(df["ema200"], lookback=20)
     long_trend_ok = (ema200_slope > 0)
 
-    # --- Momentum signals
     momentum_ok = (rsi14 >= 55)
     momentum_border = (50 <= rsi14 < 55)
 
-    # --- Volatility signals
     vol_ok = (2.0 <= atr_pct <= 6.0)
     vol_border = (1.5 <= atr_pct < 2.0) or (6.0 < atr_pct <= 8.0)
     vol_fail = (atr_pct > 8.0)
 
-    # --- Price position signals
     price_above_ema150 = close >= ema150
-    price_near_ema150 = close >= ema150 * 0.98  # -2% band
+    price_near_ema150 = close >= ema150 * 0.98
 
-    # --- Extension
     extended = dist_ema50_pct > 8.0
 
-    # =====================================================
-    # SCORE (0-100)
-    # =====================================================
     score = 0
 
-    # Trend (30)
     trend_pts = 30 if (trend_stack_ok and long_trend_ok) else (20 if trend_stack_ok else (10 if long_trend_ok else 0))
     score += trend_pts
 
-    # Price vs EMA150 (20)
     p_pts = 20 if price_above_ema150 else (10 if price_near_ema150 else 0)
     score += p_pts
 
-    # Momentum (20)
     m_pts = 20 if momentum_ok else (10 if momentum_border else 0)
     score += m_pts
 
-    # Volatility (15)
     v_pts = 15 if vol_ok else (7 if vol_border else 0)
     score += v_pts
 
-    # Extension (15) — penalize if extended
     e_pts = 15 if not extended else 0
     score += e_pts
 
@@ -236,15 +227,12 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         extension_vs_ema50=e_pts,
     )
 
-    # =====================================================
-    # ENTRY ZONE LOGIC
-    # =====================================================
-    # Base entry = EMA20–EMA50 band (pullback entry)
+    # ENTRY ZONE
     entry_low = float(min(ema20, ema50))
     entry_high = float(max(ema20, ema50))
     entry_mid = (entry_low + entry_high) / 2.0
 
-    # Breakout heuristic (optional): last 20-bar high + volume confirmation
+    # Breakout heuristic
     lookback = 20
     breakout = False
     if len(df) >= lookback + 5:
@@ -252,35 +240,24 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
         vol_sma20 = float(df["volume"].iloc[-lookback:].mean())
         breakout = (close >= hh20 * 0.995) and (float(last["volume"]) >= 1.5 * vol_sma20)
 
-    # If breakout and not extended, shift entry zone around breakout level
-    # (but keep it simple & conservative)
     if breakout and not extended:
         entry_low = close * 0.985
         entry_high = close * 1.015
         entry_mid = (entry_low + entry_high) / 2.0
 
-    # =====================================================
-    # STOP LOGIC (C)
-    # Stop = max(EMA50-based, ATR-based)  -> "tighter" (higher stop price)
-    # =====================================================
-    stop_ema = ema50 * 0.995  # slight buffer under EMA50
+    # STOP LOGIC (C): tighter = higher stop
+    stop_ema = ema50 * 0.995
     stop_atr = entry_mid - 1.2 * atr14
     stop = float(max(stop_ema, stop_atr))
 
-    # Safety: stop must be below entry_mid
     if stop >= entry_mid:
         stop = float(entry_mid * 0.99)
 
-    # =====================================================
     # TP1 (2R)
-    # =====================================================
     risk = entry_mid - stop
     tp1 = float(entry_mid + 2.0 * risk) if risk > 0 else float(entry_mid * 1.02)
     rr = (tp1 - entry_mid) / risk if risk > 0 else float("nan")
 
-    # =====================================================
-    # NARRATIVE
-    # =====================================================
     trend_text = (
         "güçlü" if (trend_stack_ok and (price_above_ema150 or price_near_ema150))
         else ("zayıf" if close < ema200 else "karışık")
@@ -295,9 +272,11 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
 
     entry_zone_text = f"{entry_low:.2f} – {entry_high:.2f}"
     narrative = (
-        f"**Skor:** {score}/100 → **{label}**  \n"
-        f"**Trend:** {trend_text} (EMA50={ema50:.2f}, EMA150={ema150:.2f}, EMA200={ema200:.2f}, EMA200 eğim={ema200_slope:.4f})  \n"
-        f"**Fiyat Konumu:** Close={close:.2f} (EMA150'e uzaklık %{dist_ema150_pct:.2f})  \n"
+        f"**Skor:** {score}/100 → **{label}**  \n\n"
+        f"**Güncel (Candle) Fiyat:** {close:.2f}  \n"
+        f"EMA20: {ema20:.2f} | EMA50: {ema50:.2f} | EMA150: {ema150:.2f} | EMA200: {ema200:.2f}  \n\n"
+        f"**Trend:** {trend_text} (EMA200 eğim={ema200_slope:.4f})  \n"
+        f"**Fiyat Konumu:** EMA150 uzaklık %{dist_ema150_pct:.2f}  \n"
         f"**Momentum (RSI14):** {rsi14:.1f} → {mom_text}  \n"
         f"**Volatilite (ATR%):** %{atr_pct:.2f} → {vol_text}  \n"
         f"**Uzama (EMA50 mesafe):** %{dist_ema50_pct:.2f} → {'uzamış' if extended else 'normal'}  \n\n"
@@ -357,6 +336,88 @@ def build_trade_plan(df: pd.DataFrame) -> TradePlan:
 
 
 # =========================================================
+# PDF EXPORT
+# =========================================================
+def _wrap_lines(text: str, max_chars: int = 92):
+    """Simple char-based wrap for ReportLab (keeps it dependency-free)."""
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            out.append("")
+            continue
+        while len(line) > max_chars:
+            out.append(line[:max_chars])
+            line = line[max_chars:]
+        out.append(line)
+    return out
+
+
+def build_pdf_bytes(
+    ticker: str,
+    interval_label: str,
+    bars: int,
+    plan: TradePlan,
+    quote: dict | None,
+):
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+
+    x = 2.0 * cm
+    y = h - 2.0 * cm
+    lh = 14  # line height
+
+    def draw_line(txt, font="Helvetica", size=11, space=lh):
+        nonlocal y
+        c.setFont(font, size)
+        c.drawString(x, y, txt)
+        y -= space
+        if y < 2.0 * cm:
+            c.showPage()
+            y = h - 2.0 * cm
+
+    # Header
+    draw_line(f"Tek Hisse Teknik Analiz Raporu", font="Helvetica-Bold", size=16, space=18)
+    draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", font="Helvetica", size=11)
+    draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
+    draw_line("", size=10, space=10)
+
+    # Summary
+    draw_line("Özet", font="Helvetica-Bold", size=13, space=16)
+    draw_line(f"Skor: {plan.score}/100    Durum: {plan.label}", size=11)
+    draw_line(f"Giriş Bölgesi: {plan.entry_low:.2f} – {plan.entry_high:.2f}", size=11)
+    draw_line(f"Stop: {plan.stop:.2f}", size=11)
+    draw_line(f"TP1: {plan.tp1:.2f}", size=11)
+    rr_text = f"1 : {plan.rr:.2f}" if np.isfinite(plan.rr) else "—"
+    draw_line(f"Risk/Reward: {rr_text}", size=11)
+    draw_line("", size=10, space=10)
+
+    # Quote
+    if quote and isinstance(quote, dict):
+        draw_line("Quote (Anlık Özet)", font="Helvetica-Bold", size=13, space=16)
+        for k in ["name", "exchange", "currency", "close", "price", "change", "percent_change", "previous_close"]:
+            if k in quote:
+                draw_line(f"{k}: {quote[k]}", size=10, space=12)
+        draw_line("", size=10, space=10)
+
+    # Narrative (markdown-like -> plain)
+    draw_line("Otomatik Teknik Yorum", font="Helvetica-Bold", size=13, space=16)
+    plain = (
+        plan.narrative
+        .replace("**", "")
+        .replace("  \n", "\n")
+    )
+    for ln in _wrap_lines(plain, max_chars=95):
+        draw_line(ln, size=10, space=12)
+
+    c.save()
+    pdf = buf.getvalue()
+    buf.close()
+    return pdf
+
+
+# =========================================================
 # PLOTTING
 # =========================================================
 def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price: float | None):
@@ -378,7 +439,6 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price: float
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema150"], name="EMA150", mode="lines"))
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema200"], name="EMA200", mode="lines"))
 
-    # Entry band shading
     fig.add_hrect(
         y0=plan.entry_low,
         y1=plan.entry_high,
@@ -388,11 +448,9 @@ def plot_chart(df: pd.DataFrame, symbol: str, plan: TradePlan, last_price: float
         annotation_position="top left",
     )
 
-    # Stop & TP1 lines
     fig.add_hline(y=plan.stop, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
     fig.add_hline(y=plan.tp1, line_dash="dash", annotation_text="TP1", annotation_position="top left")
 
-    # Last price line (if available)
     if last_price is not None and np.isfinite(last_price):
         fig.add_hline(y=float(last_price), line_dash="dot", annotation_text="LAST", annotation_position="top right")
 
@@ -415,7 +473,7 @@ with st.sidebar:
     interval_label = st.selectbox("Zaman çözünürlüğü", list(INTERVAL_MAP.keys()), index=0)
     bars = st.slider("Bar sayısı", min_value=120, max_value=800, value=300, step=10)
     show_quote = st.checkbox("Quote paneli (anlık özet)", value=True)
-    st.caption("Free planda 8 istek/dk. Cache (60 sn) aktif, aynı hisseyi tekrar çekince kredi harcamaz.")
+    st.caption("Free planda 8 istek/dk. Cache (60 sn) aktif.")
 
 left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
@@ -437,7 +495,6 @@ with left:
                     st.error(f"Veri alınamadı: {e}")
                     st.stop()
 
-            # indicators
             df["ema20"] = ema(df["close"], 20)
             df["ema50"] = ema(df["close"], 50)
             df["ema150"] = ema(df["close"], 150)
@@ -447,14 +504,11 @@ with left:
 
             plan = build_trade_plan(df)
 
-            # Quote (optional)
             q = {}
             last_price = None
             if show_quote:
                 try:
                     q = td_quote(ticker)
-                    # TwelveData quote returns different field sets depending on asset;
-                    # best-effort extraction:
                     for key in ["close", "price"]:
                         if key in q:
                             try:
@@ -465,20 +519,19 @@ with left:
                 except Exception:
                     q = {}
 
-            # Save to session for right panel
             st.session_state["__df"] = df
             st.session_state["__ticker"] = ticker
             st.session_state["__plan"] = plan
             st.session_state["__quote"] = q
             st.session_state["__last_price"] = last_price
+            st.session_state["__interval_label"] = interval_label
+            st.session_state["__bars"] = bars
 
-            # Top summary
             st.divider()
             st.subheader("📊 Strateji Özeti")
             st.metric("Skor", f"{plan.score} / 100")
             st.metric("Durum", plan.label)
 
-            # Trade plan table
             st.subheader("📌 İşlem Planı")
             table = pd.DataFrame(
                 {
@@ -493,7 +546,6 @@ with left:
             )
             st.table(table)
 
-            # Score breakdown
             st.subheader("🧠 Skor Dağılımı")
             b = plan.breakdown
             bdf = pd.DataFrame(
@@ -505,16 +557,31 @@ with left:
             )
             st.table(bdf)
 
-            # Narrative
             st.subheader("📝 Otomatik Teknik Yorum")
             st.markdown(plan.narrative)
 
             if show_quote and q:
                 st.subheader("⚡ Quote (Anlık Özet)")
-                # show only a compact subset if available
                 keys = ["symbol", "name", "exchange", "currency", "close", "price", "change", "percent_change", "previous_close"]
                 compact = {k: q[k] for k in keys if k in q}
                 st.write(compact)
+
+            # ✅ PDF BUTTON
+            st.subheader("📄 Rapor")
+            pdf_bytes = build_pdf_bytes(
+                ticker=ticker,
+                interval_label=interval_label,
+                bars=bars,
+                plan=plan,
+                quote=(q if show_quote else None),
+            )
+            st.download_button(
+                label="Raporu PDF'e Çevir (İndir)",
+                data=pdf_bytes,
+                file_name=f"{ticker}_{INTERVAL_MAP[interval_label]}_rapor.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
             with st.expander("Detay (debug)"):
                 st.json(plan.debug)
