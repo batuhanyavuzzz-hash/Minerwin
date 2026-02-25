@@ -72,7 +72,6 @@ st.markdown("""
 
 st.markdown(f"""
 <div class="header">
-    {"<img class='logo' src='data:image/png;base64," + logo_b64 + "'>" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
 <div class="sub-title">Minervini-Based Technical Trading Engine</div>
