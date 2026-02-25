@@ -19,6 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
@@ -32,8 +33,52 @@ from reportlab.lib.units import cm
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Tek Hisse + Portföy Analiz (V5.1)", layout="wide")
-st.title("Tek Hisse Teknik Analiz — Twelve Data (V5.1 | Minervini + TP1/TP2 + Stop (Noise+Invalidation))")
+st.set_page_config(page_title="MinerWin", layout="wide", initial_sidebar_state="expanded")
+# =========================================================
+# MINERWIN UI (Branding + Professional Header)
+# =========================================================
+def _load_logo_b64(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return ""
+
+logo_b64 = _load_logo_b64("minerwin_logo.png")
+
+st.markdown("""
+<style>
+.block-container { padding-top: 1.2rem; }
+
+.header {
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-bottom:6px;
+}
+.header-title { font-size:32px; font-weight:800; line-height:1; }
+.sub-title { font-size:13px; color:#8b949e; margin-left:58px; margin-top:-6px; }
+.logo { height:42px; }
+
+.card{
+  background:#161B22;
+  border:1px solid #22262E;
+  border-radius:14px;
+  padding:16px 18px;
+  margin-bottom:14px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="header">
+    {"<img class='logo' src='data:image/png;base64," + logo_b64 + "'>" if logo_b64 else ""}
+    <div class="header-title">MinerWin</div>
+</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine</div>
+""", unsafe_allow_html=True)
+
+st.divider()
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
 if not API_KEY:
@@ -1287,6 +1332,8 @@ with tab_single:
                     st.warning(f"history.csv yazılamadı: {e}")
 
                 st.divider()
+                st.markdown('<div class="card">', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
                 st.subheader("📊 Strateji Özeti (Görünür)")
                 colm1, colm2, colm3 = st.columns(3)
                 with colm1:
@@ -1300,7 +1347,7 @@ with tab_single:
                     st.metric("TP1 / TP2", f"{plan.tp1:.2f} / {plan.tp2:.2f}")
 
                 st.caption(f"Minervini #5: 52W dip {plan.low_52w:.2f} → {'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'}")
-
+                st.markdown('<div class="card">', unsafe_allow_html=True)
                 st.subheader("📌 İşlem Planı")
                 table = pd.DataFrame(
                     {
@@ -1317,6 +1364,7 @@ with tab_single:
                     }
                 )
                 st.table(table)
+                st.markdown('</div>', unsafe_allow_html=True)
 
                 st.subheader("🧠 Skor Dağılımı (Legacy)")
                 b = plan.breakdown
@@ -1433,6 +1481,7 @@ with tab_single:
                     st.json(plan.debug)
 
     with right:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Grafik")
         if "__df" not in st.session_state:
             st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
@@ -1443,6 +1492,7 @@ with tab_single:
             last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
             fig = plot_chart(df, ticker, plan, last_price_line, show_candles, show_emas, show_line)
             st.plotly_chart(fig, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
 
 # =========================================================
