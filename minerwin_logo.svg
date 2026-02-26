@@ -1,0 +1,30 @@
+<svg width="520" height="140" viewBox="0 0 520 140" xmlns="http://www.w3.org/2000/svg">
+  <rect width="520" height="140" fill="none"/>
+
+  <!-- Icon -->
+  <g transform="translate(20,30)">
+    <path d="M0 60 L30 30 L55 55 L85 15"
+          fill="none"
+          stroke="#58A6FF"
+          stroke-width="6"
+          stroke-linecap="round"
+          stroke-linejoin="round"/>
+    <circle cx="85" cy="15" r="4" fill="#58A6FF"/>
+  </g>
+
+  <!-- Text -->
+  <text x="130" y="75"
+        font-family="Inter, Segoe UI, Arial, sans-serif"
+        font-size="48"
+        font-weight="700"
+        fill="#E6EDF3">
+    MinerWin
+  </text>
+
+  <text x="132" y="105"
+        font-family="Inter, Segoe UI, Arial, sans-serif"
+        font-size="16"
+        fill="#8B949E">
+    Minervini-Based Trading Engine
+  </text>
+</svg>
