@@ -48,7 +48,7 @@ logo_b64 = _load_logo_b64("minerwin_logo.png")
 
 st.markdown("""
 <style>
-.block-container { padding-top: 1.2rem; }
+.block-container { padding-top: 3.2rem; }
 
 .header {
     display:flex;
