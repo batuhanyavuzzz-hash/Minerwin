@@ -1085,6 +1085,25 @@ def plot_chart(
 # =========================================================
 # PORTFOLIO HELPERS
 # =========================================================
+def rolling_52w_high(df):
+    if df is None or df.empty:
+        return np.nan
+    n = min(len(df), 260)
+    return float(df.iloc[-n:]["high"].max())
+
+
+def blue_sky_active(price, high_52w):
+    if not np.isfinite(price) or not np.isfinite(high_52w):
+        return False
+    return price >= high_52w * 0.98
+
+
+def trailing_status(price, ema20, ema50):
+    if price >= ema20 and price >= ema50:
+        return "İz süren yapı korunuyor"
+    if price < ema20 and price >= ema50:
+        return "Kısa vadeli yapı zayıflıyor"
+    return "İz süren yapı bozuluyor"
 def compute_rr(price: float, stop: float, tp: float) -> float:
     if not (np.isfinite(price) and np.isfinite(stop) and np.isfinite(tp)):
         return np.nan
@@ -1602,6 +1621,15 @@ with tab_portfolio:
                             pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
                             risk_per_share = (price - user_stop) if (np.isfinite(user_stop) and np.isfinite(price)) else np.nan
                             risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
+                            
+                            high_52w = rolling_52w_high(dfi)
+blue = blue_sky_active(price, high_52w)
+
+ema20_now = float(dfi.iloc[-1]["ema20"])
+ema50_now = float(dfi.iloc[-1]["ema50"])
+trail_text = trailing_status(price, ema20_now, ema50_now)
+
+in_profit = np.isfinite(avg_cost) and price > avg_cost
 
                             rows.append({
                                 "Ticker": tkr,
@@ -1627,6 +1655,9 @@ with tab_portfolio:
                                 "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
                                 "Aksiyon": action,
                                 "Not": comment
+                                "52W High": round(high_52w, 2) if np.isfinite(high_52w) else "",
+"Blue Sky": "🔵" if (blue and in_profit) else "",
+"İz Süren Yapı": trail_text if (blue and in_profit) else "",
                             })
 
                         except Exception as e:
