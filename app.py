@@ -1623,13 +1623,12 @@ with tab_portfolio:
                             risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
                             
                             high_52w = rolling_52w_high(dfi)
-blue = blue_sky_active(price, high_52w)
-
-ema20_now = float(dfi.iloc[-1]["ema20"])
-ema50_now = float(dfi.iloc[-1]["ema50"])
-trail_text = trailing_status(price, ema20_now, ema50_now)
-
-in_profit = np.isfinite(avg_cost) and price > avg_cost
+                            blue = blue_sky_active(price, high_52w)
+                            ema20_now = float(dfi.iloc[-1]["ema20"])
+                            ema50_now = float(dfi.iloc[-1]["ema50"])
+                            trail_text = trailing_status(price, ema20_now, ema50_now)
+                            
+                            in_profit = np.isfinite(avg_cost) and price > avg_cost
 
                             rows.append({
                                 "Ticker": tkr,
