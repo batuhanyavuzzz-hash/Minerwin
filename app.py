@@ -37,7 +37,6 @@ st.set_page_config(page_title="MinerWin", layout="wide", initial_sidebar_state="
 # =========================================================
 # MINERWIN UI (Branding + Professional Header)
 # =========================================================
-st.image("minerwin_logo.png", width=200)
 def _load_logo_b64(path: str) -> str:
     try:
         with open(path, "rb") as f:
@@ -47,9 +46,36 @@ def _load_logo_b64(path: str) -> str:
 
 logo_b64 = _load_logo_b64("minerwin_logo.png")
 
-st.title("MinerWin")
-st.caption("Minervini-Based Technical Trading Engine")
-st.divider()
+st.markdown("""
+<style>
+.block-container { padding-top: 3.2rem; }
+
+.header {
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-bottom:6px;
+}
+.header-title { font-size:32px; font-weight:800; line-height:1; }
+.sub-title { font-size:13px; color:#8b949e; margin-left:58px; margin-top:-6px; }
+.logo { height:42px; }
+
+.card{
+  background:#161B22;
+  border:1px solid #22262E;
+  border-radius:14px;
+  padding:16px 18px;
+  margin-bottom:14px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="header">
+    <div class="header-title">MinerWin</div>
+</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine</div>
+""", unsafe_allow_html=True)
 
 st.divider()
 
@@ -1085,6 +1111,51 @@ def plot_chart(
 # =========================================================
 # PORTFOLIO HELPERS
 # =========================================================
+def rolling_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> tuple[float, float]:
+    """
+    52W High/Low approximation:
+    - For daily data: last 260 bars.
+    - For intraday: we still approximate using last 260 bars of that interval (less meaningful),
+      but we will ONLY use Blue Sky logic in portfolio when interval is daily OR when we have enough bars.
+    """
+    if df is None or df.empty:
+        return (np.nan, np.nan)
+    n = min(len(df), int(bars_1day))
+    window = df.iloc[-n:]
+    hi = float(window["high"].max()) if "high" in window.columns else np.nan
+    lo = float(window["low"].min()) if "low" in window.columns else np.nan
+    return hi, lo
+
+
+def is_blue_sky(price: float, high_52w: float, threshold: float = 0.98) -> bool:
+    """
+    Blue Sky = price is within 2% of 52W High or above.
+    threshold=0.98 means price >= 0.98 * high_52w
+    """
+    if not (np.isfinite(price) and np.isfinite(high_52w) and high_52w > 0):
+        return False
+    return price >= (threshold * high_52w)
+
+
+def trailing_structure_status(price: float, ema20: float, ema50: float) -> tuple[str, str]:
+    """
+    Returns (headline, detail_text)
+    - No commands, just state.
+    """
+    if not (np.isfinite(price) and np.isfinite(ema20) and np.isfinite(ema50)):
+        return ("—", "İz süren yapı için veri eksik.")
+
+    above20 = price >= ema20
+    above50 = price >= ema50
+
+    if above20 and above50:
+        return ("İz süren yapı korunuyor.", f"EMA20: ÜZERİNDE | EMA50: ÜZERİNDE")
+    if (not above20) and above50:
+        return ("Kısa vadeli iz süren yapı zayıflıyor.", f"EMA20: ALTINDA | EMA50: ÜZERİNDE")
+    # below EMA50
+    return ("İz süren yapı bozulma sinyali veriyor.", f"EMA20: ALTINDA | EMA50: ALTINDA")
+
+
 def compute_rr(price: float, stop: float, tp: float) -> float:
     if not (np.isfinite(price) and np.isfinite(stop) and np.isfinite(tp)):
         return np.nan
@@ -1590,6 +1661,17 @@ with tab_portfolio:
                                 except Exception:
                                     pass
 
+                            # --- Blue Sky + trailing structure (portfolio only) ---
+                            high_52w_roll, low_52w_roll = rolling_52w_levels(dfi, bars_1day=260)
+                            blue = is_blue_sky(price, high_52w_roll, threshold=0.98)
+
+                            ema20_now = float(dfi.iloc[-1]["ema20"])
+                            ema50_now = float(dfi.iloc[-1]["ema50"])
+                            trail_head, trail_detail = trailing_structure_status(price, ema20_now, ema50_now)
+
+                            in_profit = np.isfinite(avg_cost) and avg_cost > 0 and np.isfinite(price) and (price > avg_cost)
+                            show_blue_box = bool(in_profit and blue)
+
                             pnl_pct = pct(price, avg_cost) if np.isfinite(avg_cost) and avg_cost > 0 else np.nan
                             dist_stop_pct = pct(price, user_stop) if np.isfinite(user_stop) and user_stop > 0 else np.nan
                             dist_tp1_pct = pct(user_tp1, price) if np.isfinite(user_tp1) and user_tp1 > 0 else np.nan
@@ -1626,7 +1708,10 @@ with tab_portfolio:
                                 "Poz. Değeri": round(pos_value, 2) if np.isfinite(pos_value) else "",
                                 "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
                                 "Aksiyon": action,
-                                "Not": comment
+                                "Not": comment,
+                                "52W High": round(high_52w_roll, 2) if np.isfinite(high_52w_roll) else "",
+                                "Blue Sky": "🔵" if show_blue_box else "",
+                                "İz Süren Yapı": trail_head if show_blue_box else "",
                             })
 
                         except Exception as e:
@@ -1653,13 +1738,34 @@ with tab_portfolio:
                                 "Poz. Değeri": "",
                                 "Risk $": "",
                                 "Aksiyon": "HATA",
-                                "Not": f"Veri/analiz hatası: {e}"
+                                "Not": f"Veri/analiz hatası: {e}",
+                                "52W High": "",
+                                "Blue Sky": "",
+                                "İz Süren Yapı": "",
                             })
 
                 out = pd.DataFrame(rows)
 
                 st.markdown("### Sonuç Tablosu")
                 st.dataframe(out, use_container_width=True, hide_index=True)
+
+                # --- Blue Sky informational box ---
+                st.markdown("### 🔵 Blue Sky Evresi (Bilgilendirme)")
+                st.caption("Sadece kârda olan ve 52W zirve bölgesindeki pozisyonlar için görünür.")
+
+                if not out.empty:
+                    blue_rows = out[out["Blue Sky"].astype(str).str.contains("🔵", na=False)].copy()
+                    if blue_rows.empty:
+                        st.info("Şu an Blue Sky koşulunda pozisyon yok.")
+                    else:
+                        for _, rr in blue_rows.iterrows():
+                            st.markdown(f"**{rr['Ticker']}**")
+                            st.write("• Fiyat, 52 haftalık zirve bölgesinde işlem görüyor.")
+                            st.write("• Geçmiş direnç seviyeleri bulunmuyor.")
+                            st.write("• Bu evrede hedef seviyeler yerine trend yapısı izlenir.")
+                            if str(rr.get("İz Süren Yapı", "")).strip():
+                                st.write(f"📐 İz Süren Yapı: {rr['İz Süren Yapı']}")
+                            st.divider()
 
                 st.markdown("### Hızlı Özet")
                 if not out.empty:
