@@ -37,6 +37,7 @@ st.set_page_config(page_title="MinerWin", layout="wide", initial_sidebar_state="
 # =========================================================
 # MINERWIN UI (Branding + Professional Header)
 # =========================================================
+st.image("minerwin_logo.png", width=200)
 def _load_logo_b64(path: str) -> str:
     try:
         with open(path, "rb") as f:
