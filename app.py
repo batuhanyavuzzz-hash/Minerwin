@@ -14,15 +14,16 @@
 import io
 import os
 import csv
+import base64
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import base64
+
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 # PDF (ReportLab)
 from reportlab.lib.pagesizes import A4
@@ -34,19 +35,25 @@ from reportlab.lib.units import cm
 # APP CONFIG
 # =========================================================
 st.set_page_config(page_title="MinerWin", layout="wide", initial_sidebar_state="expanded")
+
 # =========================================================
 # MINERWIN UI (Branding + Professional Header)
 # =========================================================
 def _load_logo_b64(path: str) -> str:
     try:
+        if not os.path.isfile(path):
+            return ""
         with open(path, "rb") as f:
             return base64.b64encode(f.read()).decode()
     except Exception:
         return ""
 
+
+# NOTE: Ensure minerwin_logo.png exists in the app working directory (repo root) on Streamlit Cloud.
 logo_b64 = _load_logo_b64("minerwin_logo.png")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 .block-container { padding-top: 3.2rem; }
 
@@ -68,15 +75,20 @@ st.markdown("""
   margin-bottom:14px;
 }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-st.markdown(f"""
+st.markdown(
+    f"""
 <div class="header">
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
 <div class="sub-title">Minervini-Based Technical Trading Engine</div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 st.divider()
 
@@ -104,7 +116,6 @@ st.caption(
     "piyasa kapalıyken quote son kapanışı döndürebilir."
 )
 
-
 # =========================================================
 # SESSION STATE INIT
 # =========================================================
@@ -116,7 +127,6 @@ if "portfolio" not in st.session_state:
 
 if "trade_mgmt" not in st.session_state:
     st.session_state.trade_mgmt = {}  # dict[ticker] = {"entry":..., "stop":..., "tp1":..., "tp2":...}
-
 
 # =========================================================
 # BASIC HELPERS
@@ -358,10 +368,10 @@ def _recent_pivot_low(df: pd.DataFrame, lookback: int = 20) -> float:
 def _noise_factor_from_atr_pct(atr_pct: float) -> float:
     """
     ATR% (yüzde) → noise_factor
-    Sakin: <2%     => 1.25
-    Normal: 2-4%   => 1.55
-    Agresif: 4-6%  => 1.85
-    Çok agresif: >6% => 2.15
+    Sakin: <2%        => 1.25
+    Normal: 2-4%      => 1.55
+    Agresif: 4-6%     => 1.85
+    Çok agresif: >6%  => 2.15
     """
     if not np.isfinite(atr_pct):
         return 1.55
@@ -381,59 +391,55 @@ def compute_stop_invalidation_plus_noise(
     atr_pct: float,
     pivot_low: float,
     max_risk_pct: float = 7.0,
-) -> Tuple[float, Dict[str, Any]]:
+) -> Tuple[float, float, float, Dict[str, Any]]:
     """
-    Stop = max( stop_invalidation_base, stop_noise_floor ) + risk cap
+    Returns:
+      (stop_active, stop_structural, stop_noise, debug)
 
-    Not:
-    - stop_invalidation_base: pivot_low altı (varsa) yoksa EMA50 altı.
-    - stop_noise_floor: entry - ATR * noise_factor
-    - Final stop: daha sıkı olan (yukarıda olan) yerine daha geniş stop için değil,
-      “çok dar” stopu engellemek amacıyla ALT sınır olarak noise kullanılır.
-
-    Bu yüzden:
-      stop_candidate = min(stop_invalidation_base, stop_noise_floor)  # daha aşağı (daha geniş) olan
-      ama max risk cap ile stop yukarı çekilebilir.
+    stop_structural: invalidation base (pivot/EMA)
+    stop_noise:      ATR-based noise stop
+    stop_active:     operational stop after applying room logic + risk cap
     """
-    dbg = {}
     if not (np.isfinite(entry) and np.isfinite(ema50) and np.isfinite(atr14)) or entry <= 0:
-        return float(entry * 0.93), {"reason": "NaN entry/ema50/atr14"}
+        stop_fallback = float(entry * 0.93)
+        return stop_fallback, float("nan"), float("nan"), {"reason": "NaN entry/ema50/atr14"}
 
-    # Invalidation base
+    # --- Structural invalidation base ---
     inv_from_ema = float(ema50 * 0.995)  # EMA50 altına biraz tolerans
     inv_from_pivot = float(pivot_low * 0.995) if (np.isfinite(pivot_low) and pivot_low > 0) else float("nan")
+
     if np.isfinite(inv_from_pivot):
-        stop_invalidation = min(inv_from_ema, inv_from_pivot)
+        stop_structural = float(min(inv_from_ema, inv_from_pivot))
         inv_src = "pivot_or_ema"
     else:
-        stop_invalidation = inv_from_ema
+        stop_structural = float(inv_from_ema)
         inv_src = "ema50"
 
-    # Noise floor
+    # --- Noise stop (ATR room) ---
     nf = _noise_factor_from_atr_pct(atr_pct)
     stop_noise = float(entry - nf * atr14)
 
-    # Candidate: give room (lower of the two)
-    stop_candidate = float(min(stop_invalidation, stop_noise))
+    # --- Operational room logic ---
+    # Volatiliteyi taşımak için daha geniş stop seçiyoruz:
+    stop_candidate = float(min(stop_structural, stop_noise))
 
-    # Cap maximum risk
+    # --- Cap maximum risk ---
     cap_stop = float(entry * (1.0 - max_risk_pct / 100.0))
     if stop_candidate < cap_stop:
-        # risk too large -> raise stop to cap
-        stop_final = cap_stop
+        stop_active = cap_stop
         capped = True
     else:
-        stop_final = stop_candidate
+        stop_active = stop_candidate
         capped = False
 
     # Safety: never >= entry
-    if stop_final >= entry:
-        stop_final = float(entry * 0.99)
+    if stop_active >= entry:
+        stop_active = float(entry * 0.99)
 
     dbg = {
         "inv_src": inv_src,
         "pivot_low": pivot_low,
-        "stop_invalidation": stop_invalidation,
+        "stop_structural": stop_structural,
         "noise_factor": nf,
         "stop_noise": stop_noise,
         "stop_candidate": stop_candidate,
@@ -441,7 +447,7 @@ def compute_stop_invalidation_plus_noise(
         "capped": capped,
         "max_risk_pct": max_risk_pct,
     }
-    return float(stop_final), dbg
+    return float(stop_active), float(stop_structural), float(stop_noise), dbg
 
 
 # =========================================================
@@ -765,9 +771,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     setup_score = int(round(100 * setup_raw / 85)) if setup_raw > 0 else 0
 
     dist_entry_pct = _dist_to_entry_pct(close, entry_low, entry_high)
-    prox_pts = _proximity_points(dist_entry_pct)       # 0..60
-    ext_pts = _extension_points(extended)              # 0..40
-    timing_score = int(ext_pts + prox_pts)             # 0..100
+    prox_pts = _proximity_points(dist_entry_pct)  # 0..60
+    ext_pts = _extension_points(extended)         # 0..40
+    timing_score = int(ext_pts + prox_pts)        # 0..100
 
     in_entry = (entry_low <= close <= entry_high)
     consolidation = _detect_consolidation(atr_pct, rsi14)
@@ -786,7 +792,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
     # STOP (Invalidation + Noise)
     pivot_low = _recent_pivot_low(df, lookback=20)
-    stop, stop_dbg = compute_stop_invalidation_plus_noise(
+    stop, stop_structural, stop_noise, stop_dbg = compute_stop_invalidation_plus_noise(
         entry=entry_mid,
         ema50=ema50,
         atr14=atr14,
@@ -867,8 +873,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     )
 
     stop_reason = (
-        f"Stop: invalidation({stop_dbg.get('inv_src')}) + noise(ATR) + max_risk_cap "
-        f"(capped={stop_dbg.get('capped')})."
+        f"Stop (aktif): noise(ATR) + yapısal(invalidation:{stop_dbg.get('inv_src')}) + max_risk_cap "
+        f"(capped={stop_dbg.get('capped')}). "
+        f"Yapısal={stop_structural:.2f} | Noise={stop_noise:.2f}"
     )
 
     narrative = (
@@ -930,6 +937,8 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         "minervini5_ok": m5_ok,
         "pivot_low": pivot_low,
         "stop_debug": stop_dbg,
+        "stop_structural": stop_structural,
+        "stop_noise": stop_noise,
         "targets_debug": targets_dbg,
     }
 
@@ -1110,7 +1119,7 @@ def plot_chart(
 
 
 # =========================================================
-# PORTFOLIO HELPERS
+# PORTFOLIO ANALYSIS HELPERS
 # =========================================================
 def rolling_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> tuple[float, float]:
     """
@@ -1150,11 +1159,10 @@ def trailing_structure_status(price: float, ema20: float, ema50: float) -> tuple
     above50 = price >= ema50
 
     if above20 and above50:
-        return ("İz süren yapı korunuyor.", f"EMA20: ÜZERİNDE | EMA50: ÜZERİNDE")
+        return ("İz süren yapı korunuyor.", "EMA20: ÜZERİNDE | EMA50: ÜZERİNDE")
     if (not above20) and above50:
-        return ("Kısa vadeli iz süren yapı zayıflıyor.", f"EMA20: ALTINDA | EMA50: ÜZERİNDE")
-    # below EMA50
-    return ("İz süren yapı bozulma sinyali veriyor.", f"EMA20: ALTINDA | EMA50: ALTINDA")
+        return ("Kısa vadeli iz süren yapı zayıflıyor.", "EMA20: ALTINDA | EMA50: ÜZERİNDE")
+    return ("İz süren yapı bozulma sinyali veriyor.", "EMA20: ALTINDA | EMA50: ALTINDA")
 
 
 def compute_rr(price: float, stop: float, tp: float) -> float:
@@ -1377,8 +1385,7 @@ with tab_single:
                     st.warning(f"history.csv yazılamadı: {e}")
 
                 st.divider()
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+
                 st.subheader("📊 Strateji Özeti (Görünür)")
                 colm1, colm2, colm3 = st.columns(3)
                 with colm1:
@@ -1388,10 +1395,18 @@ with tab_single:
                     st.metric("Toplam Skor", f"{plan.total_score} / 100")
                     st.metric("Setup / Timing", f"{plan.setup_score} / {plan.timing_score}")
                 with colm3:
-                    st.metric("Stop", f"{plan.stop:.2f}")
+                    st.metric("Stop (Aktif)", f"{plan.stop:.2f}")
                     st.metric("TP1 / TP2", f"{plan.tp1:.2f} / {plan.tp2:.2f}")
+                    st.caption(
+                        f"Yapısal: {plan.debug.get('stop_structural', float('nan')):.2f} | "
+                        f"Noise: {plan.debug.get('stop_noise', float('nan')):.2f}"
+                    )
 
-                st.caption(f"Minervini #5: 52W dip {plan.low_52w:.2f} → {'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'}")
+                st.caption(
+                    f"Minervini #5: 52W dip {plan.low_52w:.2f} → "
+                    f"{'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'}"
+                )
+
                 st.markdown('<div class="card">', unsafe_allow_html=True)
                 st.subheader("📌 İşlem Planı")
                 table = pd.DataFrame(
@@ -1409,7 +1424,7 @@ with tab_single:
                     }
                 )
                 st.table(table)
-                st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
 
                 st.subheader("🧠 Skor Dağılımı (Legacy)")
                 b = plan.breakdown
@@ -1453,11 +1468,31 @@ with tab_single:
                 with st.form(key=f"mgmt_form_{ticker}", clear_on_submit=False):
                     c1, c2 = st.columns(2)
                     with c1:
-                        entry_in = st.number_input("Entry (maliyet/plan giriş)", value=float(mg.get("entry", plan.entry_mid)), step=0.01, format="%.2f")
-                        stop_in = st.number_input("Stop (mevcut)", value=float(mg.get("stop", plan.stop)), step=0.01, format="%.2f")
+                        entry_in = st.number_input(
+                            "Entry (maliyet/plan giriş)",
+                            value=float(mg.get("entry", plan.entry_mid)),
+                            step=0.01,
+                            format="%.2f",
+                        )
+                        stop_in = st.number_input(
+                            "Stop (mevcut)",
+                            value=float(mg.get("stop", plan.stop)),
+                            step=0.01,
+                            format="%.2f",
+                        )
                     with c2:
-                        tp1_in = st.number_input("TP1 (mevcut)", value=float(mg.get("tp1", plan.tp1)), step=0.01, format="%.2f")
-                        tp2_in = st.number_input("TP2 (mevcut)", value=float(mg.get("tp2", plan.tp2)), step=0.01, format="%.2f")
+                        tp1_in = st.number_input(
+                            "TP1 (mevcut)",
+                            value=float(mg.get("tp1", plan.tp1)),
+                            step=0.01,
+                            format="%.2f",
+                        )
+                        tp2_in = st.number_input(
+                            "TP2 (mevcut)",
+                            value=float(mg.get("tp2", plan.tp2)),
+                            step=0.01,
+                            format="%.2f",
+                        )
 
                     submitted = st.form_submit_button("Kaydet / Güncelle", use_container_width=True)
 
@@ -1489,7 +1524,9 @@ with tab_single:
                     move_pct = (cur_price - entry0) / entry0 * 100.0
                     if move_pct >= 5.0:
                         sug_stop = max(stop0, entry0)  # break-even
-                        suggestions.append(f"Entry’ye göre %+{move_pct:.1f}. Stop’u en az **break-even** seviyesine çekmeyi düşünebilirsin: {sug_stop:.2f}")
+                        suggestions.append(
+                            f"Entry’ye göre %+{move_pct:.1f}. Stop’u en az **break-even** seviyesine çekmeyi düşünebilirsin: {sug_stop:.2f}"
+                        )
 
                 if np.isfinite(tp1_0) and cur_price >= tp1_0:
                     ema20_now = float(df.iloc[-1]["ema20"])
@@ -1537,7 +1574,7 @@ with tab_single:
             last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
             fig = plot_chart(df, ticker, plan, last_price_line, show_candles, show_emas, show_line)
             st.plotly_chart(fig, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =========================================================
@@ -1604,7 +1641,7 @@ with tab_portfolio:
             "Portföy analiz zaman dilimi (ana karar için günlük önerilir)",
             list(INTERVAL_MAP.keys()),
             index=list(INTERVAL_MAP.keys()).index("Günlük (1day)"),
-            key="pf_interval"
+            key="pf_interval",
         )
         analyze_pf = st.button("Portföyü Analiz Et", type="primary", use_container_width=True)
 
@@ -1668,7 +1705,7 @@ with tab_portfolio:
 
                             ema20_now = float(dfi.iloc[-1]["ema20"])
                             ema50_now = float(dfi.iloc[-1]["ema50"])
-                            trail_head, trail_detail = trailing_structure_status(price, ema20_now, ema50_now)
+                            trail_head, _trail_detail = trailing_structure_status(price, ema20_now, ema50_now)
 
                             in_profit = np.isfinite(avg_cost) and avg_cost > 0 and np.isfinite(price) and (price > avg_cost)
                             show_blue_box = bool(in_profit and blue)
@@ -1683,67 +1720,81 @@ with tab_portfolio:
                             action, comment = held_action_comment(plan, price, avg_cost, user_stop, user_tp1, user_tp2)
 
                             pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
+
+                            # downside risk: only if stop is below price
                             risk_per_share = (price - user_stop) if (np.isfinite(user_stop) and np.isfinite(price)) else np.nan
+                            if np.isfinite(risk_per_share):
+                                risk_per_share = max(0.0, risk_per_share)
                             risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
 
-                            rows.append({
-                                "Ticker": tkr,
-                                "Fiyat": round(price, 2),
-                                "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
-                                "P&L %": round(pnl_pct, 2) if np.isfinite(pnl_pct) else "",
-                                "Stop": round(user_stop, 2) if np.isfinite(user_stop) else "",
-                                "Stop Mesafe %": round(dist_stop_pct, 2) if np.isfinite(dist_stop_pct) else "",
-                                "TP1": round(user_tp1, 2) if np.isfinite(user_tp1) else "",
-                                "TP1 Mesafe %": round(dist_tp1_pct, 2) if np.isfinite(dist_tp1_pct) else "",
-                                "TP2": round(user_tp2, 2) if np.isfinite(user_tp2) else "",
-                                "TP2 Mesafe %": round(dist_tp2_pct, 2) if np.isfinite(dist_tp2_pct) else "",
-                                "R (TP1/Stop)": round(rr_user_tp1, 2) if np.isfinite(rr_user_tp1) else "",
-                                "R (TP2/Stop)": round(rr_user_tp2, 2) if np.isfinite(rr_user_tp2) else "",
-                                "Setup": plan.setup_score,
-                                "Timing": plan.timing_score,
-                                "Durum": plan.status_tag,
-                                "Minervini #5": "OK" if plan.minervini5_ok else "FAIL",
-                                "Auto Stop": round(plan.stop, 2),
-                                "Auto TP1": round(plan.tp1, 2),
-                                "Auto TP2": round(plan.tp2, 2),
-                                "Poz. Değeri": round(pos_value, 2) if np.isfinite(pos_value) else "",
-                                "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
-                                "Aksiyon": action,
-                                "Not": comment,
-                                "52W High": round(high_52w_roll, 2) if np.isfinite(high_52w_roll) else "",
-                                "Blue Sky": "🔵" if show_blue_box else "",
-                                "İz Süren Yapı": trail_head if show_blue_box else "",
-                            })
+                            rows.append(
+                                {
+                                    "Ticker": tkr,
+                                    "Fiyat": round(price, 2),
+                                    "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
+                                    "P&L %": round(pnl_pct, 2) if np.isfinite(pnl_pct) else "",
+                                    "Stop": round(user_stop, 2) if np.isfinite(user_stop) else "",
+                                    "Stop Mesafe %": round(dist_stop_pct, 2) if np.isfinite(dist_stop_pct) else "",
+                                    "TP1": round(user_tp1, 2) if np.isfinite(user_tp1) else "",
+                                    "TP1 Mesafe %": round(dist_tp1_pct, 2) if np.isfinite(dist_tp1_pct) else "",
+                                    "TP2": round(user_tp2, 2) if np.isfinite(user_tp2) else "",
+                                    "TP2 Mesafe %": round(dist_tp2_pct, 2) if np.isfinite(dist_tp2_pct) else "",
+                                    "R (TP1/Stop)": round(rr_user_tp1, 2) if np.isfinite(rr_user_tp1) else "",
+                                    "R (TP2/Stop)": round(rr_user_tp2, 2) if np.isfinite(rr_user_tp2) else "",
+                                    "Setup": plan.setup_score,
+                                    "Timing": plan.timing_score,
+                                    "Durum": plan.status_tag,
+                                    "Minervini #5": "OK" if plan.minervini5_ok else "FAIL",
+                                    "Auto Stop": round(plan.stop, 2),
+                                    "Auto TP1": round(plan.tp1, 2),
+                                    "Auto TP2": round(plan.tp2, 2),
+                                    "Poz. Değeri": round(pos_value, 2) if np.isfinite(pos_value) else "",
+                                    "Risk $": round(risk_value, 2) if np.isfinite(risk_value) else "",
+                                    "Aksiyon": action,
+                                    "Not": comment,
+                                    "52W High": round(high_52w_roll, 2) if np.isfinite(high_52w_roll) else "",
+                                    "Blue Sky": "🔵" if show_blue_box else "",
+                                    "İz Süren Yapı": trail_head if show_blue_box else "",
+                                    "Auto Yapısal Stop": round(plan.debug.get("stop_structural", np.nan), 2)
+                                    if np.isfinite(plan.debug.get("stop_structural", np.nan))
+                                    else "",
+                                    "Auto Noise Stop": round(plan.debug.get("stop_noise", np.nan), 2)
+                                    if np.isfinite(plan.debug.get("stop_noise", np.nan))
+                                    else "",
+                                }
+                            )
 
                         except Exception as e:
-                            rows.append({
-                                "Ticker": tkr,
-                                "Fiyat": "",
-                                "Alış Ort.": "",
-                                "P&L %": "",
-                                "Stop": "",
-                                "Stop Mesafe %": "",
-                                "TP1": "",
-                                "TP1 Mesafe %": "",
-                                "TP2": "",
-                                "TP2 Mesafe %": "",
-                                "R (TP1/Stop)": "",
-                                "R (TP2/Stop)": "",
-                                "Setup": "",
-                                "Timing": "",
-                                "Durum": "HATA",
-                                "Minervini #5": "",
-                                "Auto Stop": "",
-                                "Auto TP1": "",
-                                "Auto TP2": "",
-                                "Poz. Değeri": "",
-                                "Risk $": "",
-                                "Aksiyon": "HATA",
-                                "Not": f"Veri/analiz hatası: {e}",
-                                "52W High": "",
-                                "Blue Sky": "",
-                                "İz Süren Yapı": "",
-                            })
+                            rows.append(
+                                {
+                                    "Ticker": tkr,
+                                    "Fiyat": "",
+                                    "Alış Ort.": "",
+                                    "P&L %": "",
+                                    "Stop": "",
+                                    "Stop Mesafe %": "",
+                                    "TP1": "",
+                                    "TP1 Mesafe %": "",
+                                    "TP2": "",
+                                    "TP2 Mesafe %": "",
+                                    "R (TP1/Stop)": "",
+                                    "R (TP2/Stop)": "",
+                                    "Setup": "",
+                                    "Timing": "",
+                                    "Durum": "HATA",
+                                    "Minervini #5": "",
+                                    "Auto Stop": "",
+                                    "Auto TP1": "",
+                                    "Auto TP2": "",
+                                    "Poz. Değeri": "",
+                                    "Risk $": "",
+                                    "Aksiyon": "HATA",
+                                    "Not": f"Veri/analiz hatası: {e}",
+                                    "52W High": "",
+                                    "Blue Sky": "",
+                                    "İz Süren Yapı": "",
+                                }
+                            )
 
                 out = pd.DataFrame(rows)
 
@@ -1754,7 +1805,7 @@ with tab_portfolio:
                 st.markdown("### 🔵 Blue Sky Evresi (Bilgilendirme)")
                 st.caption("Sadece kârda olan ve 52W zirve bölgesindeki pozisyonlar için görünür.")
 
-                if not out.empty:
+                if not out.empty and "Blue Sky" in out.columns:
                     blue_rows = out[out["Blue Sky"].astype(str).str.contains("🔵", na=False)].copy()
                     if blue_rows.empty:
                         st.info("Şu an Blue Sky koşulunda pozisyon yok.")
@@ -1769,7 +1820,7 @@ with tab_portfolio:
                             st.divider()
 
                 st.markdown("### Hızlı Özet")
-                if not out.empty:
+                if not out.empty and "Durum" in out.columns:
                     a = out[out["Durum"].astype(str).str.startswith("🟢")]
                     b = out[out["Durum"].astype(str).str.startswith("🟡")]
                     c = out[out["Durum"].astype(str).str.startswith("⚫")]
