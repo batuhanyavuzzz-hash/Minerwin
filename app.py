@@ -72,10 +72,33 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown(f"""
-<div class="header">
-    <div class="header-title">MinerWin</div>
+<div style="
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-top:12px;
+    margin-bottom:8px;
+">
+    <img src="data:image/png;base64,{logo_b64}"
+         style="height:34px; margin-top:2px;" />
+    <div>
+        <div style="
+            font-size:30px;
+            font-weight:800;
+            line-height:1;
+        ">
+            MinerWin
+        </div>
+        <div style="
+            font-size:13px;
+            color:#8b949e;
+            margin-top:4px;
+        ">
+            Minervini-Based Technical Trading Engine
+        </div>
+    </div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine</div>
+<hr style="margin-top:16px; margin-bottom:24px; opacity:0.25;">
 """, unsafe_allow_html=True)
 
 st.divider()
