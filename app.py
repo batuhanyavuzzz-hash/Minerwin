@@ -47,59 +47,9 @@ def _load_logo_b64(path: str) -> str:
 
 logo_b64 = _load_logo_b64("minerwin_logo.png")
 
-st.markdown("""
-<style>
-.block-container { padding-top: 3.2rem; }
-
-.header {
-    display:flex;
-    align-items:center;
-    gap:14px;
-    margin-bottom:6px;
-}
-.header-title { font-size:32px; font-weight:800; line-height:1; }
-.sub-title { font-size:13px; color:#8b949e; margin-left:58px; margin-top:-6px; }
-.logo { height:42px; }
-
-.card{
-  background:#161B22;
-  border:1px solid #22262E;
-  border-radius:14px;
-  padding:16px 18px;
-  margin-bottom:14px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown(f"""
-<div style="
-    display:flex;
-    align-items:center;
-    gap:14px;
-    margin-top:12px;
-    margin-bottom:8px;
-">
-    <img src="data:image/png;base64,{logo_b64}"
-         style="height:34px; margin-top:2px;" />
-    <div>
-        <div style="
-            font-size:30px;
-            font-weight:800;
-            line-height:1;
-        ">
-            MinerWin
-        </div>
-        <div style="
-            font-size:13px;
-            color:#8b949e;
-            margin-top:4px;
-        ">
-            Minervini-Based Technical Trading Engine
-        </div>
-    </div>
-</div>
-<hr style="margin-top:16px; margin-bottom:24px; opacity:0.25;">
-""", unsafe_allow_html=True)
+st.title("MinerWin")
+st.caption("Minervini-Based Technical Trading Engine")
+st.divider()
 
 st.divider()
 
