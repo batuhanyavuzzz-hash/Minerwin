@@ -1343,16 +1343,16 @@ def build_portfolio_excel_bytes(out: pd.DataFrame, summary: Dict[str, float]) ->
                 cell.border = border
 
         # Auto column widths (safe)
-for c in range(1, out.shape[1] + 1):
-    max_len = 10
-    col_letter = ws.cell(row=header_row, column=c).column_letter
-    for r in range(header_row, header_row + 1 + out.shape[0]):
-        val = ws.cell(row=r, column=c).value
-        if val is None:
-            continue
-        val_str = str(val)[:40]
-        max_len = max(max_len, len(val_str))
-    ws.column_dimensions[col_letter].width = min(28, max(10, max_len + 2))
+    for c in range(1, out.shape[1] + 1):
+        max_len = 10
+        col_letter = ws.cell(row=header_row, column=c).column_letter
+        for r in range(header_row, header_row + 1 + out.shape[0]):
+            val = ws.cell(row=r, column=c).value
+            if val is None:
+                continue
+            val_str = str(val)[:40]
+            max_len = max(max_len, len(val_str))
+        ws.column_dimensions[col_letter].width = min(28, max(10, max_len + 2))
 
         # Conditional formatting for P&L %
         try:
