@@ -1350,8 +1350,9 @@ def build_portfolio_excel_bytes(out: pd.DataFrame, summary: Dict[str, float]) ->
                 val = ws.cell(row=r, column=c).value
                 if val is None:
                     continue
-                max_len = max(max_len, len(str(val))[:40] and len(str(val)))
-            ws.column_dimensions[col_letter].width = min(28, max(10, max_len + 2))
+                val_str = str(val)[:40]
+                max_len = max(max_len, len(val_str))
+    ws.column_dimensions[col_letter].width = min(28, max(10, max_len + 2))
 
         # Conditional formatting for P&L %
         try:
