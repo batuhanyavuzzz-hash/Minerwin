@@ -55,7 +55,11 @@ from openpyxl.worksheet.table import Table as XLTable, TableStyleInfo
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="MinerWin", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="MinerWin – Portföy Analizi",
+    page_icon="minerwin_favicon.png",
+    layout="wide",
+)
 
 # =========================================================
 # MINERWIN UI (Branding + Professional Header)
