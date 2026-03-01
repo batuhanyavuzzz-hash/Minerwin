@@ -1,16 +1,22 @@
 # app.py
-# Tek Hisse + Portföy Analiz (V5.1 + Portfolio Export Pro) — Twelve Data
-# - Minervini #5: Güncel fiyat, 52W low’un en az %25 üstünde olmalı (veto/etiket)
-# - TP1 + TP2: Minervini uyumlu hedefler (taşıma kapasitesi + geçmiş impuls + 52W high tavanı)
-# - STOP: “Invalidation + Noise” (swing low / EMA tabanı + ATR gürültü filtresi) + max risk limiti
-# - Eldeki hisse dili: TUT / STOP YUKARI / RİSK AZALT / SAT-STOP
-# - Grafik: mum + EMA + fiyat çizgisi (toggle; hepsi kapanırsa çizgi zorunlu kalır)
-# - İşlem yönetimi: form ile inputlar stabilize (yazarken state sıçraması azalır)
+# MinerWin — Tek Hisse + Portföy Analiz (V5.3 / FAZ-1)
+# Twelve Data + Streamlit
 #
-# Ek (PORTFÖY EXPORT PRO):
-# - Portföy sonuç tablosu için şık PDF indir (Türkçe font, hizalı, sığan, premium)
-# - Portföy sonuç tablosu için şık Excel indir (Özet + Pozisyonlar sheet, stil + hizalama)
-# - Portföy KPI: Portföy değeri, anlık P&L $, anlık P&L %, TP1 hepsi olursa max kâr, stop hepsi olursa max zarar
+# ✅ KİLİTLİ MEKANİK (BOZULMAZ):
+# - Entry (EMA20–EMA50 bandı), Timing/Setup ayrımı
+# - Stop: Invalidation + Noise (ATR) + max risk cap
+# - TP1/TP2: Minervini uyumlu hedefleme
+# - Eldeki hisse dili / yönetim formu
+#
+# ✅ FAZ-1 (Bilgi + kalite katmanı):
+# - Hacim Onayı: sıkışmada “kuruma” + breakout’ta “hacim artışı” (bilgi/puan)
+# - Relative Strength (SPY kıyası): hisse/SPY RS hattı + yeni zirve kontrolü (bilgi/puan)
+# - 52W High’a yakınlık etiketi: zirveye uzaksa “ZAYIF YAPI” etiketi (bilgi/puan)
+# - Skorlama: RS + Hacim + Zirve yakınlığı puanı eklenir (hard veto yok; mekaniği bozmaz)
+#
+# Notlar:
+# - Twelve Data Free/BASIC plan çoğu zaman pre/post-market quote vermez.
+# - “Alım kararı” için ana timeframe: GÜNLÜK. Haftalık sadece bağlam filtresi.
 
 import io
 import os
@@ -28,38 +34,21 @@ from typing import Any, Dict, Optional, Tuple
 
 # PDF (ReportLab)
 from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
-from reportlab.lib import colors
-
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Table,
-    TableStyle,
-    Paragraph,
-    Spacer,
-    KeepTogether,
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-
-# Excel (openpyxl)
-from openpyxl import Workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.formatting.rule import CellIsRule
-from openpyxl.worksheet.table import Table as XLTable, TableStyleInfo
 
 
 # =========================================================
-# APP CONFIG
+# APP CONFIG (Name + Icon)
 # =========================================================
-st.set_page_config(
-    page_title="MinerWin – Portföy Analizi",
-    page_icon="minerwin_favicon.png",
-    layout="wide",
-)
+# Not: Streamlit “uygulama adı/ikon” (PWA/home-screen) çoğu zaman ayrıca
+# .streamlit/config.toml ve (varsa) static/manifest ayarları ister.
+# Ama app.py içinde de en azından tarayıcı başlığı + favicon'u düzeltiyoruz.
+#
+# Eğer dosyan varsa: minerwin_icon.png
+PAGE_ICON = "minerwin_icon.png" if os.path.isfile("minerwin_icon.png") else "📈"
+st.set_page_config(page_title="MinerWin – Portföy Analizi", page_icon=PAGE_ICON, layout="wide", initial_sidebar_state="expanded")
+
 
 # =========================================================
 # MINERWIN UI (Branding + Professional Header)
@@ -71,22 +60,40 @@ def _load_logo_b64(path: str) -> str:
     except Exception:
         return ""
 
+
 logo_b64 = _load_logo_b64("minerwin_logo.png")
 
 st.markdown(
     """
 <style>
 .block-container { padding-top: 3.2rem; }
-.header { display:flex; align-items:center; gap:14px; margin-bottom:6px; }
+
+.header {
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-bottom:6px;
+}
 .header-title { font-size:32px; font-weight:800; line-height:1; }
 .sub-title { font-size:13px; color:#8b949e; margin-left:58px; margin-top:-6px; }
 .logo { height:42px; }
+
 .card{
   background:#161B22;
   border:1px solid #22262E;
   border-radius:14px;
   padding:16px 18px;
   margin-bottom:14px;
+}
+
+.small-muted { color:#8b949e; font-size:12px; }
+.badge {
+  display:inline-block;
+  padding:4px 10px;
+  border-radius:999px;
+  border:1px solid #2a2f39;
+  background:#0f141b;
+  font-size:12px;
 }
 </style>
 """,
@@ -99,7 +106,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine • V5.3 (FAZ-1)</div>
 """,
     unsafe_allow_html=True,
 )
@@ -120,12 +127,14 @@ INTERVAL_MAP = {
     "Saatlik (1h)": "1h",
     "15 Dakika (15min)": "15min",
 }
+
 DEFAULT_SINGLE_INTERVAL_LABEL = "Günlük (1day)"
 
 st.caption(
     "Not: Twelve Data Free/BASIC plan genelde pre-market/after-hours fiyatı vermez; "
     "piyasa kapalıyken quote son kapanışı döndürebilir."
 )
+
 
 # =========================================================
 # SESSION STATE INIT
@@ -138,6 +147,7 @@ if "portfolio" not in st.session_state:
 
 if "trade_mgmt" not in st.session_state:
     st.session_state.trade_mgmt = {}  # dict[ticker] = {"entry":..., "stop":..., "tp1":..., "tp2":...}
+
 
 # =========================================================
 # BASIC HELPERS
@@ -152,7 +162,7 @@ def safe_float(x):
 
 
 def pct(a: float, b: float) -> float:
-    """% fark: (a-b)/b*100"""
+    """% change from b to a"""
     if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
         return np.nan
     return (a - b) / b * 100
@@ -165,16 +175,10 @@ def clamp(x: float, lo: float, hi: float) -> float:
         return lo
 
 
-def fmt_money(x: float) -> str:
+def _fmt_money(x: float) -> str:
     if not np.isfinite(x):
         return "—"
     return f"{x:,.2f}"
-
-
-def fmt_pct(x: float) -> str:
-    if not np.isfinite(x):
-        return "—"
-    return f"{x:+.2f}%"
 
 
 # =========================================================
@@ -188,8 +192,10 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+
     rs = avg_gain / (avg_loss.replace(0, np.nan))
     out = 100 - (100 / (1 + rs))
     return out.bfill()
@@ -200,6 +206,7 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     low = df["low"]
     close = df["close"]
     prev_close = close.shift(1)
+
     tr = pd.concat(
         [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
         axis=1,
@@ -267,6 +274,7 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
             raise RuntimeError(f"TwelveData: {col} alanı yok.")
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # volume (FAZ-1 için kritik)
     if "volume" in df.columns:
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
     else:
@@ -337,11 +345,11 @@ def portfolio_csv_bytes() -> bytes:
 
 
 # =========================================================
-# MINERVINI (52W LOW/HIGH) HELPERS
+# 52W HELPERS (Minervini)
 # =========================================================
 @st.cache_data(ttl=120)
 def fetch_daily_52w(symbol: str) -> Tuple[float, float]:
-    """52 haftalık dip/tepe için günlük veriden ~260 bar."""
+    """52W dip/tepe için günlük veriden ~260 bar."""
     payload = td_time_series(symbol, "1day", 260)
     df = parse_ohlcv(payload)
     low_52w = float(df["low"].min())
@@ -350,9 +358,177 @@ def fetch_daily_52w(symbol: str) -> Tuple[float, float]:
 
 
 def minervini_rule5_ok(price: float, low_52w: float) -> bool:
+    """Minervini #5: Güncel fiyat, 52W low’un en az %25 üstünde olmalı."""
     if not (np.isfinite(price) and np.isfinite(low_52w) and low_52w > 0):
         return False
     return price >= 1.25 * low_52w
+
+
+def near_52w_high_ok(price: float, high_52w: float, max_below_pct: float = 25.0) -> bool:
+    """FAZ-1: Fiyat 52W high’ın en fazla %25 altında olsun (lider odak)."""
+    if not (np.isfinite(price) and np.isfinite(high_52w) and high_52w > 0):
+        return False
+    return price >= (1.0 - max_below_pct / 100.0) * high_52w
+
+
+def high_proximity_band(price: float, high_52w: float) -> str:
+    """Etiket: Zirveye yakınlık bandı."""
+    if not (np.isfinite(price) and np.isfinite(high_52w) and high_52w > 0):
+        return "—"
+    dist = (high_52w - price) / high_52w * 100.0
+    if dist <= 2.0:
+        return "BLUE-SKY ZİRVE"
+    if dist <= 10.0:
+        return "ZİRVEYE YAKIN"
+    if dist <= 25.0:
+        return "ORTA"
+    return "ZİRVEYE UZAK"
+
+
+# =========================================================
+# FAZ-1: VOLUME CONFIRMATION
+# =========================================================
+def analyze_volume_profile(
+    df: pd.DataFrame,
+    in_entry_band: bool,
+    pivot_lookback: int = 20,
+    dry_lookback: int = 10,
+    vol_ma: int = 50,
+    dry_ratio_max: float = 0.60,  # son 10 gün ort. hacim <= 0.60 * MA50 → “kuruma”
+    breakout_ratio_min: float = 1.50,  # breakout barı hacim >= 1.50 * MA50
+) -> Dict[str, Any]:
+    """
+    FAZ-1:
+    - Kuruma (VCP benzeri): entry bandındayken son 5-10 gün hacmi, 50g ortalamanın belirgin altında olmalı.
+    - Breakout hacmi: pivot high geçilirken hacim, MA50'nin üstünde olmalı.
+
+    Not: Bu modül hard veto yapmaz; sadece puan + bilgi üretir.
+    """
+    out: Dict[str, Any] = {
+        "vol_ma50": np.nan,
+        "dry_ratio": np.nan,
+        "dry_ok": False,
+        "pivot_high": np.nan,
+        "breakout": False,
+        "breakout_ok": False,
+        "breakout_ratio": np.nan,
+        "note": "",
+    }
+
+    if df is None or df.empty or "volume" not in df.columns or "close" not in df.columns or "high" not in df.columns:
+        out["note"] = "Hacim verisi eksik."
+        return out
+
+    d = df.copy()
+    d["vol_ma50"] = d["volume"].rolling(vol_ma, min_periods=max(10, vol_ma // 2)).mean()
+
+    vol_ma50 = float(d.iloc[-1]["vol_ma50"]) if np.isfinite(d.iloc[-1]["vol_ma50"]) else np.nan
+    out["vol_ma50"] = vol_ma50
+
+    # kuruma: son dry_lookback ort hacim / vol_ma50
+    tail = d.tail(max(dry_lookback, 5))
+    vol_avg_short = float(tail["volume"].mean()) if len(tail) > 0 else np.nan
+    dry_ratio = (vol_avg_short / vol_ma50) if (np.isfinite(vol_avg_short) and np.isfinite(vol_ma50) and vol_ma50 > 0) else np.nan
+    out["dry_ratio"] = float(dry_ratio) if np.isfinite(dry_ratio) else np.nan
+
+    dry_ok = bool(in_entry_band and np.isfinite(dry_ratio) and (dry_ratio <= dry_ratio_max))
+    out["dry_ok"] = dry_ok
+
+    # pivot high: son pivot_lookback içindeki en yüksek high (son bar hariç)
+    d2 = d.tail(max(pivot_lookback + 2, 25)).reset_index(drop=True)
+    if len(d2) >= 5:
+        pivot_high = float(d2.iloc[:-1]["high"].max())  # last bar excluded
+        out["pivot_high"] = pivot_high
+
+        last_close = float(d2.iloc[-1]["close"])
+        last_vol = float(d2.iloc[-1]["volume"])
+        breakout = bool(np.isfinite(last_close) and np.isfinite(pivot_high) and last_close > pivot_high)
+
+        out["breakout"] = breakout
+        if breakout and np.isfinite(vol_ma50) and vol_ma50 > 0 and np.isfinite(last_vol):
+            br_ratio = last_vol / vol_ma50
+            out["breakout_ratio"] = float(br_ratio)
+            out["breakout_ok"] = bool(br_ratio >= breakout_ratio_min)
+        else:
+            out["breakout_ratio"] = np.nan
+            out["breakout_ok"] = False
+
+    return out
+
+
+# =========================================================
+# FAZ-1: RELATIVE STRENGTH (SPY)
+# =========================================================
+@st.cache_data(ttl=180)
+def fetch_daily_df(symbol: str, bars: int = 300) -> pd.DataFrame:
+    payload = td_time_series(symbol, "1day", int(bars))
+    return parse_ohlcv(payload)
+
+
+def compute_rs_metrics(
+    df_stock_daily: pd.DataFrame,
+    df_spy_daily: pd.DataFrame,
+    lookback_high: int = 252,
+) -> Dict[str, Any]:
+    """
+    RS line = stock_close / spy_close (aligned by date)
+    - RS new high? (son lookback_high içinde)
+    - RS slope (son 20 bar)
+    - 3m/6m/12m relatif performans (yaklaşık)
+    """
+    out: Dict[str, Any] = {
+        "rs_new_high": False,
+        "rs_slope20": np.nan,
+        "rel_3m": np.nan,
+        "rel_6m": np.nan,
+        "rel_12m": np.nan,
+        "note": "",
+    }
+
+    if df_stock_daily is None or df_spy_daily is None or df_stock_daily.empty or df_spy_daily.empty:
+        out["note"] = "RS için veri eksik."
+        return out
+
+    a = df_stock_daily[["time", "close"]].copy().rename(columns={"close": "c_stock"})
+    b = df_spy_daily[["time", "close"]].copy().rename(columns={"close": "c_spy"})
+    m = pd.merge(a, b, on="time", how="inner")
+    m = m.dropna().sort_values("time").reset_index(drop=True)
+    if len(m) < 80:
+        out["note"] = "RS hesaplamak için bar sayısı az."
+        return out
+
+    m["rs"] = m["c_stock"] / m["c_spy"].replace(0, np.nan)
+
+    # RS new high
+    n = min(len(m), int(lookback_high))
+    rs_win = m.iloc[-n:]["rs"].dropna()
+    if len(rs_win) >= 30:
+        rs_now = float(rs_win.iloc[-1])
+        rs_high = float(rs_win.max())
+        out["rs_new_high"] = bool(np.isfinite(rs_now) and np.isfinite(rs_high) and rs_now >= rs_high * 0.995)
+
+    # RS slope 20
+    out["rs_slope20"] = slope(m["rs"], lookback=20)
+
+    # Rel perf windows (yaklaşık günlük bar)
+    def _rel_perf(days: int) -> float:
+        if len(m) < days + 5:
+            return np.nan
+        p0s = float(m.iloc[-days]["c_stock"])
+        p1s = float(m.iloc[-1]["c_stock"])
+        p0i = float(m.iloc[-days]["c_spy"])
+        p1i = float(m.iloc[-1]["c_spy"])
+        if p0s <= 0 or p0i <= 0:
+            return np.nan
+        r_stock = (p1s / p0s) - 1.0
+        r_spy = (p1i / p0i) - 1.0
+        return float((r_stock - r_spy) * 100.0)
+
+    out["rel_3m"] = _rel_perf(63)   # ~3 ay
+    out["rel_6m"] = _rel_perf(126)  # ~6 ay
+    out["rel_12m"] = _rel_perf(252) # ~12 ay
+
+    return out
 
 
 # =========================================================
@@ -361,7 +537,8 @@ def minervini_rule5_ok(price: float, low_52w: float) -> bool:
 def _recent_pivot_low(df: pd.DataFrame, lookback: int = 20) -> float:
     """
     Son lookback bar içinde en son pivot low (lokal minimum) bul.
-    Pivot: low[i] < low[i-1] ve low[i] < low[i+1]
+    Pivot tanımı: low[i] < low[i-1] ve low[i] < low[i+1]
+    Bulunamazsa NaN.
     """
     if df is None or df.empty or "low" not in df.columns:
         return float("nan")
@@ -384,7 +561,7 @@ def _recent_pivot_low(df: pd.DataFrame, lookback: int = 20) -> float:
 
 def _noise_factor_from_atr_pct(atr_pct: float) -> float:
     """
-    ATR% → noise_factor
+    ATR% (yüzde) → noise_factor
     Sakin: <2%       => 1.25
     Normal: 2-4%     => 1.55
     Agresif: 4-6%    => 1.85
@@ -413,22 +590,15 @@ def compute_stop_invalidation_plus_noise(
     Returns:
       (stop_active, stop_structural, stop_noise, debug)
 
-    stop_structural: invalidation base (pivot/EMA)
-    stop_noise:      ATR-based noise stop
-    stop_active:     operational stop after applying room logic + risk cap
-
-    Mantık:
-    - stop_structural: pivot_low (varsa) veya EMA50 altı (toleranslı)
-    - stop_noise: entry - ATR * noise_factor
-    - stop_candidate: min(structural, noise)  (daha aşağı = daha geniş stop; volatilitede stoplatmayı azaltır)
-    - cap: max_risk_pct ile stopu çok açmayı engeller
+    - stop_structural: invalidation base (pivot/EMA)
+    - stop_noise:      ATR-based “room”
+    - stop_active:     operational stop after applying max risk cap
     """
-    dbg: Dict[str, Any] = {}
-
     if not (np.isfinite(entry) and np.isfinite(ema50) and np.isfinite(atr14)) or entry <= 0:
         stop_fallback = float(entry * 0.93)
         return stop_fallback, float("nan"), float("nan"), {"reason": "NaN entry/ema50/atr14"}
 
+    # Structural invalidation base
     inv_from_ema = float(ema50 * 0.995)  # EMA50 altına tolerans
     inv_from_pivot = float(pivot_low * 0.995) if (np.isfinite(pivot_low) and pivot_low > 0) else float("nan")
 
@@ -439,11 +609,14 @@ def compute_stop_invalidation_plus_noise(
         stop_structural = float(inv_from_ema)
         inv_src = "ema50"
 
+    # Noise stop (ATR room)
     nf = _noise_factor_from_atr_pct(atr_pct)
     stop_noise = float(entry - nf * atr14)
 
+    # Choose wider stop to avoid “shake-out”
     stop_candidate = float(min(stop_structural, stop_noise))
 
+    # Cap maximum risk
     cap_stop = float(entry * (1.0 - max_risk_pct / 100.0))
     if stop_candidate < cap_stop:
         stop_active = cap_stop
@@ -452,6 +625,7 @@ def compute_stop_invalidation_plus_noise(
         stop_active = stop_candidate
         capped = False
 
+    # Safety: never >= entry
     if stop_active >= entry:
         stop_active = float(entry * 0.99)
 
@@ -510,7 +684,7 @@ def _trend_capacity_level(
 
 
 def _impulse_cap_pct_from_history(df: pd.DataFrame, lookback: int = 90) -> float:
-    """Son lookback barda en iyi dip->tepe % (kaba ama güvenli üst sınır)."""
+    """Son lookback barda en iyi dip->tepe yüzdesi (kaba ama güvenli üst sınır)."""
     if df is None or df.empty or "close" not in df.columns:
         return float("nan")
 
@@ -558,7 +732,7 @@ def compute_tp1_tp2_minervini(
         return entry * 1.06, entry * 1.12, float("nan"), "LOW", {"reason": "risk<=0"}
 
     atr_pct_ratio = atr14 / close if close > 0 else float("nan")
-    atr_pct_ratio = clamp(atr_pct_ratio, 0.012, 0.085)
+    atr_pct_ratio = clamp(atr_pct_ratio, 0.012, 0.085)  # 1.2%..8.5%
 
     capacity = _trend_capacity_level(setup_score, ema50, ema150, ema200, ema200_slope, rsi14, close)
 
@@ -569,7 +743,7 @@ def compute_tp1_tp2_minervini(
     else:
         N, mult = 3.5, 0.95
 
-    expected_move_pct = (atr_pct_ratio * N * mult) * 100.0
+    expected_move_pct = (atr_pct_ratio * N * mult) * 100.0  # percent
 
     impulse_cap_pct = _impulse_cap_pct_from_history(df_for_impulse, lookback=90)
     if np.isfinite(impulse_cap_pct) and impulse_cap_pct > 0:
@@ -617,6 +791,9 @@ class ScoreBreakdown:
     momentum_rsi: int
     volatility_atr: int
     extension_vs_ema50: int
+    rs_leadership: int
+    volume_confirmation: int
+    high_proximity: int
 
 
 @dataclass
@@ -645,6 +822,24 @@ class TradePlan:
     high_52w: float
     minervini5_ok: bool
 
+    # FAZ-1 extras
+    high_proximity_ok: bool
+    high_proximity_band: str
+
+    rs_new_high: bool
+    rs_slope20: float
+    rel_3m: float
+    rel_6m: float
+    rel_12m: float
+
+    vol_ma50: float
+    dry_ratio: float
+    dry_ok: bool
+    pivot_high: float
+    breakout: bool
+    breakout_ok: bool
+    breakout_ratio: float
+
     capacity_level: str
     expected_move_pct: float
     targets_reason: str
@@ -656,9 +851,9 @@ class TradePlan:
 
 
 def label_from_total(score: int) -> str:
-    if score >= 75:
+    if score >= 78:
         return "UYGUN"
-    if score >= 60:
+    if score >= 62:
         return "SINIRDA"
     return "UYGUN DEĞİL"
 
@@ -700,7 +895,11 @@ def _status_tag(
     in_entry: bool,
     consolidation: bool,
     minervini5_ok: bool,
+    high_proximity_ok: bool,
+    rs_new_high: bool,
+    dry_ok: bool,
 ) -> str:
+    # KİLİTLİ (öncelikler): minervini5 + trend bozulması aynı mantık
     if not minervini5_ok:
         return "🟣 52W DİP FİLTRESİ (ZAYIF)"
     if trend_broken or setup_score < 45:
@@ -708,13 +907,25 @@ def _status_tag(
     if consolidation:
         return "🔵 KONSOLİDASYON"
     if in_entry and timing_score >= 70:
+        # FAZ-1 bilgi etiketi: ALIM bölgesi ama kalite bayrakları
+        if (not high_proximity_ok) or (not rs_new_high) or (not dry_ok):
+            return "🟢 ALIM BÖLGESİNDE (KALİTE KONTROL)"
         return "🟢 ALIM BÖLGESİNDE"
     if is_extended and timing_score < 50:
         return "⚫ UZAMIŞ — KOVALAMA"
+    # FAZ-1: zirveye uzaksa “zayıf yapı” etiketi (mekaniğe dokunmadan)
+    if not high_proximity_ok and setup_score >= 55:
+        return "🟠 ZİRVEYE UZAK (ZAYIF YAPI)"
     return "🟡 PULLBACK BEKLENİYOR"
 
 
-def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> TradePlan:
+def build_trade_plan(
+    df: pd.DataFrame,
+    low_52w: float,
+    high_52w: float,
+    rs_metrics: Optional[Dict[str, Any]] = None,
+    vol_metrics: Optional[Dict[str, Any]] = None,
+) -> TradePlan:
     last = df.iloc[-1]
     close = float(last["close"])
     ema20 = float(last["ema20"])
@@ -744,8 +955,39 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     extended = dist_ema50_pct > 8.0
     trend_broken = (close < ema200) or (not long_trend_ok and not trend_stack_ok)
 
+    # Minervini #5
     m5_ok = minervini_rule5_ok(close, low_52w)
 
+    # FAZ-1: 52W high proximity
+    hi_ok = near_52w_high_ok(close, high_52w, max_below_pct=25.0)
+    hi_band = high_proximity_band(close, high_52w)
+
+    # Entry zone (EMA20-EMA50)
+    entry_low = float(min(ema20, ema50))
+    entry_high = float(max(ema20, ema50))
+    entry_mid = float((entry_low + entry_high) / 2.0)
+    in_entry = (entry_low <= close <= entry_high)
+
+    consolidation = _detect_consolidation(atr_pct, rsi14)
+
+    # FAZ-1 RS / Volume metrics defaults
+    rs_metrics = rs_metrics or {}
+    rs_new_high = bool(rs_metrics.get("rs_new_high", False))
+    rs_slope20 = safe_float(rs_metrics.get("rs_slope20"))
+    rel_3m = safe_float(rs_metrics.get("rel_3m"))
+    rel_6m = safe_float(rs_metrics.get("rel_6m"))
+    rel_12m = safe_float(rs_metrics.get("rel_12m"))
+
+    vol_metrics = vol_metrics or {}
+    vol_ma50 = safe_float(vol_metrics.get("vol_ma50"))
+    dry_ratio = safe_float(vol_metrics.get("dry_ratio"))
+    dry_ok = bool(vol_metrics.get("dry_ok", False))
+    pivot_high = safe_float(vol_metrics.get("pivot_high"))
+    breakout = bool(vol_metrics.get("breakout", False))
+    breakout_ok = bool(vol_metrics.get("breakout_ok", False))
+    breakout_ratio = safe_float(vol_metrics.get("breakout_ratio"))
+
+    # --- Legacy total (keep core shape) ---
     total = 0
     trend_pts = 30 if (trend_stack_ok and long_trend_ok) else (20 if trend_stack_ok else (10 if long_trend_ok else 0))
     total += trend_pts
@@ -758,32 +1000,51 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     e_pts = 15 if not extended else 0
     total += e_pts
 
+    # Minervini #5 fails -> cap (KİLİTLİ)
     if not m5_ok:
         total = min(total, 55)
 
+    # --- FAZ-1 scoring add-ons (NO HARD VETO) ---
+    # RS Leadership: 0..12
+    rs_pts = 0
+    if rs_new_high:
+        rs_pts += 8
+    if np.isfinite(rs_slope20) and rs_slope20 > 0:
+        rs_pts += 4
+    rs_pts = int(clamp(rs_pts, 0, 12))
+
+    # Volume Confirmation: 0..10
+    vol_pts = 0
+    if dry_ok:
+        vol_pts += 6
+    if breakout and breakout_ok:
+        vol_pts += 4
+    vol_pts = int(clamp(vol_pts, 0, 10))
+
+    # High proximity: 0..8
+    hi_pts = 0
+    if hi_ok:
+        hi_pts = 8
+    else:
+        # orta bandda bir miktar puan
+        if hi_band == "ORTA":
+            hi_pts = 3
+        else:
+            hi_pts = 0
+
+    # toplamı genişlet (toplam 100 kalacak şekilde tavanla)
+    total = int(clamp(total + rs_pts + vol_pts + hi_pts, 0, 100))
+
     label = label_from_total(total)
-    breakdown = ScoreBreakdown(
-        trend_stack=trend_pts,
-        price_vs_ema150=p_pts,
-        momentum_rsi=m_pts,
-        volatility_atr=v_pts,
-        extension_vs_ema50=e_pts,
-    )
 
-    entry_low = float(min(ema20, ema50))
-    entry_high = float(max(ema20, ema50))
-    entry_mid = float((entry_low + entry_high) / 2.0)
-
-    setup_raw = trend_pts + p_pts + m_pts + v_pts
+    # Split scores (KİLİTLİ yaklaşım: setup/timing ayrı)
+    setup_raw = trend_pts + p_pts + m_pts + v_pts  # max 85 (core)
     setup_score = int(round(100 * setup_raw / 85)) if setup_raw > 0 else 0
 
     dist_entry_pct = _dist_to_entry_pct(close, entry_low, entry_high)
-    prox_pts = _proximity_points(dist_entry_pct)
-    ext_pts = _extension_points(extended)
-    timing_score = int(ext_pts + prox_pts)
-
-    in_entry = (entry_low <= close <= entry_high)
-    consolidation = _detect_consolidation(atr_pct, rsi14)
+    prox_pts = _proximity_points(dist_entry_pct)       # 0..60
+    ext_pts = _extension_points(extended)              # 0..40
+    timing_score = int(ext_pts + prox_pts)             # 0..100
 
     status_tag = _status_tag(
         timing_score=timing_score,
@@ -793,10 +1054,14 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         in_entry=in_entry,
         consolidation=consolidation,
         minervini5_ok=m5_ok,
+        high_proximity_ok=hi_ok,
+        rs_new_high=rs_new_high,
+        dry_ok=dry_ok,
     )
 
     watch_level = float(entry_high)
 
+    # STOP (Invalidation + Noise)
     pivot_low = _recent_pivot_low(df, lookback=20)
     stop, stop_structural, stop_noise, stop_dbg = compute_stop_invalidation_plus_noise(
         entry=entry_mid,
@@ -804,9 +1069,10 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         atr14=atr14,
         atr_pct=atr_pct,
         pivot_low=pivot_low,
-        max_risk_pct=7.0,
+        max_risk_pct=7.0,  # sistem disiplini
     )
 
+    # TP1/TP2
     tp1, tp2, expected_move_pct, cap_level, targets_dbg = compute_tp1_tp2_minervini(
         df_for_impulse=df,
         entry=entry_mid,
@@ -826,6 +1092,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     rr_tp1 = (tp1 - entry_mid) / risk if risk > 0 else float("nan")
     rr_tp2 = (tp2 - entry_mid) / risk if risk > 0 else float("nan")
 
+    # Narrative/scenario (KİLİTLİ mantık + FAZ-1 bilgi satırları)
     trend_text = (
         "güçlü" if (trend_stack_ok and (price_above_ema150 or price_near_ema150))
         else ("zayıf" if close < ema200 else "karışık")
@@ -835,7 +1102,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
     if status_tag.startswith("🟢"):
         timing_cmd = "ALIM ARANIR"
-    elif status_tag.startswith(("🟡", "🔵")):
+    elif status_tag.startswith(("🟡", "🔵", "🟠")):
         timing_cmd = "BEKLE / İZLE"
     else:
         timing_cmd = "UZAK DUR / ŞARTLAR OLUŞSUN"
@@ -882,6 +1149,28 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         f"Yapısal={stop_structural:.2f} | Noise={stop_noise:.2f}"
     )
 
+    # FAZ-1 line items
+    rs_line = (
+        f"RS (SPY): {'✅ RS yeni zirve' if rs_new_high else '⚠️ RS yeni zirve değil'}"
+        + (f" | RS eğim(20)={rs_slope20:.4f}" if np.isfinite(rs_slope20) else "")
+    )
+    rel_line = (
+        f"RelPerf: 3A={rel_3m:+.1f}% | 6A={rel_6m:+.1f}% | 12A={rel_12m:+.1f}%"
+        if (np.isfinite(rel_3m) or np.isfinite(rel_6m) or np.isfinite(rel_12m))
+        else "RelPerf: —"
+    )
+    vol_line = (
+        f"Hacim: MA50={_fmt_money(vol_ma50)} | KurumaOranı={(dry_ratio*100):.0f}% → {'✅ kuruma' if dry_ok else '⚠️ kuruma yok'}"
+        if np.isfinite(vol_ma50) and np.isfinite(dry_ratio)
+        else "Hacim: —"
+    )
+    br_line = (
+        f"Breakout: {'✅' if breakout else '—'} | PivotHigh={pivot_high:.2f} | HacimOranı={(breakout_ratio):.2f} → {'✅' if breakout_ok else '⚠️'}"
+        if breakout and np.isfinite(pivot_high)
+        else "Breakout: —"
+    )
+    hi_line = f"52W Zirve Yakınlığı: {hi_band} → {'✅' if hi_ok else '⚠️'}"
+
     narrative = (
         f"**Güncel Fiyat:** {close:.2f}  \n"
         f"**Toplam Skor:** {int(total)}/100 → **{label}**  \n"
@@ -893,7 +1182,12 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         f"**Momentum (RSI14):** {rsi14:.1f} → {mom_text}  \n"
         f"**Volatilite (ATR%):** %{atr_pct:.2f} → {vol_text}  \n"
         f"**Uzama (EMA50 mesafe):** %{dist_ema50_pct:.2f} → {'uzamış' if extended else 'normal'}  \n\n"
-        f"**Minervini #5:** 52W dip={low_52w:.2f} → {'✅ geçiyor' if m5_ok else '❌ geçmiyor'}  \n\n"
+        f"**Minervini #5:** 52W dip={low_52w:.2f} → {'✅ geçiyor' if m5_ok else '❌ geçmiyor'}  \n"
+        f"**FAZ-1:** {hi_line}  \n"
+        f"**FAZ-1:** {rs_line}  \n"
+        f"**FAZ-1:** {rel_line}  \n"
+        f"**FAZ-1:** {vol_line}  \n"
+        f"**FAZ-1:** {br_line}  \n\n"
         f"**Zamanlama:** **{timing_cmd}**  \n"
         f"**Giriş Bölgesi:** {entry_low:.2f} – {entry_high:.2f}  \n"
         f"**Giriş Bölgesine Mesafe:** {dist_entry_pct:+.2f}%  \n"
@@ -903,6 +1197,17 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         f"**TP2:** {tp2:.2f}  (R/R≈1:{rr_tp2:.2f})  \n"
         f"{targets_reason}  \n"
         f"{stop_reason}"
+    )
+
+    breakdown = ScoreBreakdown(
+        trend_stack=trend_pts,
+        price_vs_ema150=p_pts,
+        momentum_rsi=m_pts,
+        volatility_atr=v_pts,
+        extension_vs_ema50=e_pts,
+        rs_leadership=int(rs_pts),
+        volume_confirmation=int(vol_pts),
+        high_proximity=int(hi_pts),
     )
 
     debug = {
@@ -939,11 +1244,16 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         "low_52w": low_52w,
         "high_52w": high_52w,
         "minervini5_ok": m5_ok,
+        "high_proximity_ok": hi_ok,
+        "high_proximity_band": hi_band,
         "pivot_low": pivot_low,
         "stop_debug": stop_dbg,
         "stop_structural": stop_structural,
         "stop_noise": stop_noise,
         "targets_debug": targets_dbg,
+        "rs_metrics": rs_metrics,
+        "vol_metrics": vol_metrics,
+        "faz1_pts": {"rs_pts": rs_pts, "vol_pts": vol_pts, "hi_pts": hi_pts},
     }
 
     return TradePlan(
@@ -965,6 +1275,24 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         low_52w=float(low_52w) if np.isfinite(low_52w) else float("nan"),
         high_52w=float(high_52w) if np.isfinite(high_52w) else float("nan"),
         minervini5_ok=bool(m5_ok),
+
+        high_proximity_ok=bool(hi_ok),
+        high_proximity_band=str(hi_band),
+
+        rs_new_high=bool(rs_new_high),
+        rs_slope20=float(rs_slope20) if np.isfinite(rs_slope20) else float("nan"),
+        rel_3m=float(rel_3m) if np.isfinite(rel_3m) else float("nan"),
+        rel_6m=float(rel_6m) if np.isfinite(rel_6m) else float("nan"),
+        rel_12m=float(rel_12m) if np.isfinite(rel_12m) else float("nan"),
+
+        vol_ma50=float(vol_ma50) if np.isfinite(vol_ma50) else float("nan"),
+        dry_ratio=float(dry_ratio) if np.isfinite(dry_ratio) else float("nan"),
+        dry_ok=bool(dry_ok),
+        pivot_high=float(pivot_high) if np.isfinite(pivot_high) else float("nan"),
+        breakout=bool(breakout),
+        breakout_ok=bool(breakout_ok),
+        breakout_ratio=float(breakout_ratio) if np.isfinite(breakout_ratio) else float("nan"),
+
         capacity_level=str(cap_level),
         expected_move_pct=float(expected_move_pct) if np.isfinite(expected_move_pct) else float("nan"),
         targets_reason=targets_reason,
@@ -976,7 +1304,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
 
 # =========================================================
-# PDF EXPORT (Single Stock stays same style as before)
+# PDF EXPORT (Single Stock)
 # =========================================================
 def _wrap_lines(text: str, max_chars: int = 92):
     out = []
@@ -992,15 +1320,13 @@ def _wrap_lines(text: str, max_chars: int = 92):
     return out
 
 
-def build_pdf_bytes_single(
+def build_pdf_bytes(
     ticker: str,
     interval_label: str,
     bars: int,
     plan: TradePlan,
     quote: dict | None,
 ):
-    from reportlab.pdfgen import canvas  # local import to keep original
-
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     w, h = A4
@@ -1018,7 +1344,7 @@ def build_pdf_bytes_single(
             c.showPage()
             y = h - 2.0 * cm
 
-    draw_line("Tek Hisse Teknik Analiz Raporu (V5.1)", font="Helvetica-Bold", size=16, space=18)
+    draw_line("MinerWin — Tek Hisse Teknik Analiz Raporu (V5.3 / FAZ-1)", font="Helvetica-Bold", size=15, space=18)
     draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
     draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", font="Helvetica", size=10)
     draw_line("", size=10, space=10)
@@ -1033,6 +1359,8 @@ def build_pdf_bytes_single(
         size=10,
         space=12,
     )
+    draw_line(f"FAZ-1: 52W Zirve Yakınlığı: {plan.high_proximity_band} | RS yeni zirve: {'Evet' if plan.rs_new_high else 'Hayır'} | Kuruma: {'Evet' if plan.dry_ok else 'Hayır'}", size=10, space=12)
+
     draw_line(f"Giriş: {plan.entry_low:.2f} – {plan.entry_high:.2f}", size=11)
     draw_line(f"Stop: {plan.stop:.2f}", size=11)
     draw_line(f"TP1: {plan.tp1:.2f} (R/R≈1:{plan.rr_tp1:.2f})", size=11)
@@ -1073,6 +1401,7 @@ def plot_chart(
     show_candles: bool,
     show_emas: bool,
     show_line: bool,
+    show_volume: bool,
 ):
     if not (show_candles or show_emas or show_line):
         show_line = True
@@ -1100,6 +1429,12 @@ def plot_chart(
         fig.add_trace(go.Scatter(x=df["time"], y=df["ema150"], name="EMA150", mode="lines"))
         fig.add_trace(go.Scatter(x=df["time"], y=df["ema200"], name="EMA200", mode="lines"))
 
+    # Volume bars (FAZ-1)
+    if show_volume and "volume" in df.columns:
+        fig.add_trace(
+            go.Bar(x=df["time"], y=df["volume"], name="Hacim", yaxis="y2", opacity=0.35)
+        )
+
     fig.add_hrect(
         y0=plan.entry_low,
         y1=plan.entry_high,
@@ -1113,6 +1448,18 @@ def plot_chart(
     fig.add_hline(y=plan.tp2, line_dash="dash", annotation_text="TP2", annotation_position="top left")
     fig.add_hline(y=float(last_price_line), line_dash="dot", annotation_text="GÜNCEL", annotation_position="top right")
 
+    # secondary axis for volume
+    if show_volume:
+        fig.update_layout(
+            yaxis2=dict(
+                title="Hacim",
+                overlaying="y",
+                side="right",
+                showgrid=False,
+                rangemode="tozero",
+            )
+        )
+
     fig.update_layout(
         title=f"{symbol} — Grafik + EMA + Trade Levels",
         xaxis_title="Tarih",
@@ -1125,14 +1472,9 @@ def plot_chart(
 
 
 # =========================================================
-# PORTFOLIO ANALYSIS HELPERS (Blue Sky + trailing)
+# PORTFOLIO HELPERS (Blue Sky)
 # =========================================================
 def rolling_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> tuple[float, float]:
-    """
-    52W High/Low approximation:
-    - For daily data: last 260 bars.
-    - For intraday: we still approximate using last 260 bars of that interval (less meaningful).
-    """
     if df is None or df.empty:
         return (np.nan, np.nan)
     n = min(len(df), int(bars_1day))
@@ -1143,20 +1485,12 @@ def rolling_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> tuple[float, f
 
 
 def is_blue_sky(price: float, high_52w: float, threshold: float = 0.98) -> bool:
-    """
-    Blue Sky = price is within 2% of 52W High or above.
-    threshold=0.98 means price >= 0.98 * high_52w
-    """
     if not (np.isfinite(price) and np.isfinite(high_52w) and high_52w > 0):
         return False
     return price >= (threshold * high_52w)
 
 
 def trailing_structure_status(price: float, ema20: float, ema50: float) -> tuple[str, str]:
-    """
-    Returns (headline, detail_text)
-    - No commands, just state.
-    """
     if not (np.isfinite(price) and np.isfinite(ema20) and np.isfinite(ema50)):
         return ("—", "İz süren yapı için veri eksik.")
 
@@ -1209,7 +1543,7 @@ def held_action_comment(
     if np.isfinite(user_tp2) and price >= user_tp2:
         return "KARAR NOKTASI", "TP2 bölgesi → momentum bozulursa kısmi/çıkış; korunuyorsa trailing stop."
     if np.isfinite(user_tp1) and price >= user_tp1:
-        return "STOP YUKARI", "TP1 bölgesi → stopu yukarı çekerek trend takip et (satış değil, yönetim)."
+        return "STOP YUKARI", "TP1 bölgesi → stopu yukarı çekerek trend takip et."
 
     if np.isfinite(user_stop) and (price - user_stop) / price < 0.03:
         return "DİKKAT", "Stop çok yakın → oynaklık stoplatabilir. (Gevşetme yok; pozisyon boyunu düşün.)"
@@ -1218,569 +1552,11 @@ def held_action_comment(
 
 
 # =========================================================
-# PORTFOLIO KPI + EXPORT (Premium)
-# =========================================================
-def compute_portfolio_kpis(out: pd.DataFrame) -> Dict[str, float]:
-    """
-    out: portfolio analysis output table (after rows appended)
-    Requires columns: Adet (ops), Fiyat, Alış Ort., Stop, TP1
-    Biz burada out tablosunda qty yoksa bile hesapları güvenli yaparız:
-    - qty yoksa o satır KPI'lara dahil edilmez.
-    """
-    k = {
-        "portfolio_value": np.nan,
-        "cost_basis": np.nan,
-        "pnl_value": np.nan,
-        "pnl_pct": np.nan,
-        "max_profit_tp1": np.nan,
-        "max_loss_stop": np.nan,
-    }
-    if out is None or out.empty:
-        return k
-
-    # out'ta qty sütunu tutmuyor olabilir; biz risk/poz değeri satırlarında zaten hesapladık.
-    # Ancak KPI doğru olsun diye "Poz. Değeri" ve "Risk $" kullanmak yerine doğrudan qty/avg/price/tp1/stop üzerinden gidelim.
-    # Bu nedenle portfolio editörden gelen qty ve avg_cost'u ayrıca taşıyacağız (aşağıda rows'a eklendi).
-    needed = ["Qty", "Fiyat", "Alış Ort.", "Stop", "TP1"]
-    for c in needed:
-        if c not in out.columns:
-            return k
-
-    df = out.copy()
-
-    def to_num(x):
-        try:
-            if x == "" or x is None:
-                return np.nan
-            return float(x)
-        except Exception:
-            return np.nan
-
-    df["Qty_n"] = df["Qty"].apply(to_num)
-    df["Price_n"] = df["Fiyat"].apply(to_num)
-    df["Avg_n"] = df["Alış Ort."].apply(to_num)
-    df["Stop_n"] = df["Stop"].apply(to_num)
-    df["TP1_n"] = df["TP1"].apply(to_num)
-
-    valid = df[np.isfinite(df["Qty_n"]) & (df["Qty_n"] > 0) & np.isfinite(df["Price_n"])].copy()
-    if valid.empty:
-        return k
-
-    valid["pos_value"] = valid["Qty_n"] * valid["Price_n"]
-    k["portfolio_value"] = float(valid["pos_value"].sum())
-
-    valid_cost = valid[np.isfinite(valid["Avg_n"]) & (valid["Avg_n"] > 0)].copy()
-    if not valid_cost.empty:
-        valid_cost["cost_value"] = valid_cost["Qty_n"] * valid_cost["Avg_n"]
-        k["cost_basis"] = float(valid_cost["cost_value"].sum())
-
-        pnl_val = float((valid_cost["pos_value"] - valid_cost["cost_value"]).sum())
-        k["pnl_value"] = pnl_val
-
-        if k["cost_basis"] and np.isfinite(k["cost_basis"]) and k["cost_basis"] != 0:
-            k["pnl_pct"] = float((pnl_val / k["cost_basis"]) * 100.0)
-
-        # Max profit if all TP1 hit: sum(qty*(tp1-avg))
-        tp1v = valid_cost[np.isfinite(valid_cost["TP1_n"]) & (valid_cost["TP1_n"] > 0)].copy()
-        if not tp1v.empty:
-            k["max_profit_tp1"] = float((tp1v["Qty_n"] * (tp1v["TP1_n"] - tp1v["Avg_n"])).sum())
-
-        # Max loss if all stops hit: sum(qty*(stop-avg)) (negative typically)
-        stv = valid_cost[np.isfinite(valid_cost["Stop_n"]) & (valid_cost["Stop_n"] > 0)].copy()
-        if not stv.empty:
-            k["max_loss_stop"] = float((stv["Qty_n"] * (stv["Stop_n"] - stv["Avg_n"])).sum())
-
-    return k
-
-
-def _register_turkish_font_for_pdf() -> str:
-    """
-    ReportLab'de Türkçe karakter için Unicode TTF font kaydı.
-    Linux ortamında DejaVu genellikle var.
-    """
-    candidates = [
-        "./DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-    ]
-    for p in candidates:
-        try:
-            if os.path.isfile(p):
-                pdfmetrics.registerFont(TTFont("MW", p))
-                return "MW"
-        except Exception:
-            continue
-    # fallback (Türkçe karakterlerde risk olabilir)
-    return "Helvetica"
-
-
-def build_portfolio_pdf_bytes(
-    title: str,
-    out: pd.DataFrame,
-    kpis: Dict[str, float],
-    interval_label: str,
-    bars: int,
-) -> bytes:
-    """
-    Premium görünümlü portföy PDF:
-    - Unicode font (Türkçe)
-    - Başlık + KPI blokları
-    - İnce çizgili tablo, hizalı, sığan
-    """
-    font_name = _register_turkish_font_for_pdf()
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=1.6 * cm,
-        rightMargin=1.6 * cm,
-        topMargin=1.6 * cm,
-        bottomMargin=1.6 * cm,
-        title=title,
-        author="MinerWin",
-    )
-
-    styles = getSampleStyleSheet()
-    base = ParagraphStyle(
-        "MWBase",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=9.2,
-        leading=12,
-        textColor=colors.HexColor("#111827"),
-    )
-    h1 = ParagraphStyle(
-        "MWH1",
-        parent=styles["Heading1"],
-        fontName=font_name,
-        fontSize=16,
-        leading=20,
-        spaceAfter=8,
-        textColor=colors.HexColor("#0F172A"),
-    )
-    sub = ParagraphStyle(
-        "MWSub",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=9.2,
-        leading=12,
-        textColor=colors.HexColor("#475569"),
-        spaceAfter=10,
-    )
-    kpi_style = ParagraphStyle(
-        "MWKPI",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=10.5,
-        leading=14,
-        textColor=colors.HexColor("#0F172A"),
-    )
-    kpi_hint = ParagraphStyle(
-        "MWKPIHint",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=8.6,
-        leading=11,
-        textColor=colors.HexColor("#64748B"),
-    )
-
-    story = []
-    story.append(Paragraph(title, h1))
-    story.append(
-        Paragraph(
-            f"Zaman dilimi: <b>{interval_label}</b>  |  Bar: <b>{bars}</b>  |  Oluşturma: <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b>",
-            sub,
-        )
-    )
-
-    # KPI cards (Table with 2 rows x 3 cols look)
-    pv = kpis.get("portfolio_value", np.nan)
-    pnlv = kpis.get("pnl_value", np.nan)
-    pnlp = kpis.get("pnl_pct", np.nan)
-    mxp = kpis.get("max_profit_tp1", np.nan)
-    mxl = kpis.get("max_loss_stop", np.nan)
-
-    # Soft sign formatting for max loss
-    mxl_disp = mxl
-    # It's typically negative; show as negative (max zarar)
-    kpi_data = [
-        [
-            Paragraph(f"<b>Portföy Değeri</b><br/>{fmt_money(pv)}", kpi_style),
-            Paragraph(f"<b>Anlık P&L ($)</b><br/>{fmt_money(pnlv)}", kpi_style),
-            Paragraph(f"<b>Anlık P&L (%)</b><br/>{fmt_pct(pnlp)}", kpi_style),
-        ],
-        [
-            Paragraph(f"<b>TP1 Hepsi Olursa (Max Kâr)</b><br/>{fmt_money(mxp)}", kpi_style),
-            Paragraph(f"<b>Stop Hepsi Olursa (Max Zarar)</b><br/>{fmt_money(mxl_disp)}", kpi_style),
-            Paragraph("<b>Not</b><br/>Hesaplar Qty ve Alış Ort. girilmiş satırlarda geçerlidir.", kpi_hint),
-        ],
-    ]
-    kpi_tbl = Table(kpi_data, colWidths=[(A4[0] - 3.2 * cm) / 3.0] * 3)
-    kpi_tbl.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#E5E7EB")),
-                ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E5E7EB")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ]
-        )
-    )
-    story.append(kpi_tbl)
-    story.append(Spacer(1, 10))
-
-    # Table section title
-    story.append(Paragraph("Pozisyonlar", ParagraphStyle("MWH2", parent=h1, fontSize=12, leading=14, spaceAfter=6)))
-
-    if out is None or out.empty:
-        story.append(Paragraph("Tablo boş.", base))
-        doc.build(story)
-        pdf = buf.getvalue()
-        buf.close()
-        return pdf
-
-    # Choose columns to include in PDF (clean, readable)
-    preferred_cols = [
-        "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %", "Stop", "TP1", "TP2", "Setup", "Timing", "Durum", "Blue Sky", "İz Süren Yapı"
-    ]
-    cols = [c for c in preferred_cols if c in out.columns]
-    dfp = out[cols].copy()
-
-    # Convert to strings for rendering
-    def _cell_str(v):
-        if v is None:
-            return ""
-        if isinstance(v, float) and (not np.isfinite(v)):
-            return ""
-        s = str(v)
-        return s
-
-    data = [[Paragraph(f"<b>{c}</b>", base) for c in dfp.columns.tolist()]]
-    for _, row in dfp.iterrows():
-        r = []
-        for c in dfp.columns:
-            val = _cell_str(row[c])
-            # short-circuit very long status text in pdf cell
-            if len(val) > 46:
-                val = val[:46] + "…"
-            # align numbers right by using a tiny paragraph with right-alignment when looks numeric
-            r.append(Paragraph(val.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), base))
-        data.append(r)
-
-    # Column widths (fit A4)
-    page_w = A4[0] - (1.6 + 1.6) * cm
-    # heuristic widths
-    w_map = {
-        "Ticker": 0.08,
-        "Fiyat": 0.07,
-        "Qty": 0.06,
-        "Alış Ort.": 0.09,
-        "P&L %": 0.07,
-        "Stop": 0.07,
-        "TP1": 0.07,
-        "TP2": 0.07,
-        "Setup": 0.06,
-        "Timing": 0.06,
-        "Durum": 0.18,
-        "Blue Sky": 0.06,
-        "İz Süren Yapı": 0.16,
-    }
-    col_widths = []
-    for c in dfp.columns:
-        frac = w_map.get(c, 0.08)
-        col_widths.append(page_w * frac)
-
-    tbl = Table(data, colWidths=col_widths, repeatRows=1)
-
-    # Premium table style
-    tbl_style = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#CBD5E1")),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
-        ("FONT", (0, 0), (-1, -1), font_name),
-        ("FONTSIZE", (0, 0), (-1, -1), 8.8),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]
-
-    # Alignment: numeric-ish columns right
-    right_cols = {"Fiyat", "Qty", "Alış Ort.", "P&L %", "Stop", "TP1", "TP2", "Setup", "Timing"}
-    for ci, c in enumerate(dfp.columns):
-        if c in right_cols:
-            tbl_style.append(("ALIGN", (ci, 1), (ci, -1), "RIGHT"))
-        else:
-            tbl_style.append(("ALIGN", (ci, 1), (ci, -1), "LEFT"))
-    tbl_style.append(("ALIGN", (0, 0), (-1, 0), "CENTER"))
-
-    # Soft conditional colors for P&L % (text only)
-    if "P&L %" in dfp.columns:
-        pnl_idx = dfp.columns.tolist().index("P&L %")
-        for ri in range(1, len(data)):
-            try:
-                v = str(dfp.iloc[ri - 1]["P&L %"]).replace("%", "").replace("+", "").strip()
-                vv = float(v)
-                if vv > 0:
-                    tbl_style.append(("TEXTCOLOR", (pnl_idx, ri), (pnl_idx, ri), colors.HexColor("#166534")))
-                elif vv < 0:
-                    tbl_style.append(("TEXTCOLOR", (pnl_idx, ri), (pnl_idx, ri), colors.HexColor("#991B1B")))
-            except Exception:
-                pass
-
-    tbl.setStyle(TableStyle(tbl_style))
-
-    story.append(tbl)
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("Not: Blue Sky sütunu sadece kârda + 52W zirve bölgesinde olan pozisyonlarda görünür.", kpi_hint))
-
-    doc.build(story)
-    pdf = buf.getvalue()
-    buf.close()
-    return pdf
-
-
-def build_portfolio_excel_bytes(
-    title: str,
-    out: pd.DataFrame,
-    kpis: Dict[str, float],
-    interval_label: str,
-    bars: int,
-) -> bytes:
-    """
-    Premium Excel:
-    - Sheet1: Özet (KPI kartları)
-    - Sheet2: Pozisyonlar (tablo + filtre + freeze + format)
-    - Türkçe karakter uyumlu
-    """
-    wb = Workbook()
-    ws_sum = wb.active
-    ws_sum.title = "Özet"
-    ws_pos = wb.create_sheet("Pozisyonlar")
-
-    # Styles
-    font_title = Font(name="Calibri", size=16, bold=True, color="0F172A")
-    font_sub = Font(name="Calibri", size=10, color="475569")
-    font_hdr = Font(name="Calibri", size=11, bold=True, color="0F172A")
-    font_body = Font(name="Calibri", size=10, color="111827")
-    font_kpi = Font(name="Calibri", size=14, bold=True, color="0F172A")
-    font_kpi_lbl = Font(name="Calibri", size=10, bold=True, color="475569")
-
-    fill_hdr = PatternFill("solid", fgColor="F1F5F9")
-    fill_card = PatternFill("solid", fgColor="FFFFFF")
-
-    thin = Side(style="thin", color="E5E7EB")
-    border_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    # --- Summary sheet layout ---
-    ws_sum["A1"] = title
-    ws_sum["A1"].font = font_title
-    ws_sum["A2"] = f"Zaman dilimi: {interval_label}  |  Bar: {bars}  |  Oluşturma: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    ws_sum["A2"].font = font_sub
-
-    # KPI grid positions
-    # Card boxes: A4:C6 and E4:G6 (two rows)
-    # We'll use simple blocks with borders.
-    cards = [
-        ("Portföy Değeri", kpis.get("portfolio_value", np.nan), "money"),
-        ("Anlık P&L ($)", kpis.get("pnl_value", np.nan), "money"),
-        ("Anlık P&L (%)", kpis.get("pnl_pct", np.nan), "pct"),
-        ("TP1 Hepsi Olursa (Max Kâr)", kpis.get("max_profit_tp1", np.nan), "money"),
-        ("Stop Hepsi Olursa (Max Zarar)", kpis.get("max_loss_stop", np.nan), "money"),
-        ("Not", "Hesaplar Qty ve Alış Ort. girilmiş satırlarda geçerlidir.", "text"),
-    ]
-    # positions (top-left cell of each card)
-    pos = [("A4", "C6"), ("E4", "G6"), ("I4", "K6"), ("A8", "C10"), ("E8", "G10"), ("I8", "K10")]
-
-    for (lbl, val, kind), (tl, br) in zip(cards, pos):
-        tl_col = tl[0]
-        tl_row = int(tl[1:])
-        br_col = br[0]
-        br_row = int(br[1:])
-
-        # Fill and border for the rectangle
-        for r in range(tl_row, br_row + 1):
-            for c in range(ord(tl_col), ord(br_col) + 1):
-                cell = ws_sum[f"{chr(c)}{r}"]
-                cell.fill = fill_card
-                cell.border = border_thin
-
-        ws_sum[tl] = lbl
-        ws_sum[tl].font = font_kpi_lbl
-        ws_sum[tl].alignment = Alignment(horizontal="left", vertical="top")
-
-        value_cell = f"{tl_col}{tl_row+1}"
-        if kind == "money":
-            ws_sum[value_cell] = float(val) if np.isfinite(val) else ""
-            ws_sum[value_cell].number_format = '#,##0.00'
-        elif kind == "pct":
-            ws_sum[value_cell] = (float(val) / 100.0) if np.isfinite(val) else ""
-            ws_sum[value_cell].number_format = '0.00%'
-        else:
-            ws_sum[value_cell] = str(val)
-            ws_sum[value_cell].font = font_sub
-            ws_sum[value_cell].alignment = Alignment(wrap_text=True, vertical="top")
-
-        if kind in ("money", "pct"):
-            ws_sum[value_cell].font = font_kpi
-            ws_sum[value_cell].alignment = Alignment(horizontal="left", vertical="center")
-
-    # Column widths for summary
-    for col, w in [("A", 22), ("B", 16), ("C", 16), ("E", 22), ("F", 16), ("G", 16), ("I", 22), ("J", 16), ("K", 16)]:
-        ws_sum.column_dimensions[col].width = w
-
-    ws_sum.row_dimensions[1].height = 24
-    ws_sum.row_dimensions[2].height = 16
-
-    # --- Positions sheet ---
-    if out is None or out.empty:
-        ws_pos["A1"] = "Pozisyon tablosu boş."
-        ws_pos["A1"].font = font_body
-    else:
-        df = out.copy()
-
-        # Keep a clean set of columns in Excel (still rich, but readable)
-        preferred_cols = [
-            "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %", "Stop", "Stop Mesafe %",
-            "TP1", "TP1 Mesafe %", "TP2", "TP2 Mesafe %",
-            "R (TP1/Stop)", "R (TP2/Stop)",
-            "Setup", "Timing", "Durum", "Minervini #5",
-            "Blue Sky", "İz Süren Yapı",
-            "Poz. Değeri", "Risk $",
-            "Aksiyon", "Not"
-        ]
-        cols = [c for c in preferred_cols if c in df.columns]
-        df = df[cols].copy()
-
-        header_row = 1
-        for ci, col_name in enumerate(df.columns, start=1):
-            cell = ws_pos.cell(row=header_row, column=ci, value=col_name)
-            cell.font = font_hdr
-            cell.fill = fill_hdr
-            cell.border = border_thin
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-        for ri in range(df.shape[0]):
-            for ci, col_name in enumerate(df.columns, start=1):
-                v = df.iloc[ri, ci - 1]
-                cell = ws_pos.cell(row=header_row + 1 + ri, column=ci, value=v)
-                cell.font = font_body
-                cell.border = border_thin
-                # Wrap for long text columns
-                if col_name in ("Not", "Durum", "İz Süren Yapı", "Aksiyon"):
-                    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-                else:
-                    cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-
-        # Format numeric columns
-        num_money = {"Fiyat", "Alış Ort.", "Stop", "TP1", "TP2", "Poz. Değeri", "Risk $"}
-        num_pct = {"P&L %", "Stop Mesafe %", "TP1 Mesafe %", "TP2 Mesafe %"}
-        num_rr = {"R (TP1/Stop)", "R (TP2/Stop)"}
-        num_int = {"Setup", "Timing"}
-
-        for ci, col_name in enumerate(df.columns, start=1):
-            for r in range(header_row + 1, header_row + 1 + df.shape[0]):
-                cell = ws_pos.cell(row=r, column=ci)
-                if col_name in num_money:
-                    cell.number_format = '#,##0.00'
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                elif col_name in num_pct:
-                    # input already percent like 1.23; show as percent with sign
-                    # keep as text if empty
-                    try:
-                        vv = float(cell.value)
-                        cell.value = vv / 100.0
-                        cell.number_format = '0.00%'
-                        cell.alignment = Alignment(horizontal="right", vertical="center")
-                    except Exception:
-                        pass
-                elif col_name in num_rr:
-                    cell.number_format = '0.00'
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                elif col_name in num_int:
-                    cell.number_format = '0'
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                elif col_name in ("Ticker", "Blue Sky", "Minervini #5"):
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                else:
-                    # already set
-                    pass
-
-        # Conditional formatting for P&L % (green/red)
-        if "P&L %" in df.columns:
-            pnl_col = df.columns.tolist().index("P&L %") + 1
-            col_letter = get_column_letter(pnl_col)
-            rng = f"{col_letter}{header_row+1}:{col_letter}{header_row+df.shape[0]}"
-            # greater than 0 => green
-            ws_pos.conditional_formatting.add(
-                rng,
-                CellIsRule(operator="greaterThan", formula=["0"], font=Font(color="166534", bold=True)),
-            )
-            # less than 0 => red
-            ws_pos.conditional_formatting.add(
-                rng,
-                CellIsRule(operator="lessThan", formula=["0"], font=Font(color="991B1B", bold=True)),
-            )
-
-        # Freeze header row + filter
-        ws_pos.freeze_panes = "A2"
-        ws_pos.auto_filter.ref = f"A1:{get_column_letter(df.shape[1])}{df.shape[0]+1}"
-
-        # Excel table style (modern light)
-        tab = XLTable(displayName="PozisyonlarTablosu", ref=ws_pos.auto_filter.ref)
-        style = TableStyleInfo(
-            name="TableStyleLight9",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=False,  # zebra yok (premium)
-            showColumnStripes=False,
-        )
-        tab.tableStyleInfo = style
-        ws_pos.add_table(tab)
-
-        # Auto column widths (premium-safe: wrap columns wider)
-        for c in range(1, df.shape[1] + 1):
-            col_letter = get_column_letter(c)
-            name = ws_pos.cell(row=1, column=c).value
-            # base widths
-            base = 12
-            if name in ("Not",):
-                base = 44
-            elif name in ("Durum", "İz Süren Yapı", "Aksiyon"):
-                base = 26
-            elif name in ("Ticker", "Blue Sky", "Minervini #5"):
-                base = 10
-            elif name in ("Poz. Değeri", "Risk $"):
-                base = 16
-            ws_pos.column_dimensions[col_letter].width = base
-
-        # Row heights for wrapped text rows
-        for r in range(2, df.shape[0] + 2):
-            ws_pos.row_dimensions[r].height = 18
-
-        ws_pos.row_dimensions[1].height = 22
-
-    # Write to bytes
-    out_buf = io.BytesIO()
-    wb.save(out_buf)
-    out_buf.seek(0)
-    return out_buf.getvalue()
-
-
-# =========================================================
 # SIDEBAR
 # =========================================================
 with st.sidebar:
     st.header("Genel Ayarlar")
+
     default_interval_label = st.selectbox(
         "Varsayılan zaman çözünürlüğü",
         list(INTERVAL_MAP.keys()),
@@ -1793,11 +1569,12 @@ with st.sidebar:
     show_candles = st.checkbox("Mum (Candlestick) göster", value=True)
     show_emas = st.checkbox("EMA'ları göster", value=True)
     show_line = st.checkbox("Fiyat çizgisi (Close) göster", value=True)
+    show_volume = st.checkbox("Hacim barlarını göster (FAZ-1)", value=False)
     st.caption("Hepsini kapatırsan çizgi otomatik açılır.")
 
     st.divider()
     show_quote = st.checkbox("Quote (anlık fiyat) kullan", value=False)
-    st.caption("Quote açarsan +1 API çağrısı (ticker başına). Free planda pre/post-market genelde yok.")
+    st.caption("Quote açarsan +1 API çağrısı (ticker başına).")
 
     st.divider()
     st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
@@ -1806,7 +1583,8 @@ with st.sidebar:
         show_cols = [
             "timestamp", "ticker", "timeframe", "price",
             "setup_score", "timing_score", "total_score", "status_tag",
-            "minervini5_ok", "stop", "tp1", "tp2"
+            "minervini5_ok", "stop", "tp1", "tp2",
+            "rs_new_high", "dry_ok", "hi_band"
         ]
         show_cols = [c for c in show_cols if c in df_mem.columns]
         st.dataframe(df_mem[show_cols].iloc[::-1], use_container_width=True, hide_index=True)
@@ -1882,12 +1660,42 @@ with tab_single:
 
                 # 52W data (daily)
                 low_52w, high_52w = (float("nan"), float("nan"))
+                df_daily = None
+                df_spy = None
                 try:
                     low_52w, high_52w = fetch_daily_52w(ticker)
+                    df_daily = fetch_daily_df(ticker, bars=320)
+                    df_spy = fetch_daily_df("SPY", bars=320)
                 except Exception:
                     pass
 
-                plan = build_trade_plan(df, low_52w=low_52w, high_52w=high_52w)
+                # FAZ-1 RS + Volume (daily based)
+                rs_metrics = {}
+                vol_metrics = {}
+                try:
+                    if df_daily is not None and df_spy is not None and not df_daily.empty and not df_spy.empty:
+                        rs_metrics = compute_rs_metrics(df_daily, df_spy)
+                except Exception:
+                    rs_metrics = {}
+
+                # volume module on current interval df (because chart/entry band is that df)
+                # NOTE: “kuruma” mantığı entry bandındayken anlamlı; bu yüzden in_entry_band = True/False plan içinde
+                # burada sadece metrics'i çıkarıyoruz; plan’a veriyoruz.
+                # in_entry_band bilgisi plan içinde hesaplandığı için, kuruma modülünü iki aşamalı yapıyoruz:
+                # önce geçici in_entry_band hesaplayıp metrik çıkarıyoruz.
+                try:
+                    tmp_last = df.iloc[-1]
+                    tmp_close = float(tmp_last["close"])
+                    tmp_ema20 = float(df.iloc[-1]["ema20"])
+                    tmp_ema50 = float(df.iloc[-1]["ema50"])
+                    tmp_entry_low = float(min(tmp_ema20, tmp_ema50))
+                    tmp_entry_high = float(max(tmp_ema20, tmp_ema50))
+                    tmp_in_entry = bool(tmp_entry_low <= tmp_close <= tmp_entry_high)
+                    vol_metrics = analyze_volume_profile(df, in_entry_band=tmp_in_entry)
+                except Exception:
+                    vol_metrics = {}
+
+                plan = build_trade_plan(df, low_52w=low_52w, high_52w=high_52w, rs_metrics=rs_metrics, vol_metrics=vol_metrics)
 
                 q = {}
                 quote_price = None
@@ -1927,6 +1735,9 @@ with tab_single:
                     "total_score": int(plan.total_score),
                     "status_tag": plan.status_tag,
                     "minervini5_ok": bool(plan.minervini5_ok),
+                    "rs_new_high": bool(plan.rs_new_high),
+                    "dry_ok": bool(plan.dry_ok),
+                    "hi_band": str(plan.high_proximity_band),
                     "entry_low": round(float(plan.entry_low), 4),
                     "entry_high": round(float(plan.entry_high), 4),
                     "stop": round(float(plan.stop), 4),
@@ -1958,8 +1769,15 @@ with tab_single:
                         f"Noise: {plan.debug.get('stop_noise', float('nan')):.2f}"
                     )
 
-                st.caption(f"Minervini #5: 52W dip {plan.low_52w:.2f} → {'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'}")
+                st.markdown(
+                    f"<span class='badge'>Minervini #5: {'✅' if plan.minervini5_ok else '❌'} </span> "
+                    f"<span class='badge'>52W Zirve: {plan.high_proximity_band}</span> "
+                    f"<span class='badge'>RS yeni zirve: {'✅' if plan.rs_new_high else '⚠️'}</span> "
+                    f"<span class='badge'>Hacim kuruma: {'✅' if plan.dry_ok else '⚠️'}</span>",
+                    unsafe_allow_html=True,
+                )
 
+                st.markdown('<div class="card">', unsafe_allow_html=True)
                 st.subheader("📌 İşlem Planı")
                 table = pd.DataFrame(
                     {
@@ -1976,14 +1794,32 @@ with tab_single:
                     }
                 )
                 st.table(table)
+                st.markdown('</div>', unsafe_allow_html=True)
 
-                st.subheader("🧠 Skor Dağılımı (Legacy)")
+                st.subheader("🧠 Skor Dağılımı (Core + FAZ-1)")
                 b = plan.breakdown
                 bdf = pd.DataFrame(
                     {
-                        "Bileşen": ["Trend", "Fiyat/EMA150", "Momentum (RSI)", "Volatilite (ATR%)", "Uzama (EMA50)"],
-                        "Puan": [b.trend_stack, b.price_vs_ema150, b.momentum_rsi, b.volatility_atr, b.extension_vs_ema50],
-                        "Maks": [30, 20, 20, 15, 15],
+                        "Bileşen": [
+                            "Trend",
+                            "Fiyat/EMA150",
+                            "Momentum (RSI)",
+                            "Volatilite (ATR%)",
+                            "Uzama (EMA50)",
+                            "RS Liderliği (FAZ-1)",
+                            "Hacim Onayı (FAZ-1)",
+                            "Zirve Yakınlığı (FAZ-1)",
+                        ],
+                        "Puan": [
+                            b.trend_stack, b.price_vs_ema150, b.momentum_rsi, b.volatility_atr, b.extension_vs_ema50,
+                            b.rs_leadership, b.volume_confirmation, b.high_proximity
+                        ],
+                        "Not": [
+                            "", "", "", "", "",
+                            "RS hattı/performans",
+                            "Kuruma + breakout hacmi",
+                            "52W high’a yakınlık",
+                        ],
                     }
                 )
                 st.table(bdf)
@@ -2053,10 +1889,8 @@ with tab_single:
                 if np.isfinite(cur_price) and np.isfinite(entry0) and entry0 > 0:
                     move_pct = (cur_price - entry0) / entry0 * 100.0
                     if move_pct >= 5.0:
-                        sug_stop = max(stop0, entry0)
-                        suggestions.append(
-                            f"Entry’ye göre %+{move_pct:.1f}. Stop’u en az **break-even** seviyesine çekmeyi düşünebilirsin: {sug_stop:.2f}"
-                        )
+                        sug_stop = max(stop0, entry0)  # break-even
+                        suggestions.append(f"Entry’ye göre %+{move_pct:.1f}. Stop’u en az **break-even** seviyesine çekmeyi düşünebilirsin: {sug_stop:.2f}")
 
                 if np.isfinite(tp1_0) and cur_price >= tp1_0:
                     ema20_now = float(df.iloc[-1]["ema20"])
@@ -2074,7 +1908,7 @@ with tab_single:
 
                 # ========= PDF =========
                 st.subheader("📄 Rapor")
-                pdf_bytes = build_pdf_bytes_single(
+                pdf_bytes = build_pdf_bytes(
                     ticker=ticker,
                     interval_label=interval_label,
                     bars=bars,
@@ -2093,6 +1927,7 @@ with tab_single:
                     st.json(plan.debug)
 
     with right:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Grafik")
         if "__df" not in st.session_state:
             st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
@@ -2101,16 +1936,17 @@ with tab_single:
             ticker = st.session_state["__ticker"]
             plan = st.session_state["__plan"]
             last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
-            fig = plot_chart(df, ticker, plan, last_price_line, show_candles, show_emas, show_line)
+            fig = plot_chart(df, ticker, plan, last_price_line, show_candles, show_emas, show_line, show_volume)
             st.plotly_chart(fig, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # =========================================================
-# TAB 2: PORTFOLIO
+# TAB 2: PORTFOLIO (same as your V5.2 with BlueSky)
 # =========================================================
 with tab_portfolio:
     st.subheader("🧳 Portföy Analiz")
-    st.caption("Portföy satırlarını gir: ticker, adet, alış ort., stop, TP1, TP2. Analiz → eldeki pozisyon dili + risk + auto kıyas.")
+    st.caption("Portföy satırlarını gir: ticker, adet, alış ort., stop, TP1, TP2.")
 
     top_left, top_right = st.columns([0.65, 0.35], vertical_alignment="top")
 
@@ -2156,7 +1992,7 @@ with tab_portfolio:
             hide_index=True,
             column_config={
                 "ticker": st.column_config.TextColumn("Ticker", required=True),
-                "qty": st.column_config.NumberColumn("Adet", min_value=0.0, step=1.0),
+                "qty": st.column_config.NumberColumn("Adet (opsiyonel)", min_value=0.0, step=1.0),
                 "avg_cost": st.column_config.NumberColumn("Alış Ort.", min_value=0.0, step=0.01, format="%.2f"),
                 "stop": st.column_config.NumberColumn("Stop", min_value=0.0, step=0.01, format="%.2f"),
                 "tp1": st.column_config.NumberColumn("TP1", min_value=0.0, step=0.01, format="%.2f"),
@@ -2169,7 +2005,7 @@ with tab_portfolio:
             "Portföy analiz zaman dilimi (ana karar için günlük önerilir)",
             list(INTERVAL_MAP.keys()),
             index=list(INTERVAL_MAP.keys()).index("Günlük (1day)"),
-            key="pf_interval",
+            key="pf_interval"
         )
         analyze_pf = st.button("Portföyü Analiz Et", type="primary", use_container_width=True)
 
@@ -2201,7 +2037,6 @@ with tab_portfolio:
                         try:
                             payload = td_time_series(tkr, interval, bars)
                             dfi = parse_ohlcv(payload)
-
                             dfi["ema20"] = ema(dfi["close"], 20)
                             dfi["ema50"] = ema(dfi["close"], 50)
                             dfi["ema150"] = ema(dfi["close"], 150)
@@ -2215,11 +2050,30 @@ with tab_portfolio:
                             except Exception:
                                 pass
 
-                            plan = build_trade_plan(dfi, low_52w=low_52w, high_52w=high_52w)
+                            # FAZ-1 RS for portfolio (daily only)
+                            rs_metrics = {}
+                            try:
+                                df_d = fetch_daily_df(tkr, bars=320)
+                                df_s = fetch_daily_df("SPY", bars=320)
+                                rs_metrics = compute_rs_metrics(df_d, df_s)
+                            except Exception:
+                                rs_metrics = {}
+
+                            # volume metrics based on current interval
+                            vol_metrics = {}
+                            try:
+                                tmp_close = float(dfi.iloc[-1]["close"])
+                                tmp_ema20 = float(dfi.iloc[-1]["ema20"])
+                                tmp_ema50 = float(dfi.iloc[-1]["ema50"])
+                                tmp_in_entry = bool(min(tmp_ema20, tmp_ema50) <= tmp_close <= max(tmp_ema20, tmp_ema50))
+                                vol_metrics = analyze_volume_profile(dfi, in_entry_band=tmp_in_entry)
+                            except Exception:
+                                vol_metrics = {}
+
+                            plan = build_trade_plan(dfi, low_52w=low_52w, high_52w=high_52w, rs_metrics=rs_metrics, vol_metrics=vol_metrics)
 
                             candle_close = float(dfi.iloc[-1]["close"])
                             price = candle_close
-
                             if show_quote:
                                 try:
                                     q = td_quote(tkr)
@@ -2228,7 +2082,7 @@ with tab_portfolio:
                                 except Exception:
                                     pass
 
-                            # Blue Sky + trailing structure
+                            # Blue Sky (portfolio only)
                             high_52w_roll, low_52w_roll = rolling_52w_levels(dfi, bars_1day=260)
                             blue = is_blue_sky(price, high_52w_roll, threshold=0.98)
 
@@ -2255,7 +2109,6 @@ with tab_portfolio:
                             rows.append({
                                 "Ticker": tkr,
                                 "Fiyat": round(price, 2),
-                                "Qty": round(qty, 2) if np.isfinite(qty) else "",
                                 "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
                                 "P&L %": round(pnl_pct, 2) if np.isfinite(pnl_pct) else "",
                                 "Stop": round(user_stop, 2) if np.isfinite(user_stop) else "",
@@ -2270,6 +2123,9 @@ with tab_portfolio:
                                 "Timing": plan.timing_score,
                                 "Durum": plan.status_tag,
                                 "Minervini #5": "OK" if plan.minervini5_ok else "FAIL",
+                                "FAZ-1: Zirve": plan.high_proximity_band,
+                                "FAZ-1: RS": "✅" if plan.rs_new_high else "⚠️",
+                                "FAZ-1: Kuruma": "✅" if plan.dry_ok else "⚠️",
                                 "Auto Stop": round(plan.stop, 2),
                                 "Auto TP1": round(plan.tp1, 2),
                                 "Auto TP2": round(plan.tp2, 2),
@@ -2287,32 +2143,9 @@ with tab_portfolio:
                         except Exception as e:
                             rows.append({
                                 "Ticker": tkr,
-                                "Fiyat": "",
-                                "Qty": round(qty, 2) if np.isfinite(qty) else "",
-                                "Alış Ort.": round(avg_cost, 2) if np.isfinite(avg_cost) else "",
-                                "P&L %": "",
-                                "Stop": "",
-                                "Stop Mesafe %": "",
-                                "TP1": "",
-                                "TP1 Mesafe %": "",
-                                "TP2": "",
-                                "TP2 Mesafe %": "",
-                                "R (TP1/Stop)": "",
-                                "R (TP2/Stop)": "",
-                                "Setup": "",
-                                "Timing": "",
                                 "Durum": "HATA",
-                                "Minervini #5": "",
-                                "Auto Stop": "",
-                                "Auto TP1": "",
-                                "Auto TP2": "",
-                                "Poz. Değeri": "",
-                                "Risk $": "",
                                 "Aksiyon": "HATA",
                                 "Not": f"Veri/analiz hatası: {e}",
-                                "52W High": "",
-                                "Blue Sky": "",
-                                "İz Süren Yapı": "",
                             })
 
                 out = pd.DataFrame(rows)
@@ -2320,63 +2153,16 @@ with tab_portfolio:
                 st.markdown("### Sonuç Tablosu")
                 st.dataframe(out, use_container_width=True, hide_index=True)
 
-                # KPI summary
-                kpis = compute_portfolio_kpis(out)
-
-                st.markdown("### 📌 Portföy Özeti")
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("Portföy Değeri", fmt_money(kpis.get("portfolio_value", np.nan)))
-                c2.metric("Anlık P&L ($)", fmt_money(kpis.get("pnl_value", np.nan)))
-                c3.metric("Anlık P&L (%)", fmt_pct(kpis.get("pnl_pct", np.nan)))
-                c4.metric("TP1 Hepsi Olursa (Max Kâr)", fmt_money(kpis.get("max_profit_tp1", np.nan)))
-                c5.metric("Stop Hepsi Olursa (Max Zarar)", fmt_money(kpis.get("max_loss_stop", np.nan)))
-
-                # Premium exports (PDF + Excel)
-                st.markdown("### ⬇️ İndir (Premium)")
-                title = "MinerWin – Portföy Analizi"
-                pdf_bytes = build_portfolio_pdf_bytes(
-                    title=title,
-                    out=out,
-                    kpis=kpis,
-                    interval_label=interval_label_pf,
-                    bars=bars,
-                )
-                xls_bytes = build_portfolio_excel_bytes(
-                    title=title,
-                    out=out,
-                    kpis=kpis,
-                    interval_label=interval_label_pf,
-                    bars=bars,
-                )
-
-                d1, d2 = st.columns(2)
-                with d1:
-                    st.download_button(
-                        "📄 Portföy Raporu (PDF) indir",
-                        data=pdf_bytes,
-                        file_name=f"MinerWin_Portfoy_Analizi_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
-                with d2:
-                    st.download_button(
-                        "📊 Portföy Raporu (Excel) indir",
-                        data=xls_bytes,
-                        file_name=f"MinerWin_Portfoy_Analizi_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-
-                # Blue Sky informational box
                 st.markdown("### 🔵 Blue Sky Evresi (Bilgilendirme)")
                 st.caption("Sadece kârda olan ve 52W zirve bölgesindeki pozisyonlar için görünür.")
-                if not out.empty:
-                    blue_rows = out[out["Blue Sky"].astype(str).str.contains("🔵", na=False)].copy() if "Blue Sky" in out.columns else pd.DataFrame()
+
+                if not out.empty and "Blue Sky" in out.columns:
+                    blue_rows = out[out["Blue Sky"].astype(str).str.contains("🔵", na=False)].copy()
                     if blue_rows.empty:
                         st.info("Şu an Blue Sky koşulunda pozisyon yok.")
                     else:
                         for _, rr in blue_rows.iterrows():
-                            st.markdown(f"**{rr.get('Ticker','')}**")
+                            st.markdown(f"**{rr['Ticker']}**")
                             st.write("• Fiyat, 52 haftalık zirve bölgesinde işlem görüyor.")
                             st.write("• Geçmiş direnç seviyeleri bulunmuyor.")
                             st.write("• Bu evrede hedef seviyeler yerine trend yapısı izlenir.")
@@ -2384,17 +2170,11 @@ with tab_portfolio:
                                 st.write(f"📐 İz Süren Yapı: {rr['İz Süren Yapı']}")
                             st.divider()
 
-                st.markdown("### Hızlı Özet")
-                if not out.empty and "Durum" in out.columns:
-                    a = out[out["Durum"].astype(str).str.startswith("🟢")]
-                    b = out[out["Durum"].astype(str).str.startswith("🟡")]
-                    c = out[out["Durum"].astype(str).str.startswith("⚫")]
-                    d = out[out["Durum"].astype(str).str.startswith("🔴")]
-                    e = out[out["Durum"].astype(str).str.startswith("🟣")]
-
-                    colx, coly, colz, colw, colv = st.columns(5)
-                    colx.metric("🟢 Alım Bölgesi", len(a))
-                    coly.metric("🟡 Pullback", len(b))
-                    colz.metric("⚫ Uzamış", len(c))
-                    colw.metric("🔴 Trend Bozuk", len(d))
-                    colv.metric("🟣 52W Filtresi", len(e))
+                csv_bytes = out.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Portföy Analiz CSV indir",
+                    data=csv_bytes,
+                    file_name="portfolio_analysis.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
