@@ -26,12 +26,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Tuple
 
-# PDF (WeasyPrint)
-try:
-    from weasyprint import HTML as _WeasyprintHTML
-    _WEASYPRINT_OK = True
-except ImportError:
-    _WEASYPRINT_OK = False
+# PDF (ReportLab)
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.lib import colors
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # Excel (openpyxl)
 from openpyxl import Workbook
@@ -1227,256 +1229,93 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
 
 # =========================================================
-
+# PDF EXPORT (Tek Hisse)
 # =========================================================
-# PDF EXPORT (Tek Hisse)  — WeasyPrint
-# =========================================================
-
-_PDF_CSS = """
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:'Helvetica Neue',Arial,sans-serif; font-size:10px; color:#0F172A; background:#fff; }
-.header { background:#0F172A; display:flex; align-items:stretch; height:80px; }
-.header-logo { background:#0F172A; display:flex; align-items:center;
-  justify-content:center; padding:0 14px; border-right:1px solid #1E293B; flex-shrink:0; }
-.header-logo img { height:60px; width:auto; }
-.header-body { flex:1; display:flex; align-items:center;
-  justify-content:space-between; padding:0 24px; }
-.header-title { font-size:14px; font-weight:700; color:#F1F5F9; margin-bottom:5px; }
-.header-badge { display:inline-block; background:#1E3A5F; color:#93C5FD;
-  font-size:9px; font-weight:700; padding:2px 10px; border-radius:12px;
-  border:1px solid #2563EB; margin-right:5px; }
-.header-meta { text-align:right; color:#64748B; font-size:8px; line-height:1.9; }
-.header-meta strong { color:#94A3B8; }
-.content { padding:14px 24px 20px; }
-.status-band { padding:8px 14px; border-radius:5px; margin-bottom:10px; border-left:4px solid; }
-.status-label { font-size:10px; font-weight:700; text-transform:uppercase; }
-.warning-box { background:#FFF7ED; border-left:3px solid #F97316; padding:5px 11px;
-  border-radius:4px; font-size:8px; font-weight:700; color:#9A3412; margin-bottom:9px; }
-.kpi-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:5px; margin-bottom:12px; }
-.kpi-card { background:#F8FAFC; border:1px solid #CBD5E1; border-radius:5px; padding:8px 9px; }
-.kpi-label { font-size:7px; font-weight:700; color:#64748B; text-transform:uppercase;
-  letter-spacing:.4px; margin-bottom:3px; }
-.kpi-value { font-size:13px; font-weight:800; color:#0F172A; line-height:1.1; }
-.bar-wrap { display:flex; margin-top:5px; border-radius:3px; overflow:hidden; height:7px; }
-.bar-fill { height:7px; }
-.bar-empty { height:7px; background:#CBD5E1; }
-.two-col { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
-.box { border:1px solid #E2E8F0; border-radius:5px; padding:9px; }
-.sec-title { font-size:8px; font-weight:700; color:#1E40AF; text-transform:uppercase;
-  letter-spacing:.5px; border-bottom:1.5px solid #BFDBFE; padding-bottom:3px; margin-bottom:7px; }
-table { width:100%; border-collapse:collapse; }
-table th { background:#EFF6FF; font-size:7.5px; font-weight:700; color:#1E40AF;
-  text-align:left; padding:4px 7px; }
-table td { font-size:8.5px; padding:4px 7px; border-bottom:1px solid #F1F5F9;
-  color:#1E293B; vertical-align:middle; }
-table tr:last-child td { border-bottom:none; }
-table tr:nth-child(even) td { background:#F8FAFC; }
-.td-param { color:#64748B; font-weight:600; width:42%; }
-.td-val { color:#0F172A; font-weight:700; }
-.td-red { color:#991B1B; font-weight:700; }
-.td-green { color:#166534; font-weight:700; }
-.td-muted { color:#94A3B8; }
-.td-right { text-align:right; }
-.score-bar { width:65px; height:7px; background:#E2E8F0; border-radius:3px;
-  border:1px solid #CBD5E1; overflow:hidden; display:inline-block; vertical-align:middle; }
-.score-bar-fill { height:100%; background:#3B82F6; }
-.score-bar-bonus { background:#10B981; }
-.scenario-box { background:#F0F9FF; border-left:3px solid #3B82F6;
-  border-radius:4px; padding:9px 12px; font-size:8.5px; line-height:1.6; color:#1E3A5F; }
-.footer { margin-top:12px; padding-top:6px; border-top:1px solid #E2E8F0;
-  display:flex; justify-content:space-between; font-size:7px; color:#94A3B8; }
-"""
-
-
-def _status_colors_wp(tag):
-    t = tag.upper()
-    if "ALIM" in t:       return "#166534", "#DCFCE7"
-    if "PULLBACK" in t or "BEKLE" in t: return "#92400E", "#FEF9C3"
-    if "KONSOL" in t:     return "#1E40AF", "#DBEAFE"
-    if "BOZULDU" in t or "UZAMI" in t or "52W" in t: return "#991B1B", "#FEE2E2"
-    return "#475569", "#F1F5F9"
-
-
-def _header_html(logo_b64, ticker, interval_label, bars, date_str):
-    logo = (f'<img src="data:image/png;base64,{logo_b64}" />' if logo_b64 else "")
-    return (
-        '<div class="header">'
-        f'<div class="header-logo">{logo}</div>'
-        '<div class="header-body">'
-        "<div>"
-        '<div class="header-title">Teknik Analiz Raporu</div>'
-        "<div>"
-        f'<span class="header-badge">{html.escape(ticker)}</span>'
-        f'<span class="header-badge" style="background:#1E293B;color:#94A3B8;border-color:#334155">'
-        f'{html.escape(interval_label)}</span>'
-        "</div></div>"
-        '<div class="header-meta">'
-        f"Bar: <strong>{bars}</strong><br>"
-        f"<strong>{html.escape(date_str)}</strong>"
-        "</div></div></div>"
-    )
-
-
-def _bar(pct, color="#3B82F6"):
-    p = max(0, min(100, round(pct)))
-    return (
-        f'<div class="bar-wrap">'
-        f'<div class="bar-fill" style="width:{p}%;background:{color}"></div>'
-        f'<div class="bar-empty" style="width:{100-p}%"></div>'
-        "</div>"
-    )
-
-
-def _score_bar(pts, mx, bonus=False):
-    p = int(pts / mx * 100) if mx else 0
-    cls = "score-bar-bonus" if bonus else ""
-    return (
-        f'<div class="score-bar">'
-        f'<div class="score-bar-fill {cls}" style="width:{p}%"></div>'
-        "</div>"
-    )
-
-
-def _render_pdf_wp(body_html):
-    if not _WEASYPRINT_OK:
-        raise RuntimeError("weasyprint kurulu degil -- pip install weasyprint")
-    doc = (
-        '<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8">'
-        f"<style>{_PDF_CSS}</style></head><body>{body_html}</body></html>"
-    )
-    return _WeasyprintHTML(string=doc, base_url="/").write_pdf()
+def _wrap_lines(text: str, max_chars: int = 92):
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            out.append("")
+            continue
+        while len(line) > max_chars:
+            out.append(line[:max_chars])
+            line = line[max_chars:]
+        out.append(line)
+    return out
 
 
 def build_pdf_bytes_single(
     ticker: str,
     interval_label: str,
     bars: int,
-    plan: "TradePlan",
-    quote: "dict | None",
-    logo_b64_str: str = "",
-) -> bytes:
-    sc, sb    = _status_colors_wp(plan.status_tag)
-    date_str  = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    close_val = plan.debug.get("close", float("nan"))
+    plan: TradePlan,
+    quote: dict | None,
+):
+    from reportlab.pdfgen import canvas
 
-    def scolor(v):
-        return "#166534" if v >= 75 else ("#1D4ED8" if v >= 50 else "#64748B")
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
 
-    # KPI Grid
-    kpi_items = [
-        ("Guncel Fiyat",  f"${close_val:.2f}" if np.isfinite(close_val) else "---", None, None),
-        ("Toplam Skor",   f"{plan.total_score}/100",  plan.total_score, "#3B82F6"),
-        ("Setup",         f"{plan.setup_score}/100",  plan.setup_score, "#3B82F6"),
-        ("Timing",        f"{plan.timing_score}/100", plan.timing_score,"#166534"),
-        ("Kapasite",      plan.capacity_level,         None, None),
-        ("Minervini #5",  "GECTI" if plan.minervini5_ok else "GECMEDI", None, None),
-    ]
-    m5_color = "#166534" if plan.minervini5_ok else "#991B1B"
-    kpi_html = '<div class="kpi-grid">'
-    for i, (lbl, val, bar_pct, bar_c) in enumerate(kpi_items):
-        vc = scolor(bar_pct) if bar_pct is not None else (m5_color if i == 5 else "#0F172A")
-        bar = _bar(bar_pct, bar_c) if bar_pct is not None else ""
-        kpi_html += (
-            '<div class="kpi-card">'
-            f'<div class="kpi-label">{lbl}</div>'
-            f'<div class="kpi-value" style="color:{vc}">{html.escape(str(val))}</div>'
-            f"{bar}</div>"
-        )
-    kpi_html += "</div>"
+    x = 2.0 * cm
+    y = h - 2.0 * cm
+    lh = 14
 
-    # Warning
-    warn = (
-        '<div class="warning-box">&#9888; Yuksek volatilite &mdash; '
-        "stop cap devrede, pozisyon boyunu kucult.</div>"
-        if plan.high_vol_warning else ""
-    )
+    def draw_line(txt, font="Helvetica", size=11, space=lh):
+        nonlocal y
+        c.setFont(font, size)
+        c.drawString(x, y, txt)
+        y -= space
+        if y < 2.0 * cm:
+            c.showPage()
+            y = h - 2.0 * cm
 
-    # Plan table
-    rr1  = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "---"
-    rr2  = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "---"
-    dist = f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "---"
-    plan_rows = [
-        ("Giris Bolgesi", f"${plan.entry_low:.2f} &ndash; ${plan.entry_high:.2f}"),
-        ("Stop",          f'<span class="td-red">${plan.stop:.2f}</span>'),
-        ("TP1",           f'<span class="td-green">${plan.tp1:.2f}</span> <span class="td-muted">({rr1})</span>'),
-        ("TP2",           f'<span class="td-green">${plan.tp2:.2f}</span> <span class="td-muted">({rr2})</span>'),
-        ("52W Dip/Zirve", f"${plan.low_52w:.2f} / ${plan.high_52w:.2f}" if np.isfinite(plan.low_52w) else "---"),
-        ("Zirve Uzaklik", dist),
-        ("RSI Yonu",      html.escape(plan.rsi_direction_label)),
-        ("Dar Baz",       "Var" if plan.base_detected else "Yok"),
-        ("Kirilim",       "Var" if plan.breakout_detected else "Yok"),
-    ]
-    plan_tbl = (
-        "<table><tr><th>Parametre</th><th>Deger</th></tr>"
-        + "".join(f'<tr><td class="td-param">{r}</td><td class="td-val">{v}</td></tr>' for r, v in plan_rows)
-        + "</table>"
-    )
+    draw_line("Tek Hisse Teknik Analiz Raporu (V6.1)", font="Helvetica-Bold", size=16, space=18)
+    draw_line(f"Ticker: {ticker}    Zaman: {interval_label}    Bar: {bars}", size=11)
+    draw_line(f"Tarih: {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", size=10)
+    draw_line("", size=10, space=10)
 
-    # Score table
-    b = plan.breakdown
-    skor_items = [
-        ("Trend",           b.trend_stack,        30, False),
-        ("Fiyat/EMA150",    b.price_vs_ema150,    20, False),
-        ("Momentum (RSI)",  b.momentum_rsi,       20, False),
-        ("Volatilite(ATR)", b.volatility_atr,     15, False),
-        ("Uzama (EMA50)",   b.extension_vs_ema50, 15, False),
-        ("52W Zirve",       b.near_52w_high,      10, False),
-        ("RSI Yonu",        b.rsi_direction,       5, False),
-        ("Dar Baz(bonus)",  b.base_bonus,          7, True),
-        ("Kirilim(bonus)",  b.breakout_bonus,      8, True),
-    ]
-    skor_tbl = (
-        "<table><tr><th>Bilesen</th>"
-        '<th class="td-right">Puan</th><th class="td-right">Maks</th><th>Ilerleme</th></tr>'
-        + "".join(
-            f"<tr><td>{html.escape(n)}</td>"
-            f'<td class="td-right td-val">{p}</td>'
-            f'<td class="td-right td-muted">{m}</td>'
-            f"<td>{_score_bar(p, m, bonus)}</td></tr>"
-            for n, p, m, bonus in skor_items
-        )
-        + "</table>"
-    )
+    draw_line("Ozet", font="Helvetica-Bold", size=13, space=16)
+    draw_line(f"Guncel Fiyat: {plan.debug.get('close', float('nan')):.2f}", size=11)
+    draw_line(f"Toplam Skor: {plan.total_score}/100    Etiket: {plan.label}", size=11)
+    draw_line(f"Setup: {plan.setup_score}/100    Timing: {plan.timing_score}/100", size=11)
+    draw_line(f"RSI Yonu: {plan.rsi_direction_label}  (egim={plan.rsi_slope_val:.2f})", size=10)
+    draw_line(f"52W Zirveye Uzaklik: %{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "52W Zirve: —", size=10)
+    draw_line(f"Minervini #5: {'OK' if plan.minervini5_ok else 'FAIL'} | 52W dip={plan.low_52w:.2f}", size=10, space=12)
+    draw_line(f"Giris: {plan.entry_low:.2f} - {plan.entry_high:.2f}", size=11)
+    draw_line(f"Stop: {plan.stop:.2f}", size=11)
+    if plan.high_vol_warning:
+        draw_line("UYARI: Yuksek volatilite - stop cap devrede, pozisyon boyunu kucult.", size=10)
+    draw_line(f"TP1: {plan.tp1:.2f} (R/R=1:{plan.rr_tp1:.2f})", size=11)
+    draw_line(f"TP2: {plan.tp2:.2f} (R/R=1:{plan.rr_tp2:.2f})", size=11)
+    draw_line(f"Kapasite: {plan.capacity_level}", size=10, space=12)
+    draw_line("", size=10, space=10)
 
-    scenario = html.escape(plan.scenario.replace("**", ""))
-
-    # Quote
-    q_html = ""
     if quote and isinstance(quote, dict):
-        q_rows = "".join(
-            f'<tr><td class="td-param">{html.escape(k)}</td><td class="td-val">{html.escape(str(quote[k]))}</td></tr>'
-            for k in ["name","exchange","currency","price","change","percent_change","previous_close"]
-            if k in quote
-        )
-        if q_rows:
-            q_html = (
-                '<div class="box" style="margin-bottom:12px">'
-                '<div class="sec-title">Quote</div>'
-                f"<table><tr><th>Alan</th><th>Deger</th></tr>{q_rows}</table></div>"
-            )
+        draw_line("Quote (Anlik Ozet)", font="Helvetica-Bold", size=13, space=16)
+        for k in ["name", "exchange", "currency", "close", "price", "change", "percent_change", "previous_close"]:
+            if k in quote:
+                draw_line(f"{k}: {quote[k]}", size=10, space=12)
+        draw_line("", size=10, space=10)
 
-    body = (
-        _header_html(logo_b64_str, ticker, interval_label, bars, date_str)
-        + '<div class="content">'
-        + f'<div class="status-band" style="border-color:{sc};background:{sb}">'
-        + f'<div class="status-label" style="color:{sc}">{html.escape(plan.status_tag)}</div></div>'
-        + warn + kpi_html
-        + '<div class="two-col">'
-        + f'<div class="box"><div class="sec-title">Islem Plani</div>{plan_tbl}</div>'
-        + f'<div class="box"><div class="sec-title">Skor Dagilimi</div>{skor_tbl}</div>'
-        + "</div>"
-        + '<div class="box" style="margin-bottom:12px">'
-        + '<div class="sec-title">Senaryo</div>'
-        + f'<div class="scenario-box">{scenario}</div></div>'
-        + q_html
-        + '<div class="footer">'
-        + "<span>MinerWin V6.2 &nbsp;&middot;&nbsp; Minervini-Based Technical Trading Engine</span>"
-        + "<span>Bu rapor otomatik teknik analiz amaciyla uretilmistir. Yatirim tavsiyesi degildir.</span>"
-        + "</div></div>"
-    )
-    return _render_pdf_wp(body)
+    draw_line("Senaryo", font="Helvetica-Bold", size=13, space=16)
+    for ln in _wrap_lines(plan.scenario, max_chars=95):
+        draw_line(ln, size=10, space=12)
+    draw_line("", size=10, space=10)
+
+    draw_line("Otomatik Teknik Yorum", font="Helvetica-Bold", size=13, space=16)
+    plain = plan.narrative.replace("**", "").replace("  \n", "\n")
+    for ln in _wrap_lines(plain, max_chars=95):
+        draw_line(ln, size=10, space=12)
+
+    c.save()
+    pdf = buf.getvalue()
+    buf.close()
+    return pdf
 
 
+# =========================================================
 # GRAFİK
 # =========================================================
 def plot_chart(
@@ -1873,87 +1712,164 @@ def compute_portfolio_kpis(out: pd.DataFrame) -> Dict[str, float]:
 
 
 # =========================================================
+# PDF EXPORT (Portföy)
+# =========================================================
+def _register_turkish_font_for_pdf() -> str:
+    candidates = [
+        "./DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    for p in candidates:
+        try:
+            if os.path.isfile(p):
+                pdfmetrics.registerFont(TTFont("MW", p))
+                return "MW"
+        except Exception:
+            continue
+    return "Helvetica"
 
-# =========================================================
-# PDF EXPORT (Portföy)  — WeasyPrint
-# =========================================================
+
 def build_portfolio_pdf_bytes(
     title: str,
-    out: "pd.DataFrame",
-    kpis: "Dict[str, float]",
+    out: pd.DataFrame,
+    kpis: Dict[str, float],
     interval_label: str,
     bars: int,
-    logo_b64_str: str = "",
 ) -> bytes:
-    sc, sb   = "#1E40AF", "#DBEAFE"
-    date_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    font_name = _register_turkish_font_for_pdf()
 
-    def fm(v): return f"${v:,.0f}" if np.isfinite(v) else "---"
-    def fp(v): return f"%{v:.1f}"  if np.isfinite(v) else "---"
-
-    pv   = kpis.get("portfolio_value", float("nan"))
-    pnlv = kpis.get("pnl_value",      float("nan"))
-    pnlp = kpis.get("pnl_pct",        float("nan"))
-    mxp  = kpis.get("max_profit_tp1", float("nan"))
-    mxl  = kpis.get("max_loss_stop",  float("nan"))
-    pc   = "#166534" if (np.isfinite(pnlv) and pnlv >= 0) else "#991B1B"
-
-    kpi_html = (
-        '<div class="kpi-grid" style="grid-template-columns:repeat(5,1fr)">'
-        + f'<div class="kpi-card"><div class="kpi-label">Portfoy Degeri</div><div class="kpi-value">{fm(pv)}</div></div>'
-        + f'<div class="kpi-card"><div class="kpi-label">Anlik P&L ($)</div><div class="kpi-value" style="color:{pc}">{fm(pnlv)}</div></div>'
-        + f'<div class="kpi-card"><div class="kpi-label">Anlik P&L (%)</div><div class="kpi-value" style="color:{pc}">{fp(pnlp)}</div></div>'
-        + f'<div class="kpi-card"><div class="kpi-label">Max Kar TP1</div><div class="kpi-value" style="color:#166534">{fm(mxp)}</div></div>'
-        + f'<div class="kpi-card"><div class="kpi-label">Max Zarar Stop</div><div class="kpi-value" style="color:#991B1B">{fm(mxl)}</div></div>'
-        + "</div>"
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=1.6 * cm,
+        rightMargin=1.6 * cm,
+        topMargin=1.6 * cm,
+        bottomMargin=1.6 * cm,
+        title=title,
+        author="MinerWin",
     )
 
-    tbl_html = '<p style="color:#64748B;font-size:9px">Pozisyon tablosu bos.</p>'
-    if out is not None and not out.empty:
-        preferred = [
-            "Ticker","Fiyat","Qty","Alis Ort.","P&L %",
-            "Stop","TP1","TP2","Setup","Timing",
-            "Durum","RS Rating","52W Zirve Uzaklik %","Blue Sky","RSI Yonu",
-        ]
-        col_map = {
-            "Alış Ort.":          "Alis Ort.",
-            "52W Zirve Uzaklık %": "52W Zirve Uzaklik %",
-            "RSI Yönü":           "RSI Yonu",
-        }
-        df = out.rename(columns=col_map).copy()
-        cols = [c for c in preferred if c in df.columns]
-        df = df[cols]
+    styles = getSampleStyleSheet()
+    base = ParagraphStyle("MWBase", parent=styles["Normal"], fontName=font_name, fontSize=9.2, leading=12, textColor=colors.HexColor("#111827"))
+    h1 = ParagraphStyle("MWH1", parent=styles["Heading1"], fontName=font_name, fontSize=16, leading=20, spaceAfter=8, textColor=colors.HexColor("#0F172A"))
+    sub = ParagraphStyle("MWSub", parent=styles["Normal"], fontName=font_name, fontSize=9.2, leading=12, textColor=colors.HexColor("#475569"), spaceAfter=10)
+    kpi_style = ParagraphStyle("MWKPI", parent=styles["Normal"], fontName=font_name, fontSize=10.5, leading=14, textColor=colors.HexColor("#0F172A"))
+    kpi_hint = ParagraphStyle("MWKPIHint", parent=styles["Normal"], fontName=font_name, fontSize=8.6, leading=11, textColor=colors.HexColor("#64748B"))
 
-        def cell(v):
-            if v is None or (isinstance(v, float) and not np.isfinite(v)):
-                return "---"
-            s = str(v)
-            return s.encode("ascii","ignore").decode() or s
+    story = []
+    story.append(Paragraph(title, h1))
+    story.append(Paragraph(f"Zaman dilimi: <b>{interval_label}</b>  |  Bar: <b>{bars}</b>  |  Olusturma: <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b>", sub))
 
-        th = "".join(f"<th>{html.escape(c)}</th>" for c in df.columns)
-        tr = "".join(
-            "<tr>" + "".join(f"<td>{cell(row[c])}</td>" for c in df.columns) + "</tr>"
-            for _, row in df.iterrows()
-        )
-        tbl_html = f'<table style="font-size:8px"><tr>{th}</tr>{tr}</table>'
+    pv = kpis.get("portfolio_value", np.nan)
+    pnlv = kpis.get("pnl_value", np.nan)
+    pnlp = kpis.get("pnl_pct", np.nan)
+    mxp = kpis.get("max_profit_tp1", np.nan)
+    mxl = kpis.get("max_loss_stop", np.nan)
 
-    body = (
-        _header_html(logo_b64_str, "Portfoy", interval_label, bars, date_str)
-        + '<div class="content">'
-        + f'<div class="status-band" style="border-color:{sc};background:{sb}">'
-        + f'<div class="status-label" style="color:{sc}">Portfoy Ozeti</div></div>'
-        + kpi_html
-        + '<div class="box" style="margin-bottom:12px">'
-        + '<div class="sec-title">Pozisyonlar</div>'
-        + tbl_html + "</div>"
-        + '<div class="footer">'
-        + "<span>MinerWin V6.2 &nbsp;&middot;&nbsp; Minervini-Based Technical Trading Engine</span>"
-        + "<span>Bu rapor otomatik teknik analiz amaciyla uretilmistir. Yatirim tavsiyesi degildir.</span>"
-        + "</div></div>"
-    )
-    return _render_pdf_wp(body)
+    kpi_data = [
+        [
+            Paragraph(f"<b>Portfoy Degeri</b><br/>{fmt_money(pv)}", kpi_style),
+            Paragraph(f"<b>Anlik P&amp;L ($)</b><br/>{fmt_money(pnlv)}", kpi_style),
+            Paragraph(f"<b>Anlik P&amp;L (%)</b><br/>{fmt_pct(pnlp)}", kpi_style),
+        ],
+        [
+            Paragraph(f"<b>TP1 Hepsi Olursa (Max Kar)</b><br/>{fmt_money(mxp)}", kpi_style),
+            Paragraph(f"<b>Stop Hepsi Olursa (Max Zarar)</b><br/>{fmt_money(mxl)}", kpi_style),
+            Paragraph("<b>Not</b><br/>Hesaplar Qty ve Alis Ort. girilmis satirlarda gecerlidir.", kpi_hint),
+        ],
+    ]
+    kpi_tbl = Table(kpi_data, colWidths=[(A4[0] - 3.2 * cm) / 3.0] * 3)
+    kpi_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#E5E7EB")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E5E7EB")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(kpi_tbl)
+    story.append(Spacer(1, 10))
+
+    story.append(Paragraph("Pozisyonlar", ParagraphStyle("MWH2", parent=h1, fontSize=12, leading=14, spaceAfter=6)))
+
+    if out is None or out.empty:
+        story.append(Paragraph("Tablo bos.", base))
+        doc.build(story)
+        pdf = buf.getvalue()
+        buf.close()
+        return pdf
+
+    preferred_cols = [
+        "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %", "Stop", "TP1", "TP2",
+        "Setup", "Timing", "Durum", "Liderlik", "RS Rating", "RS Yeni Zirve",
+        "Hacim Kuruması", "52W Zirve Uzaklık %", "Blue Sky", "İz Süren Yapı",
+        "RSI Yönü", "Yüksek Vol Uyarı"
+    ]
+    cols = [c for c in preferred_cols if c in out.columns]
+    dfp = out[cols].copy()
+
+    def _cell_str(v):
+        if v is None:
+            return ""
+        if isinstance(v, float) and (not np.isfinite(v)):
+            return ""
+        return str(v)
+
+    data = [[Paragraph(f"<b>{c}</b>", base) for c in dfp.columns.tolist()]]
+    for _, row in dfp.iterrows():
+        r = []
+        for c in dfp.columns:
+            val = _cell_str(row[c])
+            if len(val) > 46:
+                val = val[:46] + "…"
+            r.append(Paragraph(val.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), base))
+        data.append(r)
+
+    page_w = A4[0] - (1.6 + 1.6) * cm
+    w_map = {
+        "Ticker": 0.08, "Fiyat": 0.07, "Qty": 0.06, "Alış Ort.": 0.09, "P&L %": 0.07,
+        "Stop": 0.07, "TP1": 0.07, "TP2": 0.07, "Setup": 0.06, "Timing": 0.06,
+        "Durum": 0.18, "Blue Sky": 0.06, "İz Süren Yapı": 0.16,
+    }
+    col_widths = [page_w * w_map.get(c, 0.08) for c in dfp.columns]
+
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    tbl_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#CBD5E1")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
+        ("FONT", (0, 0), (-1, -1), font_name),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+    ]
+    right_cols = {"Fiyat", "Qty", "Alış Ort.", "P&L %", "Stop", "TP1", "TP2", "Setup", "Timing"}
+    for ci, c in enumerate(dfp.columns):
+        tbl_style.append(("ALIGN", (ci, 1), (ci, -1), "RIGHT" if c in right_cols else "LEFT"))
+
+    tbl.setStyle(TableStyle(tbl_style))
+    story.append(tbl)
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("Not: Blue Sky sadece karda olan ve 52W zirve bolgesindeki pozisyonlarda gorunur.", kpi_hint))
+
+    doc.build(story)
+    pdf = buf.getvalue()
+    buf.close()
+    return pdf
 
 
+# =========================================================
 # EXCEL EXPORT (Portföy)
 # =========================================================
 def build_portfolio_excel_bytes(
