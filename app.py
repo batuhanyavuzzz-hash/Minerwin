@@ -1342,41 +1342,91 @@ def _pdf_styles(fn: str, fn_bold: str) -> dict:
 
 
 def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict) -> list:
-    """Logo + başlık bloğu — her PDF'in tepesine gider."""
-    from reportlab.platypus import Image as RLImage, HRFlowable
+    """Koyu arka planlı, logolu şık başlık bloğu."""
+    from reportlab.platypus import Image as RLImage
+    from reportlab.lib.styles import ParagraphStyle
 
     story = []
-    # Logo varsa sol köşeye
+
+    # Başlık metnini beyaz yap
+    title_style = ParagraphStyle(
+        "hdr_title", parent=st_styles["h1"],
+        textColor=colors.white, fontSize=16, leading=20,
+    )
+    sub_style = ParagraphStyle(
+        "hdr_sub", parent=st_styles["small"],
+        textColor=colors.HexColor("#94A3B8"), fontSize=8,
+    )
+
+    title_para = Paragraph(title, title_style)
+    sub_para   = Paragraph(subtitle, sub_style)
+    text_cell  = [title_para, Spacer(1, 3), sub_para]
+
     if logo_b64:
         try:
             logo_bytes = base64.b64decode(logo_b64)
             logo_buf   = io.BytesIO(logo_bytes)
-            logo_img   = RLImage(logo_buf, width=2.8*cm, height=0.9*cm)
-            # Logo + başlık yan yana tablo
-            header_data = [[logo_img, Paragraph(title, st_styles["h1"])]]
-            header_tbl  = Table(header_data, colWidths=[3.2*cm, None])
-            header_tbl.setStyle(TableStyle([
-                ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-                ("LEFTPADDING",  (0,0), (-1,-1), 0),
-                ("RIGHTPADDING", (0,0), (-1,-1), 0),
-                ("BOTTOMPADDING",(0,0), (-1,-1), 0),
-                ("TOPPADDING",   (0,0), (-1,-1), 0),
-            ]))
-            story.append(header_tbl)
+            logo_img   = RLImage(logo_buf, width=3.2*cm, height=1.0*cm)
+            header_data = [[logo_img, text_cell]]
+            col_ws = [3.8*cm, None]
         except Exception:
-            story.append(Paragraph(title, st_styles["h1"]))
+            header_data = [["", text_cell]]
+            col_ws = [0.5*cm, None]
     else:
-        story.append(Paragraph(title, st_styles["h1"]))
+        header_data = [["", text_cell]]
+        col_ws = [0.5*cm, None]
 
-    story.append(Paragraph(subtitle, st_styles["small"]))
-    story.append(Spacer(1, 4))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=_C_ACCENT, spaceAfter=10))
+    hdr_tbl = Table(header_data, colWidths=col_ws)
+    hdr_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0, 0), (-1, -1), _C_DARK),
+        ("VALIGN",       (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING",   (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 10),
+        ("LINEBELOW",    (0, 0), (-1, -1), 3, _C_ACCENT),
+    ]))
+    story.append(hdr_tbl)
+    story.append(Spacer(1, 10))
     return story
 
 
+def _score_bar_flowable(value: int, max_val: int, bar_color: "colors.Color", width: float, height: float = 6) -> "Flowable":
+    """Dolu renkli progress bar (ReportLab Drawing)."""
+    from reportlab.graphics.shapes import Drawing, Rect, String
+    from reportlab.graphics import renderPDF
+
+    class _BarFlowable(Flowable):
+        def __init__(self, v, mx, col, w, h):
+            Flowable.__init__(self)
+            self.v = max(0, min(v, mx))
+            self.mx = mx if mx > 0 else 100
+            self.col = col
+            self.width = w
+            self.height = h
+
+        def draw(self):
+            from reportlab.lib.colors import HexColor
+            canvas = self.canv
+            # Arka plan
+            canvas.setFillColor(HexColor("#E2E8F0"))
+            canvas.rect(0, 0, self.width, self.height, fill=1, stroke=0)
+            # Dolu kısım
+            fill_w = self.width * (self.v / self.mx)
+            canvas.setFillColor(self.col)
+            canvas.rect(0, 0, fill_w, self.height, fill=1, stroke=0)
+
+        def wrap(self, aw, ah):
+            return self.width, self.height
+
+    return _BarFlowable(value, max_val, bar_color, width, height)
+
+
 def _kpi_table(rows: list[tuple[str, str]], st_styles: dict, page_w: float,
-               col_ratios: list[float] | None = None) -> Table:
+               col_ratios: list[float] | None = None,
+               score_rows: list[tuple[int, int]] | None = None) -> Table:
     """rows = [(label, value), ...] — yatay KPI kartları.
+    score_rows: [(value, max), ...] eşleşiyorsa her kartta progress bar çizer.
     col_ratios: her kolonun oranı (toplam 1.0), None ise eşit dağılır."""
     n = len(rows)
     if col_ratios and len(col_ratios) == n:
@@ -1384,22 +1434,50 @@ def _kpi_table(rows: list[tuple[str, str]], st_styles: dict, page_w: float,
     else:
         col_ws = [page_w / n] * n
 
+    lbl_style = ParagraphStyle(
+        "kpi_lbl", parent=st_styles["label"],
+        textColor=colors.HexColor("#64748B"), fontSize=7.5,
+    )
     val_style = ParagraphStyle(
         "kpi_val", parent=st_styles["value"],
-        wordWrap="CJK",   # uzun değerleri wrap eder
+        wordWrap="CJK", fontSize=12, leading=15,
     )
-    data = [[Paragraph(lbl, st_styles["label"]) for lbl, _ in rows],
-            [Paragraph(val, val_style)           for _, val in rows]]
-    tbl = Table(data, colWidths=col_ws)
+
+    lbl_row = [Paragraph(lbl, lbl_style) for lbl, _ in rows]
+    val_row = [Paragraph(val, val_style) for _, val in rows]
+
+    if score_rows and len(score_rows) == n:
+        bar_row = []
+        for i, (sv, sm) in enumerate(score_rows):
+            col_w = col_ws[i] - 16  # padding çıkar
+            if sv is not None and sm and sm > 0:
+                # Renk: yüksek=yeşil, orta=mavi, düşük=turuncu
+                ratio = sv / sm
+                if ratio >= 0.70:
+                    bc = colors.HexColor("#16A34A")
+                elif ratio >= 0.45:
+                    bc = colors.HexColor("#3B82F6")
+                else:
+                    bc = colors.HexColor("#F59E0B")
+                bar_row.append(_score_bar_flowable(sv, sm, bc, col_w, 5))
+            else:
+                bar_row.append(Paragraph("", st_styles["small"]))
+        data = [lbl_row, val_row, bar_row]
+        row_heights = [14, 20, 9]
+    else:
+        data = [lbl_row, val_row]
+        row_heights = [14, 20]
+
+    tbl = Table(data, colWidths=col_ws, rowHeights=row_heights)
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), _C_LIGHT),
-        ("BOX",        (0,0), (-1,-1), 0.5, _C_BORDER),
-        ("INNERGRID",  (0,0), (-1,-1), 0.3, _C_BORDER),
-        ("LEFTPADDING",  (0,0), (-1,-1), 8),
-        ("RIGHTPADDING", (0,0), (-1,-1), 8),
-        ("TOPPADDING",   (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
-        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+        ("BACKGROUND",   (0, 0), (-1, -1), _C_LIGHT),
+        ("BOX",          (0, 0), (-1, -1), 0.5, _C_BORDER),
+        ("INNERGRID",    (0, 0), (-1, -1), 0.3, _C_BORDER),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING",   (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
+        ("VALIGN",       (0, 0), (-1, -1), "MIDDLE"),
     ]))
     return tbl
 
@@ -1501,8 +1579,17 @@ def build_pdf_bytes_single(
         ("Kapasite",     plan.capacity_level),
         ("Min. #5",      "GECTI" if plan.minervini5_ok else "GECMEDI"),
     ]
+    kpi_score_rows = [
+        (None, None),
+        (plan.total_score, 100),
+        (plan.setup_score, 100),
+        (plan.timing_score, 100),
+        (None, None),
+        (None, None),
+    ]
     story.append(_kpi_table(kpi_rows, st, page_w,
-                            col_ratios=[0.22, 0.18, 0.15, 0.15, 0.15, 0.15]))
+                            col_ratios=[0.22, 0.18, 0.15, 0.15, 0.15, 0.15],
+                            score_rows=kpi_score_rows))
     story.append(Spacer(1, 10))
 
     # Uyarılar
@@ -1532,23 +1619,65 @@ def build_pdf_bytes_single(
     story.append(_data_table(plan_headers, plan_body, st, [page_w*0.45, page_w*0.55]))
     story.append(Spacer(1, 10))
 
-    # Skor dagilimi
+    # Skor dagilimi — progress barli
     story.append(Paragraph("Skor Dagilimi", st["h2"]))
     story.append(Spacer(1, 4))
     b = plan.breakdown
-    skor_body = [
-        ["Trend",            b.trend_stack,        30],
-        ["Fiyat/EMA150",     b.price_vs_ema150,    20],
-        ["Momentum (RSI)",   b.momentum_rsi,       20],
-        ["Volatilite (ATR)", b.volatility_atr,     15],
-        ["Uzama (EMA50)",    b.extension_vs_ema50, 15],
-        ["52W Zirve",        b.near_52w_high,      10],
-        ["RSI Yonu",         b.rsi_direction,       5],
-        ["Dar Baz (bonus)",  b.base_bonus,          7],
-        ["Kirilim (bonus)",  b.breakout_bonus,      8],
+    skor_items = [
+        ("Trend",            b.trend_stack,        30),
+        ("Fiyat/EMA150",     b.price_vs_ema150,    20),
+        ("Momentum (RSI)",   b.momentum_rsi,       20),
+        ("Volatilite (ATR)", b.volatility_atr,     15),
+        ("Uzama (EMA50)",    b.extension_vs_ema50, 15),
+        ("52W Zirve",        b.near_52w_high,      10),
+        ("RSI Yonu",         b.rsi_direction,       5),
+        ("Dar Baz (bonus)",  b.base_bonus,          7),
+        ("Kirilim (bonus)",  b.breakout_bonus,      8),
     ]
-    story.append(_data_table(["Bilesen", "Puan", "Maks"], skor_body, st,
-                             [page_w*0.55, page_w*0.22, page_w*0.23]))
+    bar_col_w = page_w * 0.35
+    skor_body = []
+    for lbl, val, mx in skor_items:
+        ratio = val / mx if mx > 0 else 0
+        if ratio >= 0.70:
+            bc = colors.HexColor("#16A34A")
+        elif ratio >= 0.40:
+            bc = colors.HexColor("#3B82F6")
+        elif val > 0:
+            bc = colors.HexColor("#F59E0B")
+        else:
+            bc = colors.HexColor("#E2E8F0")
+        bar = _score_bar_flowable(val, mx, bc, bar_col_w - 12, 7)
+        skor_body.append([lbl, f"{val}/{mx}", bar])
+
+    fn_b = st["h2"].fontName
+    fn   = st["body"].fontName
+    hdr_s = ParagraphStyle("sh", parent=st["body"], fontName=fn_b, fontSize=8.5, textColor=_C_DARK)
+    skor_data = [[Paragraph("<b>Bilesen</b>", hdr_s),
+                  Paragraph("<b>Puan</b>", hdr_s),
+                  Paragraph("<b>Bar</b>", hdr_s)]]
+    for lbl, pts, bar in skor_body:
+        skor_data.append([
+            Paragraph(lbl, st["body"]),
+            Paragraph(pts, st["body"]),
+            bar,
+        ])
+    skor_tbl = Table(skor_data,
+                     colWidths=[page_w*0.42, page_w*0.18, bar_col_w],
+                     repeatRows=1)
+    skor_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,0), _C_LIGHT),
+        ("LINEBELOW",     (0,0), (-1,0), 1.0, _C_ACCENT),
+        ("GRID",          (0,0), (-1,-1), 0.25, _C_BORDER),
+        ("FONT",          (0,0), (-1,-1), fn),
+        ("FONTSIZE",      (0,0), (-1,-1), 8.5),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING",   (0,0), (-1,-1), 6),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 6),
+        ("TOPPADDING",    (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ("ROWBACKGROUNDS",(0,1), (-1,-1), [colors.white, colors.HexColor("#F8FAFC")]),
+    ]))
+    story.append(skor_tbl)
     story.append(Spacer(1, 10))
 
     # Senaryo
