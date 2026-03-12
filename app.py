@@ -1,5 +1,5 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.1) — Twelve Data
+# MinerWin — Tek Hisse + Portföy Analiz (V6.2) — Twelve Data
 #
 # V6.1 Düzeltmeleri:
 # 1. 52W high/low her durumda daily veriden hesaplanır
@@ -325,6 +325,44 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
 def _fetch_daily_df(symbol: str, outputsize: int = 320) -> pd.DataFrame:
     payload = td_time_series(symbol, "1day", int(outputsize))
     return parse_ohlcv(payload)
+
+
+@st.cache_data(ttl=600)
+def _fetch_weekly_df(symbol: str, outputsize: int = 60) -> pd.DataFrame:
+    """Weekly veri çeker — weekly trend kontrolü için kullanılır."""
+    payload = td_time_series(symbol, "1week", int(outputsize))
+    return parse_ohlcv(payload)
+
+
+def check_weekly_trend(symbol: str) -> Dict[str, Any]:
+    """
+    Weekly trend kontrolü:
+      - weekly_close > weekly_MA10
+      - MA10 slope > 0
+    Veto yok, skor değişmez — sadece uyarı üretir.
+    """
+    result = {"weekly_trend_ok": None, "warning": "", "weekly_close": float("nan"), "weekly_ma10": float("nan")}
+    try:
+        wdf = _fetch_weekly_df(symbol, 60)
+        if wdf is None or len(wdf) < 12:
+            return result
+        wdf["ma10"] = wdf["close"].rolling(10).mean()
+        last = wdf.iloc[-1]
+        weekly_close = float(last["close"])
+        weekly_ma10 = float(last["ma10"])
+        if not (np.isfinite(weekly_close) and np.isfinite(weekly_ma10)):
+            return result
+        ma10_slope = slope(wdf["ma10"], lookback=4)
+        trend_ok = (weekly_close > weekly_ma10) and (np.isfinite(ma10_slope) and ma10_slope > 0)
+        result["weekly_trend_ok"] = trend_ok
+        result["weekly_close"] = weekly_close
+        result["weekly_ma10"] = weekly_ma10
+        result["weekly_ma10_slope"] = float(ma10_slope) if np.isfinite(ma10_slope) else float("nan")
+        if not trend_ok:
+            result["warning"] = "⚠️ Weekly trend zayıf — büyük trend teyitsiz"
+    except Exception:
+        pass
+    return result
 
 
 def compute_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> Tuple[float, float]:
@@ -725,7 +763,7 @@ def compute_tp1_tp2_minervini(
         allow_looser_cap = breakout_detected or (
             np.isfinite(dist_to_52w_high_pct) and dist_to_52w_high_pct <= 1.0
         )
-        if not allow_looser_cap and close < high_52w * 0.995:
+        if not allow_looser_cap and close < high_52w * 0.99:
             tp2 = min(tp2, high_52w * 0.98)
 
     if tp2 <= tp1:
@@ -853,9 +891,9 @@ def _detect_consolidation(atr_pct: float, rsi14: float) -> bool:
 def _rsi_direction_label(slope_val: float) -> str:
     if not np.isfinite(slope_val):
         return "Bilinmiyor"
-    if slope_val > 0.5:
+    if slope_val > 0.3:
         return "Yükseliyor ↑"
-    if slope_val < -0.5:
+    if slope_val < -0.3:
         return "Düşüyor ↓"
     return "Yatay →"
 
@@ -907,9 +945,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     rsi_dir_label = _rsi_direction_label(rsi_slope_val)
 
     if np.isfinite(rsi_slope_val):
-        if rsi_slope_val > 0.5:
+        if rsi_slope_val > 0.3:
             rsi_dir_pts = 5
-        elif rsi_slope_val < -0.5:
+        elif rsi_slope_val < -0.3:
             rsi_dir_pts = -5
         else:
             rsi_dir_pts = 0
@@ -2181,6 +2219,13 @@ with tab_single:
                         daily_df_override=daily_df_for_52w,
                     )
 
+                    # Weekly trend kontrolü (veto yok, sadece uyarı)
+                    weekly_info = {}
+                    try:
+                        weekly_info = check_weekly_trend(ticker)
+                    except Exception:
+                        pass
+
                     if show_quote:
                         try:
                             q = td_quote(ticker)
@@ -2260,6 +2305,10 @@ with tab_single:
                             f"⚠️ **Yüksek Volatilite:** Stop cap devreye girdi. "
                             f"ATR% yüksek — gerçek yapısal stop daha aşağıda. Pozisyon boyunu küçült."
                         )
+
+                    # Weekly trend uyarısı
+                    if weekly_info.get("warning"):
+                        st.warning(weekly_info["warning"])
 
                     col_baz, col_kir = st.columns(2)
                     with col_baz:
