@@ -1308,7 +1308,9 @@ def _pdf_styles(fn: str, fn_bold: str) -> dict:
     """Ortak Paragraph stilleri döndür."""
     base = getSampleStyleSheet()["Normal"]
     def S(name, **kw):
-        return ParagraphStyle(name, parent=base, fontName=fn, **kw)
+        # fontName kwarg geçilmemişse varsayılan fn kullan
+        kw.setdefault("fontName", fn)
+        return ParagraphStyle(name, parent=base, **kw)
     return {
         "h1":    S("h1",    fontName=fn_bold, fontSize=18, leading=22, textColor=_C_DARK, spaceAfter=4),
         "h2":    S("h2",    fontName=fn_bold, fontSize=12, leading=15, textColor=_C_DARK, spaceAfter=2),
