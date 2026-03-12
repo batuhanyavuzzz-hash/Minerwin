@@ -731,6 +731,9 @@ def compute_tp1_tp2_minervini(
     if tp2 <= tp1:
         tp2 = tp1 * 1.06
 
+    # 52W cap aşağı çekmiş olsa bile TP2 zeminin (3.5R) altına inemez
+    tp2 = max(tp2, tp2_floor)
+
     dbg = {
         "capacity": capacity,
         "atr_pct": atr_pct_ratio * 100.0,
