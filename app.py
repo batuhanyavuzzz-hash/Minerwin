@@ -1374,13 +1374,23 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict)
     return story
 
 
-def _kpi_table(rows: list[tuple[str, str]], st_styles: dict, page_w: float) -> Table:
-    """rows = [(label, value), ...] — yatay KPI kartları."""
+def _kpi_table(rows: list[tuple[str, str]], st_styles: dict, page_w: float,
+               col_ratios: list[float] | None = None) -> Table:
+    """rows = [(label, value), ...] — yatay KPI kartları.
+    col_ratios: her kolonun oranı (toplam 1.0), None ise eşit dağılır."""
     n = len(rows)
-    col_w = page_w / n
+    if col_ratios and len(col_ratios) == n:
+        col_ws = [page_w * r for r in col_ratios]
+    else:
+        col_ws = [page_w / n] * n
+
+    val_style = ParagraphStyle(
+        "kpi_val", parent=st_styles["value"],
+        wordWrap="CJK",   # uzun değerleri wrap eder
+    )
     data = [[Paragraph(lbl, st_styles["label"]) for lbl, _ in rows],
-            [Paragraph(val, st_styles["value"]) for _, val in rows]]
-    tbl = Table(data, colWidths=[col_w]*n, rowHeights=[14, 20])
+            [Paragraph(val, val_style)           for _, val in rows]]
+    tbl = Table(data, colWidths=col_ws)
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,-1), _C_LIGHT),
         ("BOX",        (0,0), (-1,-1), 0.5, _C_BORDER),
@@ -1481,7 +1491,7 @@ def build_pdf_bytes_single(
     story.append(status_tbl)
     story.append(Spacer(1, 8))
 
-    # KPI satırı
+    # KPI satırı — fiyat kolonuna daha fazla pay (6 kolon, toplam 1.0)
     close_val = plan.debug.get("close", float("nan"))
     kpi_rows = [
         ("Guncel Fiyat", f"${close_val:.2f}" if np.isfinite(close_val) else "—"),
@@ -1491,7 +1501,8 @@ def build_pdf_bytes_single(
         ("Kapasite",     plan.capacity_level),
         ("Min. #5",      "GECTI" if plan.minervini5_ok else "GECMEDI"),
     ]
-    story.append(_kpi_table(kpi_rows, st, page_w))
+    story.append(_kpi_table(kpi_rows, st, page_w,
+                            col_ratios=[0.22, 0.18, 0.15, 0.15, 0.15, 0.15]))
     story.append(Spacer(1, 10))
 
     # Uyarılar
