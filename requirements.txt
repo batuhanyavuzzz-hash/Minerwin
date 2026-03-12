@@ -4,4 +4,4 @@ numpy
 plotly
 requests
 openpyxl
-weasyprint
+reportlab
