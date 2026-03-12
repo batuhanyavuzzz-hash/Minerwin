@@ -1292,13 +1292,32 @@ _C_MID    = colors.HexColor("#64748B")
 
 
 def _setup_pdf_fonts() -> tuple[str, str]:
-    """DejaVu fontlarını kaydet, normal ve bold isimlerini döndür."""
-    base_path = "/usr/share/fonts/truetype/dejavu/"
-    regular = base_path + "DejaVuSans.ttf"
-    bold    = base_path + "DejaVuSans-Bold.ttf"
+    """
+    Türkçe karakterleri destekleyen font kaydeder.
+    Önce sistem DejaVu'yu dener; bulamazsa ReportLab'ın
+    kendi Vera.ttf'ini kullanır (her ortamda mevcut).
+    """
+    import reportlab as _rl
+    # Sistem fontları (lokal geliştirme)
+    system_candidates = [
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+         "MW", "MW-Bold"),
+    ]
+    for reg, bold, fn, fn_b in system_candidates:
+        try:
+            if os.path.isfile(reg) and os.path.isfile(bold):
+                pdfmetrics.registerFont(TTFont(fn,   reg))
+                pdfmetrics.registerFont(TTFont(fn_b, bold))
+                return fn, fn_b
+        except Exception:
+            pass
+
+    # Fallback: ReportLab'ın kendi Vera fontları (Streamlit Cloud dahil her yerde var)
+    rl_fonts = os.path.join(os.path.dirname(_rl.__file__), "fonts")
     try:
-        pdfmetrics.registerFont(TTFont("MW",      regular))
-        pdfmetrics.registerFont(TTFont("MW-Bold", bold))
+        pdfmetrics.registerFont(TTFont("MW",      os.path.join(rl_fonts, "Vera.ttf")))
+        pdfmetrics.registerFont(TTFont("MW-Bold", os.path.join(rl_fonts, "VeraBd.ttf")))
         return "MW", "MW-Bold"
     except Exception:
         return "Helvetica", "Helvetica-Bold"
