@@ -338,12 +338,6 @@ def _fetch_weekly_df(symbol: str, outputsize: int = 60) -> pd.DataFrame:
 
 
 def check_weekly_trend(symbol: str) -> Dict[str, Any]:
-    """
-    Weekly trend kontrolü:
-      - weekly_close > weekly_MA10
-      - MA10 slope > 0
-    Veto yok, skor değişmez — sadece uyarı üretir.
-    """
     result = {"weekly_trend_ok": None, "warning": "", "weekly_close": float("nan"), "weekly_ma10": float("nan")}
     try:
         wdf = _fetch_weekly_df(symbol, 60)
@@ -379,10 +373,6 @@ def compute_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> Tuple[float, f
 
 
 def get_daily_52w_levels(symbol: str, interval: str, current_df: pd.DataFrame) -> Tuple[float, float, pd.DataFrame]:
-    """
-    52W seviyeleri her zaman daily veriden hesaplanır.
-    Eğer zaten interval=1day ise mevcut df kullanılır.
-    """
     if interval == "1day" and current_df is not None and not current_df.empty:
         daily_df = current_df.copy()
     else:
@@ -753,17 +743,13 @@ def compute_tp1_tp2_minervini(
     tp1 = entry * (1.0 + (expected_move_pct / 100.0) * 0.55)
     tp2 = entry * (1.0 + (expected_move_pct / 100.0) * 0.90)
 
-    # Adım 1: R-bazlı taban (minimum R/R garantisi)
     tp1 = max(tp1, tp1_floor)
     tp2 = max(tp2, tp2_floor)
 
-    # Adım 2: Kapasite/momentum üst sınırı
     tp1_cap_pct, tp2_cap_pct = TP_CAP_MOMENTUM.get(capacity, (0.18, 0.28))
     tp1 = min(tp1, entry * (1.0 + tp1_cap_pct))
     tp2 = min(tp2, entry * (1.0 + tp2_cap_pct))
 
-    # Adım 3: 52W tavanı — sadece 52W high'ın belirgin altındaysa baskıla
-    # breakout/blue-sky yakınında uygulama (erken kesmesin)
     if np.isfinite(high_52w) and high_52w > 0:
         allow_looser_cap = breakout_detected or (
             np.isfinite(dist_to_52w_high_pct) and dist_to_52w_high_pct <= 1.0
@@ -771,13 +757,9 @@ def compute_tp1_tp2_minervini(
         if not allow_looser_cap and close < high_52w * 0.99:
             tp2 = min(tp2, high_52w * 0.98)
 
-    # Adım 4: TP1 < TP2 garantisi
     if tp2 <= tp1:
         tp2 = tp1 * 1.06
 
-    # Adım 5: 52W cap dahil her şeyden sonra, TP2 3.5R tabanının altına inemez.
-    # Not: Bu adım kapasite cap'ini bypass edebilir (nadir senaryo: düşük kapasite
-    # + geniş risk + 52W yakını). Bu bilinçli tercih — minimum R/R'yi korumak öncelikli.
     tp2 = max(tp2, tp2_floor)
 
     dbg = {
@@ -1004,8 +986,6 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     v_pts = 15 if vol_ok else (7 if vol_border else 0)
     e_pts = 15 if not extended else 0
 
-    # Maks teorik toplam:
-    # 30 + 20 + 20 + 15 + 15 + 10 + 5 + 7 + 8 = 130
     raw_total = (
         trend_pts + p_pts + m_pts + v_pts + e_pts +
         near_52w_pts + rsi_dir_pts + total_bonus_pts
@@ -1278,27 +1258,30 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
 
 # =========================================================
-# PDF EXPORT — ORTAK ARAÇLAR
+# PDF EXPORT — ORTAK ARAÇLAR  (V6.3 — Profesyonel Tasarım)
 # =========================================================
 
-# Renk paleti (PDF + Excel için ortak)
-_C_DARK   = colors.HexColor("#0F172A")
-_C_ACCENT = colors.HexColor("#3B82F6")
-_C_LIGHT  = colors.HexColor("#F1F5F9")
-_C_BORDER = colors.HexColor("#E2E8F0")
-_C_GREEN  = colors.HexColor("#166534")
-_C_RED    = colors.HexColor("#991B1B")
-_C_MID    = colors.HexColor("#64748B")
+# Renk paleti
+_C_DARK      = colors.HexColor("#0F172A")
+_C_ACCENT    = colors.HexColor("#2563EB")
+_C_ACCENT_LT = colors.HexColor("#DBEAFE")
+_C_LIGHT     = colors.HexColor("#F8FAFC")
+_C_BORDER    = colors.HexColor("#CBD5E1")
+_C_GREEN     = colors.HexColor("#166534")
+_C_GREEN_BG  = colors.HexColor("#DCFCE7")
+_C_RED       = colors.HexColor("#991B1B")
+_C_RED_BG    = colors.HexColor("#FEE2E2")
+_C_MID       = colors.HexColor("#64748B")
+_C_AMBER     = colors.HexColor("#92400E")
+_C_AMBER_BG  = colors.HexColor("#FEF3C7")
+_C_PURPLE    = colors.HexColor("#6D28D9")
+_C_PURPLE_BG = colors.HexColor("#EDE9FE")
+_C_WHITE     = colors.white
+_C_ZEBRA     = colors.HexColor("#F1F5F9")
 
 
 def _setup_pdf_fonts() -> tuple[str, str]:
-    """
-    Türkçe karakterleri destekleyen font kaydeder.
-    Önce sistem DejaVu'yu dener; bulamazsa ReportLab'ın
-    kendi Vera.ttf'ini kullanır (her ortamda mevcut).
-    """
     import reportlab as _rl
-    # Sistem fontları (lokal geliştirme)
     system_candidates = [
         ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -1312,8 +1295,6 @@ def _setup_pdf_fonts() -> tuple[str, str]:
                 return fn, fn_b
         except Exception:
             pass
-
-    # Fallback: ReportLab'ın kendi Vera fontları (Streamlit Cloud dahil her yerde var)
     rl_fonts = os.path.join(os.path.dirname(_rl.__file__), "fonts")
     try:
         pdfmetrics.registerFont(TTFont("MW",      os.path.join(rl_fonts, "Vera.ttf")))
@@ -1324,88 +1305,164 @@ def _setup_pdf_fonts() -> tuple[str, str]:
 
 
 def _pdf_styles(fn: str, fn_bold: str) -> dict:
-    """Ortak Paragraph stilleri döndür."""
     base = getSampleStyleSheet()["Normal"]
     def S(name, **kw):
-        # fontName kwarg geçilmemişse varsayılan fn kullan
         kw.setdefault("fontName", fn)
         return ParagraphStyle(name, parent=base, **kw)
     return {
-        "h1":    S("h1",    fontName=fn_bold, fontSize=18, leading=22, textColor=_C_DARK, spaceAfter=4),
-        "h2":    S("h2",    fontName=fn_bold, fontSize=12, leading=15, textColor=_C_DARK, spaceAfter=2),
-        "label": S("label", fontName=fn_bold, fontSize=9,  leading=12, textColor=_C_MID),
-        "value": S("value", fontName=fn_bold, fontSize=13, leading=16, textColor=_C_DARK),
-        "body":  S("body",  fontSize=9,       leading=13,  textColor=_C_DARK),
-        "small": S("small", fontSize=8,       leading=11,  textColor=_C_MID),
-        "warn":  S("warn",  fontName=fn_bold, fontSize=9,  leading=12, textColor=colors.HexColor("#92400E")),
+        "h1":       S("h1",    fontName=fn_bold, fontSize=20, leading=24, textColor=_C_DARK, spaceAfter=2),
+        "h2":       S("h2",    fontName=fn_bold, fontSize=12, leading=16, textColor=_C_ACCENT, spaceAfter=2),
+        "h3":       S("h3",    fontName=fn_bold, fontSize=10, leading=13, textColor=_C_DARK, spaceAfter=1),
+        "label":    S("label", fontName=fn,      fontSize=7.5, leading=10, textColor=_C_MID),
+        "value":    S("value", fontName=fn_bold, fontSize=12, leading=15, textColor=_C_DARK),
+        "value_sm": S("value_sm", fontName=fn_bold, fontSize=10, leading=13, textColor=_C_DARK),
+        "body":     S("body",  fontSize=8.5, leading=12, textColor=_C_DARK),
+        "small":    S("small", fontSize=7.5, leading=10, textColor=_C_MID),
+        "warn":     S("warn",  fontName=fn_bold, fontSize=8.5, leading=12, textColor=_C_AMBER),
+        "footer":   S("footer", fontSize=7, leading=9, textColor=colors.HexColor("#94A3B8")),
     }
 
 
-def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict) -> list:
-    """Logo + başlık bloğu — her PDF'in tepesine gider."""
-    from reportlab.platypus import Image as RLImage, HRFlowable
+def _section_header(text: str, st_styles: dict, page_w: float) -> list:
+    return [
+        Spacer(1, 10),
+        Paragraph(text, st_styles["h2"]),
+        HRFlowable(width="100%", thickness=1.2, color=_C_ACCENT, spaceAfter=6),
+    ]
 
+
+def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict, page_w: float) -> list:
+    from reportlab.platypus import Image as RLImage
     story = []
-    # Logo varsa sol köşeye
+    title_style = ParagraphStyle(
+        "banner_title", parent=st_styles["h1"],
+        textColor=_C_WHITE, fontSize=18, leading=22,
+    )
+    sub_style = ParagraphStyle(
+        "banner_sub", parent=st_styles["small"],
+        textColor=colors.HexColor("#CBD5E1"), fontSize=7.5, leading=10,
+    )
     if logo_b64:
         try:
             logo_bytes = base64.b64decode(logo_b64)
             logo_buf   = io.BytesIO(logo_bytes)
-            logo_img   = RLImage(logo_buf, width=2.8*cm, height=0.9*cm)
-            # Logo + başlık yan yana tablo
-            header_data = [[logo_img, Paragraph(title, st_styles["h1"])]]
-            header_tbl  = Table(header_data, colWidths=[3.2*cm, None])
-            header_tbl.setStyle(TableStyle([
-                ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-                ("LEFTPADDING",  (0,0), (-1,-1), 0),
-                ("RIGHTPADDING", (0,0), (-1,-1), 0),
-                ("BOTTOMPADDING",(0,0), (-1,-1), 0),
-                ("TOPPADDING",   (0,0), (-1,-1), 0),
-            ]))
-            story.append(header_tbl)
+            logo_img   = RLImage(logo_buf, width=2.4*cm, height=0.8*cm)
+            banner_data = [
+                [logo_img, Paragraph(title, title_style)],
+                ["",       Paragraph(subtitle, sub_style)],
+            ]
+            banner_tbl = Table(banner_data, colWidths=[2.8*cm, page_w - 2.8*cm])
         except Exception:
-            story.append(Paragraph(title, st_styles["h1"]))
+            banner_data = [
+                [Paragraph(title, title_style)],
+                [Paragraph(subtitle, sub_style)],
+            ]
+            banner_tbl = Table(banner_data, colWidths=[page_w])
     else:
-        story.append(Paragraph(title, st_styles["h1"]))
+        banner_data = [
+            [Paragraph(title, title_style)],
+            [Paragraph(subtitle, sub_style)],
+        ]
+        banner_tbl = Table(banner_data, colWidths=[page_w])
 
-    story.append(Paragraph(subtitle, st_styles["small"]))
-    story.append(Spacer(1, 4))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=_C_ACCENT, spaceAfter=10))
+    banner_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,-1), _C_DARK),
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 14),
+        ("RIGHTPADDING", (0,0), (-1,-1), 14),
+        ("TOPPADDING",   (0,0), (0,0),   12),
+        ("BOTTOMPADDING",(0,-1),(-1,-1),  10),
+        ("TOPPADDING",   (0,1), (-1,1),   0),
+        ("BOTTOMPADDING",(0,0), (-1,0),   2),
+    ]))
+    story.append(banner_tbl)
+    story.append(Spacer(1, 10))
     return story
 
 
-def _kpi_table(rows: list[tuple[str, str]], st_styles: dict, page_w: float,
-               col_ratios: list[float] | None = None) -> Table:
-    """rows = [(label, value), ...] — yatay KPI kartları.
-    col_ratios: her kolonun oranı (toplam 1.0), None ise eşit dağılır."""
-    n = len(rows)
-    if col_ratios and len(col_ratios) == n:
-        col_ws = [page_w * r for r in col_ratios]
+def _status_badge(status_tag: str, st_styles: dict, page_w: float) -> Table:
+    tag_lower = status_tag.lower()
+    if "alim" in tag_lower or status_tag.startswith("🟢"):
+        bg, fg = _C_GREEN_BG, _C_GREEN
+    elif "pullback" in tag_lower or status_tag.startswith("🟡"):
+        bg, fg = _C_AMBER_BG, _C_AMBER
+    elif "konsolidasyon" in tag_lower or status_tag.startswith("🔵"):
+        bg, fg = _C_ACCENT_LT, _C_ACCENT
+    elif "52w" in tag_lower or status_tag.startswith("🟣"):
+        bg, fg = _C_PURPLE_BG, _C_PURPLE
     else:
-        col_ws = [page_w / n] * n
+        bg, fg = _C_RED_BG, _C_RED
 
-    val_style = ParagraphStyle(
-        "kpi_val", parent=st_styles["value"],
-        wordWrap="CJK",   # uzun değerleri wrap eder
+    status_clean = status_tag.encode("ascii", "ignore").decode().strip() or status_tag
+    badge_style = ParagraphStyle(
+        "badge", parent=st_styles["body"],
+        fontName=st_styles["h2"].fontName,
+        fontSize=9.5, leading=13, textColor=fg,
     )
-    data = [[Paragraph(lbl, st_styles["label"]) for lbl, _ in rows],
-            [Paragraph(val, val_style)           for _, val in rows]]
-    tbl = Table(data, colWidths=col_ws)
+    tbl = Table(
+        [[Paragraph(f"<b>DURUM:  {html.escape(status_clean)}</b>", badge_style)]],
+        colWidths=[page_w],
+    )
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), _C_LIGHT),
-        ("BOX",        (0,0), (-1,-1), 0.5, _C_BORDER),
-        ("INNERGRID",  (0,0), (-1,-1), 0.3, _C_BORDER),
-        ("LEFTPADDING",  (0,0), (-1,-1), 8),
-        ("RIGHTPADDING", (0,0), (-1,-1), 8),
-        ("TOPPADDING",   (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
-        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+        ("BACKGROUND",    (0,0), (-1,-1), bg),
+        ("LEFTPADDING",   (0,0), (-1,-1), 12),
+        ("TOPPADDING",    (0,0), (-1,-1), 7),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+        ("BOX",           (0,0), (-1,-1), 0.5, fg),
     ]))
     return tbl
 
 
-def _data_table(headers: list[str], body_rows: list[list], st_styles: dict, col_widths: list) -> Table:
-    """Genel amaçlı veri tablosu."""
+def _kpi_card(label: str, value: str, st_styles: dict, width: float,
+              accent_color=None) -> Table:
+    ac = accent_color or _C_ACCENT
+    data = [
+        [Paragraph(label, st_styles["label"])],
+        [Paragraph(value, st_styles["value_sm"])],
+    ]
+    tbl = Table(data, colWidths=[width])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), _C_LIGHT),
+        ("LINEABOVE",     (0,0), (-1,0),  2.5, ac),
+        ("BOX",           (0,0), (-1,-1), 0.4, _C_BORDER),
+        ("LEFTPADDING",   (0,0), (-1,-1), 8),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 8),
+        ("TOPPADDING",    (0,0), (0,0),   6),
+        ("BOTTOMPADDING", (0,-1),(-1,-1), 6),
+        ("VALIGN",        (0,0), (-1,-1), "TOP"),
+    ]))
+    return tbl
+
+
+def _kpi_row(items: list[tuple[str, str]], st_styles: dict, page_w: float,
+             gap: float = 6, accent_colors: list = None) -> Table:
+    n = len(items)
+    card_w = (page_w - gap * (n - 1)) / n
+    cards = []
+    for i, (lbl, val) in enumerate(items):
+        ac = accent_colors[i] if accent_colors and i < len(accent_colors) else _C_ACCENT
+        cards.append(_kpi_card(lbl, val, st_styles, card_w, accent_color=ac))
+    col_ws = []
+    spaced_row = []
+    for i, card in enumerate(cards):
+        spaced_row.append(card)
+        col_ws.append(card_w)
+        if i < n - 1:
+            spaced_row.append("")
+            col_ws.append(gap)
+    tbl = Table([spaced_row], colWidths=col_ws)
+    tbl.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("TOPPADDING",   (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+    ]))
+    return tbl
+
+
+def _data_table(headers: list[str], body_rows: list[list], st_styles: dict, col_widths: list,
+                highlight_col: int = -1) -> Table:
     fn   = st_styles["body"].fontName
     fn_b = st_styles["h2"].fontName
 
@@ -1413,26 +1470,139 @@ def _data_table(headers: list[str], body_rows: list[list], st_styles: dict, col_
         s = str(v) if v is not None else "—"
         return html.escape(s)
 
-    data = [[Paragraph(f"<b>{html.escape(h)}</b>", ParagraphStyle("th", parent=st_styles["body"],
-                        fontName=fn_b, fontSize=8.5, textColor=_C_DARK)) for h in headers]]
+    hdr_style = ParagraphStyle("tbl_hdr", parent=st_styles["body"],
+                                fontName=fn_b, fontSize=8, textColor=_C_WHITE, leading=11)
+    cell_style = ParagraphStyle("tbl_cell", parent=st_styles["body"],
+                                 fontSize=8, leading=11)
+
+    data = [[Paragraph(html.escape(h), hdr_style) for h in headers]]
     for row in body_rows:
-        data.append([Paragraph(safe(v), st_styles["body"]) for v in row])
+        data.append([Paragraph(safe(v), cell_style) for v in row])
 
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), _C_LIGHT),
-        ("LINEBELOW",  (0,0), (-1,0), 1.0, _C_ACCENT),
-        ("GRID",       (0,0), (-1,-1), 0.25, _C_BORDER),
-        ("FONT",       (0,0), (-1,-1), fn),
-        ("FONTSIZE",   (0,0), (-1,-1), 8.5),
-        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+
+    style_cmds = [
+        ("BACKGROUND",   (0,0), (-1,0), _C_DARK),
+        ("LINEBELOW",    (0,0), (-1,0), 1.5, _C_ACCENT),
+        ("GRID",         (0,1), (-1,-1), 0.3, _C_BORDER),
+        ("BOX",          (0,0), (-1,-1), 0.6, _C_BORDER),
+        ("FONT",         (0,0), (-1,-1), fn),
+        ("FONTSIZE",     (0,0), (-1,-1), 8),
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
         ("LEFTPADDING",  (0,0), (-1,-1), 6),
         ("RIGHTPADDING", (0,0), (-1,-1), 6),
         ("TOPPADDING",   (0,0), (-1,-1), 4),
         ("BOTTOMPADDING",(0,0), (-1,-1), 4),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F8FAFC")]),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [_C_WHITE, _C_ZEBRA]),
+    ]
+
+    if highlight_col >= 0 and len(body_rows) > 0:
+        for ri, row in enumerate(body_rows):
+            try:
+                val = float(row[highlight_col])
+                if val > 0:
+                    style_cmds.append(("TEXTCOLOR", (highlight_col, ri+1), (highlight_col, ri+1), _C_GREEN))
+                elif val < 0:
+                    style_cmds.append(("TEXTCOLOR", (highlight_col, ri+1), (highlight_col, ri+1), _C_RED))
+            except (ValueError, TypeError, IndexError):
+                pass
+
+    tbl.setStyle(TableStyle(style_cmds))
+    return tbl
+
+
+def _score_bar_table(items: list[tuple[str, int, int]], st_styles: dict, page_w: float) -> Table:
+    fn   = st_styles["body"].fontName
+    fn_b = st_styles["h2"].fontName
+
+    hdr_style = ParagraphStyle("sb_hdr", parent=st_styles["body"],
+                                fontName=fn_b, fontSize=8, textColor=_C_WHITE, leading=11)
+    cell_style = ParagraphStyle("sb_cell", parent=st_styles["body"], fontSize=8, leading=11)
+
+    name_w = page_w * 0.32
+    bar_w  = page_w * 0.50
+    num_w  = page_w * 0.18
+
+    data = [[
+        Paragraph("Bilesen", hdr_style),
+        Paragraph("", hdr_style),
+        Paragraph("Puan / Maks", hdr_style),
+    ]]
+
+    for name, pts, mx in items:
+        pct_fill = (pts / mx * 100) if mx > 0 else 0
+        pct_fill = max(0, min(100, pct_fill))
+
+        bar_fill_w = bar_w * 0.9 * (pct_fill / 100.0)
+        bar_bg_w   = bar_w * 0.9 - bar_fill_w
+
+        if pts > 0:
+            bar_color = _C_ACCENT if pts >= mx * 0.6 else colors.HexColor("#93C5FD")
+        elif pts < 0:
+            bar_color = colors.HexColor("#F87171")
+        else:
+            bar_color = colors.HexColor("#E2E8F0")
+
+        bar_cells = []
+        bar_widths = []
+        if bar_fill_w > 0:
+            bar_cells.append("")
+            bar_widths.append(bar_fill_w)
+        if bar_bg_w > 0:
+            bar_cells.append("")
+            bar_widths.append(bar_bg_w)
+
+        if bar_cells:
+            inner = Table([bar_cells], colWidths=bar_widths, rowHeights=[10])
+            inner_style = [
+                ("TOPPADDING",   (0,0), (-1,-1), 0),
+                ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+                ("LEFTPADDING",  (0,0), (-1,-1), 0),
+                ("RIGHTPADDING", (0,0), (-1,-1), 0),
+            ]
+            if bar_fill_w > 0:
+                inner_style.append(("BACKGROUND", (0,0), (0,0), bar_color))
+            if bar_bg_w > 0:
+                idx = 1 if bar_fill_w > 0 else 0
+                inner_style.append(("BACKGROUND", (idx,0), (idx,0), colors.HexColor("#F1F5F9")))
+            inner.setStyle(TableStyle(inner_style))
+        else:
+            inner = ""
+
+        pts_label = f"{pts}"
+        data.append([
+            Paragraph(html.escape(name), cell_style),
+            inner,
+            Paragraph(f"<b>{pts_label}</b> / {mx}", cell_style),
+        ])
+
+    tbl = Table(data, colWidths=[name_w, bar_w, num_w], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,0), _C_DARK),
+        ("GRID",         (0,1), (-1,-1), 0.25, _C_BORDER),
+        ("BOX",          (0,0), (-1,-1), 0.5, _C_BORDER),
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING",   (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 4),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [_C_WHITE, _C_ZEBRA]),
     ]))
     return tbl
+
+
+def _footer_block(st_styles: dict) -> list:
+    return [
+        Spacer(1, 14),
+        HRFlowable(width="100%", thickness=0.5, color=_C_BORDER, spaceBefore=2),
+        Spacer(1, 3),
+        Paragraph(
+            "MinerWin V6.2 — Bu rapor otomatik teknik analiz amaciyla uretilmistir. "
+            "Yatirim tavsiyesi niteligi tasimaz. Yatirim kararlari tamamen kullanicinin "
+            "kendi sorumlulugundadir.",
+            st_styles["footer"],
+        ),
+    ]
 
 
 # =========================================================
@@ -1447,133 +1617,140 @@ def build_pdf_bytes_single(
     logo_b64_str: str = "",
 ):
     fn, fn_bold = _setup_pdf_fonts()
-    st = _pdf_styles(fn, fn_bold)
+    sty = _pdf_styles(fn, fn_bold)
 
     buf = io.BytesIO()
     page_w = A4[0] - 3.2*cm
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=1.6*cm, rightMargin=1.6*cm,
-        topMargin=1.4*cm,  bottomMargin=1.4*cm,
+        topMargin=1.2*cm,  bottomMargin=1.2*cm,
         title=f"MinerWin — {ticker} Analiz Raporu",
         author="MinerWin V6.2",
     )
 
     story = []
 
-    # Başlık
-    subtitle = (f"Ticker: <b>{ticker}</b>  |  Zaman: <b>{interval_label}</b>  |  "
-                f"Bar: <b>{bars}</b>  |  "
-                f"Tarih: <b>{pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</b>")
-    story += _pdf_header_story(logo_b64_str, "MinerWin — Teknik Analiz Raporu", subtitle, st)
+    subtitle = (f"Ticker: {ticker}  |  Zaman: {interval_label}  |  "
+                f"Bar: {bars}  |  "
+                f"Tarih: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    story += _pdf_header_story(logo_b64_str, "MinerWin — Teknik Analiz Raporu", subtitle, sty, page_w)
 
-    # Durum bandı
-    status_color = colors.HexColor(
-        "#166534" if plan.status_tag.startswith("🟢") else
-        "#92400E" if plan.status_tag.startswith("🟡") else
-        "#1E40AF" if plan.status_tag.startswith("🔵") else
-        "#7C3AED" if plan.status_tag.startswith("🟣") else
-        "#991B1B"
-    )
-    status_clean = plan.status_tag.encode("ascii", "ignore").decode()  # emoji strip for PDF
-    status_tbl = Table(
-        [[Paragraph(f"<b>DURUM: {status_clean}</b>",
-                    ParagraphStyle("st", parent=st["body"], fontName=fn_bold,
-                                   fontSize=10, textColor=colors.white))]],
-        colWidths=[page_w]
-    )
-    status_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), status_color),
-        ("LEFTPADDING",  (0,0), (-1,-1), 10),
-        ("TOPPADDING",   (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
-    ]))
-    story.append(status_tbl)
+    story.append(_status_badge(plan.status_tag, sty, page_w))
     story.append(Spacer(1, 8))
 
-    # KPI satırı — fiyat kolonuna daha fazla pay (6 kolon, toplam 1.0)
     close_val = plan.debug.get("close", float("nan"))
-    kpi_rows = [
-        ("Guncel Fiyat", f"${close_val:.2f}" if np.isfinite(close_val) else "—"),
-        ("Toplam Skor",  f"{plan.total_score}/100"),
-        ("Setup",        f"{plan.setup_score}/100"),
-        ("Timing",       f"{plan.timing_score}/100"),
-        ("Kapasite",     plan.capacity_level),
-        ("Min. #5",      "GECTI" if plan.minervini5_ok else "GECMEDI"),
+    price_str = f"${close_val:.2f}" if np.isfinite(close_val) else "—"
+    min5_str  = "GECTI" if plan.minervini5_ok else "GECMEDI"
+    min5_clr  = _C_GREEN if plan.minervini5_ok else _C_RED
+
+    row1_items = [
+        ("GUNCEL FIYAT",  price_str),
+        ("TOPLAM SKOR",   f"{plan.total_score} / 100"),
+        ("KAPASITE",      plan.capacity_level),
     ]
-    story.append(_kpi_table(kpi_rows, st, page_w,
-                            col_ratios=[0.22, 0.18, 0.15, 0.15, 0.15, 0.15]))
-    story.append(Spacer(1, 10))
+    story.append(_kpi_row(row1_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, _C_ACCENT]))
+    story.append(Spacer(1, 5))
 
-    # Uyarılar
+    row2_items = [
+        ("SETUP SKORU",   f"{plan.setup_score} / 100"),
+        ("TIMING SKORU",  f"{plan.timing_score} / 100"),
+        ("MINERVINI #5",  min5_str),
+    ]
+    story.append(_kpi_row(row2_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, min5_clr]))
+    story.append(Spacer(1, 6))
+
     if plan.high_vol_warning:
-        story.append(Paragraph(
-            "UYARI: Yuksek volatilite — stop cap devrede, pozisyon boyunu kucult.",
-            st["warn"]))
-        story.append(Spacer(1, 4))
+        warn_tbl = Table(
+            [[Paragraph("UYARI: Yuksek volatilite — stop cap devrede, pozisyon boyunu kucult.", sty["warn"])]],
+            colWidths=[page_w],
+        )
+        warn_tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), _C_AMBER_BG),
+            ("BOX",           (0,0), (-1,-1), 0.5, _C_AMBER),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ]))
+        story.append(warn_tbl)
+        story.append(Spacer(1, 6))
 
-    # Islem Plani tablosu
-    story.append(Paragraph("Islem Plani", st["h2"]))
-    story.append(Spacer(1, 4))
-    plan_headers = ["Parametre", "Deger"]
+    story += _section_header("Islem Plani", sty, page_w)
     rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
     rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
-    plan_body = [
-        ["Giris Bolgesi",      f"{plan.entry_low:.2f} - {plan.entry_high:.2f}"],
+
+    plan_left = [
+        ["Giris Bolgesi",      f"{plan.entry_low:.2f} — {plan.entry_high:.2f}"],
         ["Stop",               f"{plan.stop:.2f}"],
-        ["TP1",                f"{plan.tp1:.2f}  (R/R {rr1})"],
-        ["TP2",                f"{plan.tp2:.2f}  (R/R {rr2})"],
-        ["52W Dip",            f"{plan.low_52w:.2f}"],
+        ["TP1  (R/R)",         f"{plan.tp1:.2f}  ({rr1})"],
+        ["TP2  (R/R)",         f"{plan.tp2:.2f}  ({rr2})"],
+    ]
+    plan_right = [
+        ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
         ["52W Zirve Uzaklik",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
-        ["RSI Yonu",           plan.rsi_direction_label.encode("ascii","ignore").decode()],
         ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
         ["Pivot Kirilimi",     "Var" if plan.breakout_detected else "Yok"],
     ]
-    story.append(_data_table(plan_headers, plan_body, st, [page_w*0.45, page_w*0.55]))
-    story.append(Spacer(1, 10))
 
-    # Skor dagilimi
-    story.append(Paragraph("Skor Dagilimi", st["h2"]))
-    story.append(Spacer(1, 4))
+    half_w = page_w * 0.48
+    gap_w  = page_w * 0.04
+    tbl_left  = _data_table(["Parametre", "Deger"], plan_left,  sty, [half_w*0.48, half_w*0.52])
+    tbl_right = _data_table(["Parametre", "Deger"], plan_right, sty, [half_w*0.48, half_w*0.52])
+    side_by_side = Table([[tbl_left, "", tbl_right]], colWidths=[half_w, gap_w, half_w])
+    side_by_side.setStyle(TableStyle([
+        ("VALIGN",       (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("TOPPADDING",   (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+    ]))
+    story.append(side_by_side)
+
+    story += _section_header("Skor Dagilimi", sty, page_w)
     b = plan.breakdown
-    skor_body = [
-        ["Trend",            b.trend_stack,        30],
-        ["Fiyat/EMA150",     b.price_vs_ema150,    20],
-        ["Momentum (RSI)",   b.momentum_rsi,       20],
-        ["Volatilite (ATR)", b.volatility_atr,     15],
-        ["Uzama (EMA50)",    b.extension_vs_ema50, 15],
-        ["52W Zirve",        b.near_52w_high,      10],
-        ["RSI Yonu",         b.rsi_direction,       5],
-        ["Dar Baz (bonus)",  b.base_bonus,          7],
-        ["Kirilim (bonus)",  b.breakout_bonus,      8],
+    score_items = [
+        ("Trend",              b.trend_stack,        30),
+        ("Fiyat / EMA150",     b.price_vs_ema150,    20),
+        ("Momentum (RSI)",     b.momentum_rsi,       20),
+        ("Volatilite (ATR%)",  b.volatility_atr,     15),
+        ("Uzama (EMA50)",      b.extension_vs_ema50, 15),
+        ("52W Zirve",          b.near_52w_high,      10),
+        ("RSI Yonu",           b.rsi_direction,       5),
+        ("Dar Baz (bonus)",    b.base_bonus,          7),
+        ("Kirilim (bonus)",    b.breakout_bonus,      8),
     ]
-    story.append(_data_table(["Bilesen", "Puan", "Maks"], skor_body, st,
-                             [page_w*0.55, page_w*0.22, page_w*0.23]))
-    story.append(Spacer(1, 10))
+    story.append(_score_bar_table(score_items, sty, page_w))
 
-    # Senaryo
-    story.append(Paragraph("Senaryo", st["h2"]))
-    story.append(Spacer(1, 3))
+    story += _section_header("Senaryo", sty, page_w)
     scenario_clean = plan.scenario.replace("**", "")
-    story.append(Paragraph(scenario_clean, st["body"]))
-    story.append(Spacer(1, 10))
+    scen_tbl = Table(
+        [[Paragraph(html.escape(scenario_clean), sty["body"])]],
+        colWidths=[page_w],
+    )
+    scen_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), _C_LIGHT),
+        ("BOX",           (0,0), (-1,-1), 0.4, _C_BORDER),
+        ("LEFTPADDING",   (0,0), (-1,-1), 10),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 10),
+        ("TOPPADDING",    (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+    ]))
+    story.append(scen_tbl)
 
-    # Quote
+    rsi_dir_clean = plan.rsi_direction_label.encode("ascii", "ignore").decode() or plan.rsi_direction_label
+    rsi_slope_str = f"{plan.rsi_slope_val:.2f}" if np.isfinite(plan.rsi_slope_val) else "—"
+    story.append(Spacer(1, 6))
+    story.append(_kpi_row([("RSI YONU", rsi_dir_clean), ("RSI EGIM", rsi_slope_str)], sty, page_w))
+
     if quote and isinstance(quote, dict):
-        story.append(Paragraph("Quote (Anlik Fiyat)", st["h2"]))
-        story.append(Spacer(1, 4))
+        story += _section_header("Quote (Anlik Fiyat)", sty, page_w)
         q_keys = ["name", "exchange", "currency", "price", "change", "percent_change", "previous_close"]
         q_body = [[k, str(quote[k])] for k in q_keys if k in quote]
         if q_body:
-            story.append(_data_table(["Alan", "Deger"], q_body, st,
-                                     [page_w*0.4, page_w*0.6]))
-        story.append(Spacer(1, 10))
+            story.append(_data_table(["Alan", "Deger"], q_body, sty,
+                                     [page_w*0.35, page_w*0.65]))
 
-    # Footer notu
-    story.append(HRFlowable(width="100%", thickness=0.5, color=_C_BORDER, spaceBefore=6))
-    story.append(Paragraph(
-        "MinerWin V6.2 — Bu rapor otomatik teknik analiz amaclidir, yatirim tavsiyesi degildir.",
-        st["small"]))
+    story += _footer_block(sty)
 
     doc.build(story)
     pdf = buf.getvalue()
@@ -1977,7 +2154,6 @@ def compute_portfolio_kpis(out: pd.DataFrame) -> Dict[str, float]:
     return k
 
 
-
 # =========================================================
 # PDF EXPORT (Portföy)
 # =========================================================
@@ -1997,36 +2173,39 @@ def build_portfolio_pdf_bytes(
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=1.6*cm, rightMargin=1.6*cm,
-        topMargin=1.4*cm, bottomMargin=1.4*cm,
+        topMargin=1.2*cm, bottomMargin=1.2*cm,
         title=title, author="MinerWin V6.2",
     )
     story = []
 
-    # Başlık
-    subtitle = (f"Zaman dilimi: <b>{interval_label}</b>  |  Bar: <b>{bars}</b>  |  "
-                f"Olusturma: <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b>")
-    story += _pdf_header_story(logo_b64_str, title, subtitle, st_styles)
+    subtitle = (f"Zaman dilimi: {interval_label}  |  Bar: {bars}  |  "
+                f"Olusturma: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    story += _pdf_header_story(logo_b64_str, title, subtitle, st_styles, page_w)
 
-    # KPI kartları
     pv   = kpis.get("portfolio_value", np.nan)
     pnlv = kpis.get("pnl_value", np.nan)
     pnlp = kpis.get("pnl_pct", np.nan)
     mxp  = kpis.get("max_profit_tp1", np.nan)
     mxl  = kpis.get("max_loss_stop", np.nan)
 
-    kpi_rows = [
-        ("Portfoy Degeri",          fmt_money(pv)),
-        ("Anlik P&L ($)",           fmt_money(pnlv)),
-        ("Anlik P&L (%)",           fmt_pct(pnlp)),
-        ("Max Kar (TP1)",           fmt_money(mxp)),
-        ("Max Zarar (Stop)",        fmt_money(mxl)),
-    ]
-    story.append(_kpi_table(kpi_rows, st_styles, page_w))
-    story.append(Spacer(1, 12))
+    pnl_color = _C_GREEN if (np.isfinite(pnlv) and pnlv >= 0) else _C_RED
 
-    # Pozisyon tablosu
-    story.append(Paragraph("Pozisyonlar", st_styles["h2"]))
-    story.append(Spacer(1, 4))
+    row1 = [
+        ("PORTFOY DEGERI",    fmt_money(pv)),
+        ("ANLIK P&amp;L ($)", fmt_money(pnlv)),
+        ("ANLIK P&amp;L (%)", fmt_pct(pnlp)),
+    ]
+    story.append(_kpi_row(row1, st_styles, page_w, accent_colors=[_C_ACCENT, pnl_color, pnl_color]))
+    story.append(Spacer(1, 5))
+
+    row2 = [
+        ("MAX KAR (TP1)",     fmt_money(mxp)),
+        ("MAX ZARAR (STOP)",  fmt_money(mxl)),
+    ]
+    story.append(_kpi_row(row2, st_styles, page_w, accent_colors=[_C_GREEN, _C_RED]))
+    story.append(Spacer(1, 6))
+
+    story += _section_header("Pozisyonlar", st_styles, page_w)
 
     if out is None or out.empty:
         story.append(Paragraph("Tablo bos.", st_styles["body"]))
@@ -2037,12 +2216,11 @@ def build_portfolio_pdf_bytes(
             "Durum", "Liderlik", "RS Rating",
             "52W Zirve Uzaklik %", "Blue Sky", "RSI Yonu",
         ]
-        # Kolon isimlerini ASCII'ye cevir (PDF font uyumu)
         col_map = {
-            "Alış Ort.":         "Alis Ort.",
+            "Alış Ort.":           "Alis Ort.",
             "52W Zirve Uzaklık %": "52W Zirve Uzaklik %",
-            "RSI Yönü":          "RSI Yonu",
-            "Hacim Kuruması":    "Hacim Kuruması",
+            "RSI Yönü":            "RSI Yonu",
+            "Hacim Kuruması":      "Hacim Kurumasi",
         }
         dfp = out.rename(columns=col_map).copy()
         cols = [c for c in preferred_cols if c in dfp.columns]
@@ -2052,12 +2230,16 @@ def build_portfolio_pdf_bytes(
             if v is None or (isinstance(v, float) and not np.isfinite(v)):
                 return "—"
             s = str(v)
-            # emoji strip
             return s.encode("ascii", "ignore").decode() or s
 
         body_rows = [[cell(row[c]) for c in dfp.columns] for _, row in dfp.iterrows()]
 
-        # Kolon genişlikleri
+        pnl_col_idx = -1
+        try:
+            pnl_col_idx = list(dfp.columns).index("P&L %")
+        except ValueError:
+            pass
+
         w_map = {
             "Ticker": 0.07, "Fiyat": 0.07, "Qty": 0.05, "Alis Ort.": 0.08,
             "P&L %": 0.06, "Stop": 0.07, "TP1": 0.07, "TP2": 0.07,
@@ -2068,13 +2250,10 @@ def build_portfolio_pdf_bytes(
         total_ratio = sum(w_map.get(c, 0.07) for c in dfp.columns)
         col_widths  = [page_w * w_map.get(c, 0.07) / total_ratio for c in dfp.columns]
 
-        story.append(_data_table(list(dfp.columns), body_rows, st_styles, col_widths))
+        story.append(_data_table(list(dfp.columns), body_rows, st_styles, col_widths,
+                                  highlight_col=pnl_col_idx))
 
-    story.append(Spacer(1, 8))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=_C_BORDER, spaceBefore=4))
-    story.append(Paragraph(
-        "MinerWin V6.2 — Bu rapor otomatik teknik analiz amaclidir, yatirim tavsiyesi degildir.",
-        st_styles["small"]))
+    story += _footer_block(st_styles)
 
     doc.build(story)
     pdf = buf.getvalue()
@@ -2097,7 +2276,6 @@ def build_portfolio_excel_bytes(
     ws_sum.title = "Ozet"
     ws_pos = wb.create_sheet("Pozisyonlar")
 
-    # ---- Stil sabitleri ----
     FONT_TITLE  = Font(name="Arial", size=16, bold=True, color="0F172A")
     FONT_SUB    = Font(name="Arial", size=10, color="64748B")
     FONT_HDR    = Font(name="Arial", size=10, bold=True, color="0F172A")
@@ -2106,9 +2284,9 @@ def build_portfolio_excel_bytes(
     FONT_KPI_V  = Font(name="Arial", size=14, bold=True, color="0F172A")
     FONT_FOOT   = Font(name="Arial", size=8,  color="94A3B8", italic=True)
 
-    FILL_HDR    = PatternFill("solid", fgColor="EFF6FF")   # mavi ton
+    FILL_HDR    = PatternFill("solid", fgColor="EFF6FF")
     FILL_CARD   = PatternFill("solid", fgColor="FFFFFF")
-    FILL_ALT    = PatternFill("solid", fgColor="F8FAFC")   # zebra satır
+    FILL_ALT    = PatternFill("solid", fgColor="F8FAFC")
 
     thin  = Side(style="thin",   color="E2E8F0")
     thick = Side(style="medium", color="3B82F6")
@@ -2120,7 +2298,6 @@ def build_portfolio_excel_bytes(
     ALN_R  = Alignment(horizontal="right",  vertical="center")
     ALN_WL = Alignment(horizontal="left",   vertical="top", wrap_text=True)
 
-    # ---- ÖZET SAYFASI ----
     ws_sum["A1"] = title
     ws_sum["A1"].font = FONT_TITLE
     ws_sum.merge_cells("A1:K1")
@@ -2132,9 +2309,8 @@ def build_portfolio_excel_bytes(
 
     ws_sum.row_dimensions[1].height = 28
     ws_sum.row_dimensions[2].height = 16
-    ws_sum.row_dimensions[3].height = 10  # boşluk
+    ws_sum.row_dimensions[3].height = 10
 
-    # KPI kartları — 2 satır × 3 kolon grid (satır 4-7 ve 8-11)
     kpi_cards = [
         ("Portfoy Degeri ($)",    kpis.get("portfolio_value", np.nan),  "money"),
         ("Anlik P&L ($)",         kpis.get("pnl_value", np.nan),        "money"),
@@ -2148,21 +2324,18 @@ def build_portfolio_excel_bytes(
         ("A", "C", 8,11), ("E", "G", 8,11), ("I", "K", 8,11),
     ]
     for (lbl, val, kind), (c1, c2, r1, r2) in zip(kpi_cards, card_positions):
-        # Arka plan + border
         for r in range(r1, r2+1):
             for c in range(ord(c1), ord(c2)+1):
                 cell = ws_sum[f"{chr(c)}{r}"]
                 cell.fill   = FILL_CARD
                 cell.border = BORDER_CARD
 
-        # Label
         lbl_cell = ws_sum[f"{c1}{r1}"]
         lbl_cell.value = lbl
         lbl_cell.font  = FONT_KPI_L
         lbl_cell.alignment = Alignment(horizontal="left", vertical="top")
         ws_sum.merge_cells(f"{c1}{r1}:{c2}{r1}")
 
-        # Value
         val_cell = ws_sum[f"{c1}{r1+1}"]
         if kind == "money":
             val_cell.value          = float(val) if np.isfinite(val) else ""
@@ -2179,18 +2352,15 @@ def build_portfolio_excel_bytes(
             val_cell.alignment = ALN_L
         ws_sum.merge_cells(f"{c1}{r1+1}:{c2}{r2}")
 
-    # Sütun genişlikleri (Özet)
     for col, w in [("A",22),("B",16),("C",16),("D",4),
                    ("E",22),("F",16),("G",16),("H",4),
                    ("I",22),("J",16),("K",16)]:
         ws_sum.column_dimensions[col].width = w
 
-    # Footer
     ws_sum[f"A13"] = "MinerWin V6.2 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
     ws_sum[f"A13"].font = FONT_FOOT
     ws_sum.merge_cells("A13:K13")
 
-    # ---- POZİSYONLAR SAYFASI ----
     if out is None or out.empty:
         ws_pos["A1"] = "Pozisyon tablosu bos."
         ws_pos["A1"].font = FONT_BODY
@@ -2210,7 +2380,6 @@ def build_portfolio_excel_bytes(
         cols = [c for c in preferred_cols if c in df.columns]
         df = df[cols].copy()
 
-        # Başlık satırı
         for ci, col_name in enumerate(df.columns, start=1):
             cell = ws_pos.cell(row=1, column=ci, value=col_name)
             cell.font      = FONT_HDR
@@ -2218,7 +2387,6 @@ def build_portfolio_excel_bytes(
             cell.border    = BORDER_HDR
             cell.alignment = ALN_C
 
-        # Veri satırları
         NUM_MONEY = {"Fiyat","Alış Ort.","Stop","TP1","TP2","Poz. Değeri","Risk $"}
         NUM_PCT   = {"P&L %","Stop Mesafe %","TP1 Mesafe %","TP2 Mesafe %"}
         NUM_RR    = {"R (TP1/Stop)","R (TP2/Stop)"}
@@ -2274,7 +2442,6 @@ def build_portfolio_excel_bytes(
                     cell.value = str(v) if v is not None else ""
                     cell.alignment = ALN_L
 
-        # P&L % koşullu biçimlendirme
         if "P&L %" in df.columns:
             pnl_ci = df.columns.tolist().index("P&L %") + 1
             col_l  = get_column_letter(pnl_ci)
@@ -2286,7 +2453,6 @@ def build_portfolio_excel_bytes(
                 rng, CellIsRule(operator="lessThan", formula=["0"],
                                 font=Font(color="991B1B", bold=True, name="Arial", size=10)))
 
-        # Tablo nesnesi
         ws_pos.freeze_panes = "B2"
         ws_pos.auto_filter.ref = f"A1:{get_column_letter(df.shape[1])}{df.shape[0]+1}"
         tab = XLTable(displayName="Pozisyonlar",
@@ -2297,7 +2463,6 @@ def build_portfolio_excel_bytes(
             showRowStripes=False, showColumnStripes=False)
         ws_pos.add_table(tab)
 
-        # Sütun genişlikleri
         col_w_map = {
             "Ticker":18, "Fiyat":12, "Qty":10, "Alış Ort.":13,
             "P&L %":10, "Stop":12, "Stop Mesafe %":13,
@@ -2450,7 +2615,6 @@ with tab_single:
                         daily_df_override=daily_df_for_52w,
                     )
 
-                    # Weekly trend kontrolü (veto yok, sadece uyarı)
                     weekly_info = {}
                     try:
                         weekly_info = check_weekly_trend(ticker)
@@ -2537,7 +2701,6 @@ with tab_single:
                             f"ATR% yüksek — gerçek yapısal stop daha aşağıda. Pozisyon boyunu küçült."
                         )
 
-                    # Weekly trend uyarısı
                     if weekly_info.get("warning"):
                         st.warning(weekly_info["warning"])
 
@@ -2864,7 +3027,6 @@ with tab_portfolio:
                                 except Exception:
                                     pass
 
-                            # DÜZELTME: tuple sırası low, high
                             low_52w_roll, high_52w_roll = rolling_52w_levels(daily_df_for_52w, bars_1day=260)
                             blue = is_blue_sky(price, high_52w_roll)
 
@@ -2886,7 +3048,6 @@ with tab_portfolio:
 
                             pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
 
-                            # DÜZELTME: Risk $ = avg_cost - stop bazlı
                             risk_per_share = (avg_cost - user_stop) if (np.isfinite(user_stop) and np.isfinite(avg_cost)) else np.nan
                             risk_value = (risk_per_share * qty) if (np.isfinite(risk_per_share) and np.isfinite(qty)) else np.nan
 
