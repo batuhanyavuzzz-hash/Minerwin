@@ -1092,32 +1092,32 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
     if status_tag.startswith("🟢"):
         scenario = (
-            "Senaryo: Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp küçük gövdeli mumlar + "
+            "Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp küçük gövdeli mumlar + "
             "hacim düşüşü ile sıkışma görülürse, trend yönünde devam denemesi yapılabilir. Stop altına sarkarsa iptal."
         )
     elif status_tag.startswith("🟡"):
         scenario = (
-            "Senaryo: Fiyat şu an giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
+            "Fiyat şu an giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
             "konsolidasyon beklenir. Bu gerçekleşmeden yapılan alım kovalamaya girer."
         )
     elif status_tag.startswith("🔵"):
         scenario = (
-            "Senaryo: Düşük volatilite ile yatay sıkışma var. Kırılımı takip et: güçlü kapanış + hacim artışı gelirse "
+            "Düşük volatilite ile yatay sıkışma var. Kırılımı takip et: güçlü kapanış + hacim artışı gelirse "
             "setup aktifleşir; aksi halde zaman kaybı."
         )
     elif status_tag.startswith("⚫"):
         scenario = (
-            "Senaryo: Fiyat EMA50'ye göre uzamış. Pullback gelmeden giriş riskli. En iyi plan: giriş bandına yaklaşmasını "
+            "Fiyat EMA50'ye göre uzamış. Pullback gelmeden giriş riskli. En iyi plan: giriş bandına yaklaşmasını "
             "bekle ve orada güç işareti (higher low / güçlü kapanış) ara."
         )
     elif status_tag.startswith("🟣"):
         scenario = (
-            "Senaryo: Minervini #5 filtresi geçmiyor (fiyat 52W dip +%25 üstünde değil). Dipten yeni çıkan zayıf yapı olabilir. "
+            "Minervini #5 filtresi geçmiyor (fiyat 52W dip +%25 üstünde değil). Dipten yeni çıkan zayıf yapı olabilir. "
             "Önce güç kanıtı (trend + fiyat aksiyonu) gelmeden swing setup yok."
         )
     else:
         scenario = (
-            "Senaryo: Trend filtresi bozulmuş. Önce yeniden EMA150/EMA200 üstüne dönüş ve ortalamaların toparlanması gerekir; "
+            "Trend filtresi bozulmuş. Önce yeniden EMA150/EMA200 üstüne dönüş ve ortalamaların toparlanması gerekir; "
             "aksi halde swing setup yok."
         )
 
@@ -1303,8 +1303,11 @@ _EMOJI_RE = _re.compile(
 )
 
 def _strip_emoji(text: str) -> str:
-    """Emoji'leri siler, Türkçe karakterleri korur."""
-    return _EMOJI_RE.sub("", text).strip()
+    """Emoji'leri ve ok işaretlerini siler, Türkçe karakterleri korur."""
+    cleaned = _EMOJI_RE.sub("", text)
+    # Ok karakterlerini de kaldır (PDF fontunda kutu olarak görünüyor)
+    cleaned = cleaned.replace("↑", "").replace("↓", "").replace("→", "").replace("←", "")
+    return cleaned.strip()
 
 
 def _setup_pdf_fonts() -> tuple[str, str]:
@@ -1561,8 +1564,8 @@ def _score_bar_table(items: list[tuple[str, int, int]], st_styles: dict, page_w:
     ]]
 
     for name, pts, mx in items:
-        pct_fill = (pts / mx * 100) if mx > 0 else 0
-        pct_fill = max(0, min(100, pct_fill))
+        pct_fill = abs(pts / mx * 100) if mx > 0 else 0
+        pct_fill = min(100, pct_fill)
 
         bar_fill_w = bar_w * 0.9 * (pct_fill / 100.0)
         bar_bg_w   = bar_w * 0.9 - bar_fill_w
@@ -1570,9 +1573,9 @@ def _score_bar_table(items: list[tuple[str, int, int]], st_styles: dict, page_w:
         if pts > 0:
             bar_color = _C_ACCENT
         elif pts < 0:
-            bar_color = colors.HexColor("#EF4444")
+            bar_color = colors.HexColor("#EF4444")  # kırmızı bar negatif puan
         else:
-            bar_color = colors.HexColor("#E2E8F0")
+            bar_color = colors.HexColor("#E2E8F0")  # gri bar sıfır puan
 
         bar_cells = []
         bar_widths = []
@@ -1628,9 +1631,9 @@ def _footer_block(st_styles: dict) -> list:
         HRFlowable(width="100%", thickness=0.5, color=_C_BORDER, spaceBefore=2),
         Spacer(1, 3),
         Paragraph(
-            "MinerWin — Bu rapor otomatik teknik analiz amaciyla uretilmistir. "
-            "Yatirim tavsiyesi niteligi tasimaz. Yatirim kararlari tamamen kullanicinin "
-            "kendi sorumlulugundadir.",
+            "MinerWin — Bu rapor otomatik teknik analiz amacıyla üretilmiştir. "
+            "Yatırım tavsiyesi niteliği taşımaz. Yatırım kararları tamamen kullanıcının "
+            "kendi sorumluluğundadır.",
             st_styles["footer"],
         ),
     ]
@@ -1672,13 +1675,15 @@ def build_pdf_bytes_single(
 
     close_val = plan.debug.get("close", float("nan"))
     price_str = f"${close_val:.2f}" if np.isfinite(close_val) else "—"
-    min5_str  = "GECTI" if plan.minervini5_ok else "GECMEDI"
+    min5_str  = "GEÇTİ" if plan.minervini5_ok else "GEÇMEDİ"
     min5_clr  = _C_GREEN if plan.minervini5_ok else _C_RED
+
+    cap_tr = {"HIGH": "YÜKSEK", "MID": "ORTA", "LOW": "DÜŞÜK"}.get(plan.capacity_level, plan.capacity_level)
 
     row1_items = [
         ("GÜNCEL FİYAT",  price_str),
         ("TOPLAM SKOR",   f"{plan.total_score} / 100"),
-        ("KAPASİTE",      plan.capacity_level),
+        ("KAPASİTE",      cap_tr),
     ]
     story.append(_kpi_row(row1_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, _C_ACCENT]))
     story.append(Spacer(1, 5))
@@ -1693,7 +1698,7 @@ def build_pdf_bytes_single(
 
     if plan.high_vol_warning:
         warn_tbl = Table(
-            [[Paragraph("UYARI: Yuksek volatilite — stop cap devrede, pozisyon boyunu kucult.", sty["warn"])]],
+            [[Paragraph("UYARI: Yüksek volatilite — stop cap devrede, pozisyon boyutunu küçült.", sty["warn"])]],
             colWidths=[page_w],
         )
         warn_tbl.setStyle(TableStyle([
