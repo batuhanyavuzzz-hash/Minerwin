@@ -1280,6 +1280,33 @@ _C_WHITE     = colors.white
 _C_ZEBRA     = colors.HexColor("#F1F5F9")
 
 
+import re as _re
+
+# Emoji'leri silerken Türkçe karakterleri koruyan yardımcı
+_EMOJI_RE = _re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F1E0-\U0001F1FF"  # flags
+    "\U00002702-\U000027B0"
+    "\U000024C2-\U0001F251"
+    "\U0001f926-\U0001f937"
+    "\U00010000-\U0010FFFF"
+    "\u2640-\u2642"
+    "\u2600-\u2B55"
+    "\u200d\uFE0F"
+    "\u23cf\u23e9-\u23f3\u23f8-\u23fa"
+    "\u26A0\u26AA\u26AB"
+    "\U0001F7E0-\U0001F7EB"  # colored circles
+    "]+", flags=_re.UNICODE
+)
+
+def _strip_emoji(text: str) -> str:
+    """Emoji'leri siler, Türkçe karakterleri korur."""
+    return _EMOJI_RE.sub("", text).strip()
+
+
 def _setup_pdf_fonts() -> tuple[str, str]:
     import reportlab as _rl
     system_candidates = [
@@ -1346,12 +1373,14 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
         try:
             logo_bytes = base64.b64decode(logo_b64)
             logo_buf   = io.BytesIO(logo_bytes)
-            logo_img   = RLImage(logo_buf, width=3.6*cm, height=1.2*cm)
+            # Logo banner yüksekliğine orantılı — genişlik/yükseklik oranı korunur
+            logo_img   = RLImage(logo_buf, width=2.8*cm, height=0.95*cm)
+            logo_img.hAlign = "LEFT"
             banner_data = [
                 [logo_img, Paragraph(title, title_style)],
                 ["",       Paragraph(subtitle, sub_style)],
             ]
-            banner_tbl = Table(banner_data, colWidths=[4.0*cm, page_w - 4.0*cm])
+            banner_tbl = Table(banner_data, colWidths=[3.2*cm, page_w - 3.2*cm])
         except Exception:
             banner_data = [
                 [Paragraph(title, title_style)],
@@ -1370,8 +1399,8 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
         ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
         ("LEFTPADDING",  (0,0), (-1,-1), 14),
         ("RIGHTPADDING", (0,0), (-1,-1), 14),
-        ("TOPPADDING",   (0,0), (0,0),   14),
-        ("BOTTOMPADDING",(0,-1),(-1,-1),  12),
+        ("TOPPADDING",   (0,0), (0,0),   10),
+        ("BOTTOMPADDING",(0,-1),(-1,-1),  8),
         ("TOPPADDING",   (0,1), (-1,1),   0),
         ("BOTTOMPADDING",(0,0), (-1,0),   2),
     ]))
@@ -1395,14 +1424,14 @@ def _status_badge(status_tag: str, st_styles: dict, page_w: float) -> Table:
     else:
         bg = _C_RED
 
-    status_clean = status_tag.encode("ascii", "ignore").decode().strip() or status_tag
+    status_clean = _strip_emoji(status_tag)
     badge_style = ParagraphStyle(
         "badge", parent=st_styles["body"],
         fontName=st_styles["h2"].fontName,
         fontSize=10, leading=14, textColor=_C_WHITE,
     )
     tbl = Table(
-        [[Paragraph(f"<b>{html.escape(status_clean)}</b>", badge_style)]],
+        [[Paragraph(f"<b>DURUM: {html.escape(status_clean)}</b>", badge_style)]],
         colWidths=[page_w],
     )
     tbl.setStyle(TableStyle([
@@ -1463,7 +1492,7 @@ def _kpi_row(items: list[tuple[str, str]], st_styles: dict, page_w: float,
 
 
 def _data_table(headers: list[str], body_rows: list[list], st_styles: dict, col_widths: list,
-                highlight_col: int = -1) -> Table:
+                highlight_col: int = -1, font_size: float = 8) -> Table:
     fn   = st_styles["body"].fontName
     fn_b = st_styles["h2"].fontName
 
@@ -1471,10 +1500,11 @@ def _data_table(headers: list[str], body_rows: list[list], st_styles: dict, col_
         s = str(v) if v is not None else "—"
         return html.escape(s)
 
+    ld = font_size + 3
     hdr_style = ParagraphStyle("tbl_hdr", parent=st_styles["body"],
-                                fontName=fn_b, fontSize=8, textColor=_C_WHITE, leading=11)
+                                fontName=fn_b, fontSize=font_size, textColor=_C_WHITE, leading=ld)
     cell_style = ParagraphStyle("tbl_cell", parent=st_styles["body"],
-                                 fontSize=8, leading=11)
+                                 fontSize=font_size, leading=ld)
 
     data = [[Paragraph(html.escape(h), hdr_style) for h in headers]]
     for row in body_rows:
@@ -1488,7 +1518,7 @@ def _data_table(headers: list[str], body_rows: list[list], st_styles: dict, col_
         ("GRID",         (0,1), (-1,-1), 0.3, _C_BORDER),
         ("BOX",          (0,0), (-1,-1), 0.6, _C_BORDER),
         ("FONT",         (0,0), (-1,-1), fn),
-        ("FONTSIZE",     (0,0), (-1,-1), 8),
+        ("FONTSIZE",     (0,0), (-1,-1), font_size),
         ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
         ("LEFTPADDING",  (0,0), (-1,-1), 6),
         ("RIGHTPADDING", (0,0), (-1,-1), 6),
@@ -1525,7 +1555,7 @@ def _score_bar_table(items: list[tuple[str, int, int]], st_styles: dict, page_w:
     num_w  = page_w * 0.18
 
     data = [[
-        Paragraph("Bilesen", hdr_style),
+        Paragraph("Bileşen", hdr_style),
         Paragraph("", hdr_style),
         Paragraph("Puan / Maks", hdr_style),
     ]]
@@ -1646,9 +1676,9 @@ def build_pdf_bytes_single(
     min5_clr  = _C_GREEN if plan.minervini5_ok else _C_RED
 
     row1_items = [
-        ("GUNCEL FIYAT",  price_str),
+        ("GÜNCEL FİYAT",  price_str),
         ("TOPLAM SKOR",   f"{plan.total_score} / 100"),
-        ("KAPASITE",      plan.capacity_level),
+        ("KAPASİTE",      plan.capacity_level),
     ]
     story.append(_kpi_row(row1_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, _C_ACCENT]))
     story.append(Spacer(1, 5))
@@ -1656,7 +1686,7 @@ def build_pdf_bytes_single(
     row2_items = [
         ("SETUP SKORU",   f"{plan.setup_score} / 100"),
         ("TIMING SKORU",  f"{plan.timing_score} / 100"),
-        ("MINERVINI #5",  min5_str),
+        ("MİNERVİNİ #5",  min5_str),
     ]
     story.append(_kpi_row(row2_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, min5_clr]))
     story.append(Spacer(1, 6))
@@ -1676,27 +1706,27 @@ def build_pdf_bytes_single(
         story.append(warn_tbl)
         story.append(Spacer(1, 6))
 
-    story += _section_header("Islem Plani", sty, page_w)
+    story += _section_header("İşlem Planı", sty, page_w)
     rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
     rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
 
     plan_left = [
-        ["Giris Bolgesi",      f"{plan.entry_low:.2f} — {plan.entry_high:.2f}"],
+        ["Giriş Bölgesi",      f"{plan.entry_low:.2f} — {plan.entry_high:.2f}"],
         ["Stop",               f"{plan.stop:.2f}"],
         ["TP1  (R/R)",         f"{plan.tp1:.2f}  ({rr1})"],
         ["TP2  (R/R)",         f"{plan.tp2:.2f}  ({rr2})"],
     ]
     plan_right = [
         ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
-        ["52W Zirve Uzaklik",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
+        ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
         ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
-        ["Pivot Kirilimi",     "Var" if plan.breakout_detected else "Yok"],
+        ["Pivot Kırılımı",     "Var" if plan.breakout_detected else "Yok"],
     ]
 
     half_w = page_w * 0.48
     gap_w  = page_w * 0.04
-    tbl_left  = _data_table(["Parametre", "Deger"], plan_left,  sty, [half_w*0.48, half_w*0.52])
-    tbl_right = _data_table(["Parametre", "Deger"], plan_right, sty, [half_w*0.48, half_w*0.52])
+    tbl_left  = _data_table(["Parametre", "Değer"], plan_left,  sty, [half_w*0.48, half_w*0.52])
+    tbl_right = _data_table(["Parametre", "Değer"], plan_right, sty, [half_w*0.48, half_w*0.52])
     side_by_side = Table([[tbl_left, "", tbl_right]], colWidths=[half_w, gap_w, half_w])
     side_by_side.setStyle(TableStyle([
         ("VALIGN",       (0,0), (-1,-1), "TOP"),
@@ -1707,7 +1737,7 @@ def build_pdf_bytes_single(
     ]))
     story.append(side_by_side)
 
-    story += _section_header("Skor Dagilimi", sty, page_w)
+    story += _section_header("Skor Dağılımı", sty, page_w)
     b = plan.breakdown
     score_items = [
         ("Trend",              b.trend_stack,        30),
@@ -1716,9 +1746,9 @@ def build_pdf_bytes_single(
         ("Volatilite (ATR%)",  b.volatility_atr,     15),
         ("Uzama (EMA50)",      b.extension_vs_ema50, 15),
         ("52W Zirve",          b.near_52w_high,      10),
-        ("RSI Yonu",           b.rsi_direction,       5),
+        ("RSI Yönü",           b.rsi_direction,       5),
         ("Dar Baz (bonus)",    b.base_bonus,          7),
-        ("Kirilim (bonus)",    b.breakout_bonus,      8),
+        ("Kırılım (bonus)",    b.breakout_bonus,      8),
     ]
     story.append(_score_bar_table(score_items, sty, page_w))
 
@@ -1738,17 +1768,17 @@ def build_pdf_bytes_single(
     ]))
     story.append(scen_tbl)
 
-    rsi_dir_clean = plan.rsi_direction_label.encode("ascii", "ignore").decode() or plan.rsi_direction_label
+    rsi_dir_clean = _strip_emoji(plan.rsi_direction_label)
     rsi_slope_str = f"{plan.rsi_slope_val:.2f}" if np.isfinite(plan.rsi_slope_val) else "—"
     story.append(Spacer(1, 6))
-    story.append(_kpi_row([("RSI YONU", rsi_dir_clean), ("RSI EGIM", rsi_slope_str)], sty, page_w))
+    story.append(_kpi_row([("RSI YÖNÜ", rsi_dir_clean), ("RSI EĞİM", rsi_slope_str)], sty, page_w))
 
     if quote and isinstance(quote, dict):
         story += _section_header("Quote (Anlik Fiyat)", sty, page_w)
         q_keys = ["name", "exchange", "currency", "price", "change", "percent_change", "previous_close"]
         q_body = [[k, str(quote[k])] for k in q_keys if k in quote]
         if q_body:
-            story.append(_data_table(["Alan", "Deger"], q_body, sty,
+            story.append(_data_table(["Alan", "Değer"], q_body, sty,
                                      [page_w*0.35, page_w*0.65]))
 
     story += _footer_block(sty)
@@ -2170,9 +2200,11 @@ def build_portfolio_pdf_bytes(
     st_styles = _pdf_styles(fn, fn_bold)
 
     buf = io.BytesIO()
-    page_w = A4[0] - 3.2*cm
+    # Portföy tablosu geniş — landscape A4 kullan
+    page_size = (A4[1], A4[0])  # landscape
+    page_w = page_size[0] - 3.2*cm
     doc = SimpleDocTemplate(
-        buf, pagesize=A4,
+        buf, pagesize=page_size,
         leftMargin=1.6*cm, rightMargin=1.6*cm,
         topMargin=1.2*cm, bottomMargin=1.2*cm,
         title=title, author="MinerWin",
@@ -2192,7 +2224,7 @@ def build_portfolio_pdf_bytes(
     pnl_color = _C_GREEN if (np.isfinite(pnlv) and pnlv >= 0) else _C_RED
 
     row1 = [
-        ("PORTFOY DEGERI",    fmt_money(pv)),
+        ("PORTFÖY DEĞERİ",    fmt_money(pv)),
         ("ANLIK P&amp;L ($)", fmt_money(pnlv)),
         ("ANLIK P&amp;L (%)", fmt_pct(pnlp)),
     ]
@@ -2200,8 +2232,8 @@ def build_portfolio_pdf_bytes(
     story.append(Spacer(1, 5))
 
     row2 = [
-        ("MAX KAR (TP1)",     fmt_money(mxp)),
-        ("MAX ZARAR (STOP)",  fmt_money(mxl)),
+        ("MAKS KAR (TP1)",     fmt_money(mxp)),
+        ("MAKS ZARAR (STOP)",  fmt_money(mxl)),
     ]
     story.append(_kpi_row(row2, st_styles, page_w, accent_colors=[_C_GREEN, _C_RED]))
     story.append(Spacer(1, 6))
@@ -2209,19 +2241,19 @@ def build_portfolio_pdf_bytes(
     story += _section_header("Pozisyonlar", st_styles, page_w)
 
     if out is None or out.empty:
-        story.append(Paragraph("Tablo bos.", st_styles["body"]))
+        story.append(Paragraph("Tablo boş.", st_styles["body"]))
     else:
         preferred_cols = [
-            "Ticker", "Fiyat", "Qty", "Alis Ort.", "P&L %",
+            "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %",
             "Stop", "TP1", "TP2", "Setup", "Timing",
             "Durum", "Liderlik", "RS Rating",
-            "52W Zirve Uzaklik %", "Blue Sky", "RSI Yonu",
+            "52W Zirve Uzaklık %", "Blue Sky", "RSI Yönü",
         ]
         col_map = {
-            "Alış Ort.":           "Alis Ort.",
-            "52W Zirve Uzaklık %": "52W Zirve Uzaklik %",
-            "RSI Yönü":            "RSI Yonu",
-            "Hacim Kuruması":      "Hacim Kurumasi",
+            "Alış Ort.":           "Alış Ort.",
+            "52W Zirve Uzaklık %": "52W Zirve Uzaklık %",
+            "RSI Yönü":            "RSI Yönü",
+            "Hacim Kuruması":      "Hacim Kuruması",
         }
         dfp = out.rename(columns=col_map).copy()
         cols = [c for c in preferred_cols if c in dfp.columns]
@@ -2230,8 +2262,7 @@ def build_portfolio_pdf_bytes(
         def cell(v):
             if v is None or (isinstance(v, float) and not np.isfinite(v)):
                 return "—"
-            s = str(v)
-            return s.encode("ascii", "ignore").decode() or s
+            return _strip_emoji(str(v)) or str(v)
 
         body_rows = [[cell(row[c]) for c in dfp.columns] for _, row in dfp.iterrows()]
 
@@ -2242,17 +2273,17 @@ def build_portfolio_pdf_bytes(
             pass
 
         w_map = {
-            "Ticker": 0.07, "Fiyat": 0.07, "Qty": 0.05, "Alis Ort.": 0.08,
+            "Ticker": 0.07, "Fiyat": 0.07, "Qty": 0.05, "Alış Ort.": 0.08,
             "P&L %": 0.06, "Stop": 0.07, "TP1": 0.07, "TP2": 0.07,
             "Setup": 0.05, "Timing": 0.05, "Durum": 0.14, "Liderlik": 0.07,
-            "RS Rating": 0.06, "52W Zirve Uzaklik %": 0.08,
-            "Blue Sky": 0.05, "RSI Yonu": 0.06,
+            "RS Rating": 0.06, "52W Zirve Uzaklık %": 0.08,
+            "Blue Sky": 0.05, "RSI Yönü": 0.06,
         }
         total_ratio = sum(w_map.get(c, 0.07) for c in dfp.columns)
         col_widths  = [page_w * w_map.get(c, 0.07) / total_ratio for c in dfp.columns]
 
         story.append(_data_table(list(dfp.columns), body_rows, st_styles, col_widths,
-                                  highlight_col=pnl_col_idx))
+                                  highlight_col=pnl_col_idx, font_size=6.5))
 
     story += _footer_block(st_styles)
 
