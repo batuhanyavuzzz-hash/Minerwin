@@ -1346,12 +1346,12 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
         try:
             logo_bytes = base64.b64decode(logo_b64)
             logo_buf   = io.BytesIO(logo_bytes)
-            logo_img   = RLImage(logo_buf, width=2.4*cm, height=0.8*cm)
+            logo_img   = RLImage(logo_buf, width=3.6*cm, height=1.2*cm)
             banner_data = [
                 [logo_img, Paragraph(title, title_style)],
                 ["",       Paragraph(subtitle, sub_style)],
             ]
-            banner_tbl = Table(banner_data, colWidths=[2.8*cm, page_w - 2.8*cm])
+            banner_tbl = Table(banner_data, colWidths=[4.0*cm, page_w - 4.0*cm])
         except Exception:
             banner_data = [
                 [Paragraph(title, title_style)],
@@ -1370,8 +1370,8 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
         ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
         ("LEFTPADDING",  (0,0), (-1,-1), 14),
         ("RIGHTPADDING", (0,0), (-1,-1), 14),
-        ("TOPPADDING",   (0,0), (0,0),   12),
-        ("BOTTOMPADDING",(0,-1),(-1,-1),  10),
+        ("TOPPADDING",   (0,0), (0,0),   14),
+        ("BOTTOMPADDING",(0,-1),(-1,-1),  12),
         ("TOPPADDING",   (0,1), (-1,1),   0),
         ("BOTTOMPADDING",(0,0), (-1,0),   2),
     ]))
@@ -1383,32 +1383,33 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
 def _status_badge(status_tag: str, st_styles: dict, page_w: float) -> Table:
     tag_lower = status_tag.lower()
     if "alim" in tag_lower or status_tag.startswith("🟢"):
-        bg, fg = _C_GREEN_BG, _C_GREEN
+        bg = _C_GREEN
     elif "pullback" in tag_lower or status_tag.startswith("🟡"):
-        bg, fg = _C_AMBER_BG, _C_AMBER
+        bg = _C_AMBER
     elif "konsolidasyon" in tag_lower or status_tag.startswith("🔵"):
-        bg, fg = _C_ACCENT_LT, _C_ACCENT
+        bg = _C_ACCENT
     elif "52w" in tag_lower or status_tag.startswith("🟣"):
-        bg, fg = _C_PURPLE_BG, _C_PURPLE
+        bg = _C_PURPLE
+    elif "uzam" in tag_lower or status_tag.startswith("⚫"):
+        bg = colors.HexColor("#374151")
     else:
-        bg, fg = _C_RED_BG, _C_RED
+        bg = _C_RED
 
     status_clean = status_tag.encode("ascii", "ignore").decode().strip() or status_tag
     badge_style = ParagraphStyle(
         "badge", parent=st_styles["body"],
         fontName=st_styles["h2"].fontName,
-        fontSize=9.5, leading=13, textColor=fg,
+        fontSize=10, leading=14, textColor=_C_WHITE,
     )
     tbl = Table(
-        [[Paragraph(f"<b>DURUM:  {html.escape(status_clean)}</b>", badge_style)]],
+        [[Paragraph(f"<b>{html.escape(status_clean)}</b>", badge_style)]],
         colWidths=[page_w],
     )
     tbl.setStyle(TableStyle([
         ("BACKGROUND",    (0,0), (-1,-1), bg),
-        ("LEFTPADDING",   (0,0), (-1,-1), 12),
-        ("TOPPADDING",    (0,0), (-1,-1), 7),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
-        ("BOX",           (0,0), (-1,-1), 0.5, fg),
+        ("LEFTPADDING",   (0,0), (-1,-1), 14),
+        ("TOPPADDING",    (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
     ]))
     return tbl
 
@@ -1537,9 +1538,9 @@ def _score_bar_table(items: list[tuple[str, int, int]], st_styles: dict, page_w:
         bar_bg_w   = bar_w * 0.9 - bar_fill_w
 
         if pts > 0:
-            bar_color = _C_ACCENT if pts >= mx * 0.6 else colors.HexColor("#93C5FD")
+            bar_color = _C_ACCENT
         elif pts < 0:
-            bar_color = colors.HexColor("#F87171")
+            bar_color = colors.HexColor("#EF4444")
         else:
             bar_color = colors.HexColor("#E2E8F0")
 
@@ -1597,7 +1598,7 @@ def _footer_block(st_styles: dict) -> list:
         HRFlowable(width="100%", thickness=0.5, color=_C_BORDER, spaceBefore=2),
         Spacer(1, 3),
         Paragraph(
-            "MinerWin V6.2 — Bu rapor otomatik teknik analiz amaciyla uretilmistir. "
+            "MinerWin — Bu rapor otomatik teknik analiz amaciyla uretilmistir. "
             "Yatirim tavsiyesi niteligi tasimaz. Yatirim kararlari tamamen kullanicinin "
             "kendi sorumlulugundadir.",
             st_styles["footer"],
@@ -1626,7 +1627,7 @@ def build_pdf_bytes_single(
         leftMargin=1.6*cm, rightMargin=1.6*cm,
         topMargin=1.2*cm,  bottomMargin=1.2*cm,
         title=f"MinerWin — {ticker} Analiz Raporu",
-        author="MinerWin V6.2",
+        author="MinerWin",
     )
 
     story = []
@@ -2174,7 +2175,7 @@ def build_portfolio_pdf_bytes(
         buf, pagesize=A4,
         leftMargin=1.6*cm, rightMargin=1.6*cm,
         topMargin=1.2*cm, bottomMargin=1.2*cm,
-        title=title, author="MinerWin V6.2",
+        title=title, author="MinerWin",
     )
     story = []
 
