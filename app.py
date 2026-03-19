@@ -732,11 +732,13 @@ class ScoreBreakdown:
 
 @dataclass
 class TradePlan:
+    # --- Core Trade ---
     total_score: int
     label: str
     setup_score: int
     timing_score: int
     status_tag: str
+    status_detail: str
     entry_low: float
     entry_high: float
     entry_mid: float
@@ -763,19 +765,12 @@ class TradePlan:
     dist_to_52w_high_pct: float
     narrative: str
     scenario: str
+    quick_summary: str
+    # --- Context (karar desteği) ---
+    context: dict
+    # --- Debug / Breakdown ---
     debug: dict
     breakdown: ScoreBreakdown
-    # V6.3+ eklentiler
-    band_width_pct: float
-    band_wide_warning: bool
-    band_approach: str
-    stop_structural_flag: bool
-    trailing_stop_tp1: float
-    trailing_stop_tp2: float
-    resistance_levels: list
-    resistance_warning: str
-    days_in_zone: int
-    quick_summary: str
 
 def label_from_total(score: int) -> str:
     if score >= 75:
@@ -904,7 +899,8 @@ def _days_in_zone(df: pd.DataFrame, entry_low: float, entry_high: float) -> int:
     return count
 
 # =========================================================
-# V6.3 PATCH: _status_tag — geliştirilmiş karar motoru
+# =========================================================
+# STATUS TAG — 3 Ana Durum + Detay
 # =========================================================
 def _status_tag(
     timing_score: int,
@@ -915,26 +911,27 @@ def _status_tag(
     consolidation: bool,
     minervini5_ok: bool,
     entry_quality_pts: int = 0,
-) -> str:
+) -> Tuple[str, str]:
+    """Returns (tag, detail). Tag is one of 3 states only."""
     if not minervini5_ok:
-        return "🟣 52W DİP FİLTRESİ (ZAYIF)"
+        return "🔴 TRADE YOK", "52W dip filtresi geçmiyor — yapı zayıf"
     if setup_score < 45:
-        return "🔴 SETUP YOK"
+        return "🔴 TRADE YOK", "Setup skoru çok düşük (< 45)"
     if trend_broken:
-        return "🔴 TREND BOZULDU"
+        return "🔴 TRADE YOK", "Trend bozulmuş"
     if consolidation:
-        return "🔵 KONSOLİDASYON"
+        return "🟡 RİSKLİ / BEKLE", "Konsolidasyon — kırılımı bekle"
     if in_entry:
         if setup_score < 60:
-            return "🔴 SETUP ZAYIF — ALINMAZ"
-        if entry_quality_pts < 0:
-            return "🟡 ALIM BÖLGESİ (MOMENTUM ZAYIF)"
+            return "🔴 TRADE YOK", "Setup zayıf (< 60) — giriş bandında olsa bile alınmaz"
         if timing_score >= 70:
-            return "🟢 ALIM BÖLGESİNDE"
-        return "🟡 ALIM BÖLGESİ (ZAMANLAMA ZAYIF)"
+            # entry_quality veto etmez, sadece risk notu olarak eklenir
+            _eq_note = " (momentum zayıf — dikkat)" if entry_quality_pts < 0 else ""
+            return "🟢 TRADE VAR", f"Giriş bandında, koşullar uygun{_eq_note}"
+        return "🟡 RİSKLİ / BEKLE", "Giriş bandında ama zamanlama yetersiz"
     if is_extended and timing_score < 50:
-        return "⚫ UZAMIŞ — KOVALAMA"
-    return "🟡 PULLBACK BEKLENİYOR"
+        return "🟡 RİSKLİ / BEKLE", "Fiyat uzamış — kovalama riski"
+    return "🟡 RİSKLİ / BEKLE", "Pullback bekleniyor"
 
 def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> TradePlan:
     last = df.iloc[-1]
@@ -958,17 +955,17 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     rsi_dir_label = _rsi_direction_label(rsi_slope_val)
 
     # =========================================================
-    # V6.3 UPGRADE 1: RSI slope etkisi artırıldı (4 kademe)
+    # RSI slope etkisi (stabilize: maks ±5)
     # =========================================================
     if np.isfinite(rsi_slope_val):
         if rsi_slope_val > 0.4:
-            rsi_dir_pts = 10
-        elif rsi_slope_val > 0.1:
             rsi_dir_pts = 5
+        elif rsi_slope_val > 0.1:
+            rsi_dir_pts = 2
         elif rsi_slope_val < -0.4:
-            rsi_dir_pts = -10
-        elif rsi_slope_val < -0.1:
             rsi_dir_pts = -5
+        elif rsi_slope_val < -0.1:
+            rsi_dir_pts = -2
         else:
             rsi_dir_pts = 0
     else:
@@ -1002,15 +999,15 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         near_52w_pts = 0
 
     # =========================================================
-    # V6.3 UPGRADE 2: Trend Stage puanı (early/ideal/late)
+    # Trend Stage puanı (stabilize: maks ±5)
     # =========================================================
     if np.isfinite(dist_to_52w_high_pct):
         if dist_to_52w_high_pct < 3:
-            stage_pts = -10   # late stage (risk)
+            stage_pts = -5    # late stage (risk)
         elif dist_to_52w_high_pct < 10:
-            stage_pts = 5     # ideal
+            stage_pts = 3     # ideal
         else:
-            stage_pts = 10    # early trend
+            stage_pts = 5     # early trend
     else:
         stage_pts = 0
 
@@ -1046,9 +1043,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
 
     if in_entry_band:
         if np.isfinite(rsi_slope_val) and rsi_slope_val > 0:
-            entry_quality_pts = 5
+            entry_quality_pts = 2
         else:
-            entry_quality_pts = -5
+            entry_quality_pts = -2
     else:
         entry_quality_pts = 0
 
@@ -1060,16 +1057,16 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     days_in_zone_val = _days_in_zone(df, entry_low, entry_high)
 
     # =========================================================
-    # raw_total: V6.3 — stage_pts + entry_quality_pts eklendi
-    # Maks teorik: 30+20+20+15+15+10+10+10+5+7+8 = 150
-    # Normalize edici: 150
+    # raw_total — stabilize edilmiş ağırlıklar
+    # Maks teorik: 30+20+20+15+15+10+5+5+2+7+8 = 137
+    # Normalize edici: 137
     # =========================================================
     raw_total = (
         trend_pts + p_pts + m_pts + v_pts + e_pts
         + near_52w_pts + rsi_dir_pts + total_bonus_pts
         + stage_pts + entry_quality_pts
     )
-    total = int(round(clamp(raw_total / 150.0 * 100.0, 0, 100)))
+    total = int(round(clamp(raw_total / 137.0 * 100.0, 0, 100)))
     if not m5_ok:
         total = min(total, 55)
     label = label_from_total(total)
@@ -1095,15 +1092,16 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     ext_pts = _extension_points(extended)
 
     # =========================================================
-    # V6.3 PATCH: timing_score artık entry_quality_pts içeriyor
+    # timing_score — sadece proximity + extension (stabilize)
+    # entry_quality karara müdahale etmez, sadece context/yorum
     # =========================================================
-    timing_score = int(clamp(ext_pts + prox_pts + entry_quality_pts, 0, 100))
+    timing_score = int(clamp(ext_pts + prox_pts, 0, 100))
 
     in_entry = entry_low <= close <= entry_high
     consolidation = _detect_consolidation(atr_pct, rsi14)
 
-    # V6.3 PATCH: _status_tag çağrısına entry_quality_pts geçiliyor
-    status_tag = _status_tag(
+    # Status: 3 ana durum + detay
+    status_tag, status_detail = _status_tag(
         timing_score=timing_score,
         setup_score=setup_score,
         trend_broken=trend_broken,
@@ -1153,24 +1151,24 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     rr_tp2 = (tp2 - entry_mid) / risk if risk > 0 else float("nan")
 
     # =========================================================
-    # V6.3+ EKLENTI: Stop Structural Flag
+    # CONTEXT LAYER — karar desteği bilgileri (scoring değiştirmez)
     # =========================================================
     stop_structural_flag = bool(stop_dbg.get("capped", False))
-
-    # =========================================================
-    # V6.3+ EKLENTI: Trailing Stop Logic
-    # =========================================================
-    trailing_stop_tp1 = float(entry_mid) if np.isfinite(entry_mid) else float("nan")
-    trailing_stop_tp2 = float(tp1) if np.isfinite(tp1) else float("nan")
-
-    # =========================================================
-    # V6.3+ EKLENTI: Resistance Awareness
-    # =========================================================
     pivot_highs = _find_pivot_highs(df, lookback=120)
     resist_info = _resistance_on_path(entry_mid, tp1, tp2, pivot_highs)
 
+    context = {
+        "band_width_pct": band_info.get("band_width_pct", float("nan")),
+        "band_wide_warning": band_info.get("band_wide_warning", False),
+        "band_approach": band_info.get("approach", "—"),
+        "stop_structural_flag": stop_structural_flag,
+        "resistance_levels": resist_info.get("levels", []),
+        "resistance_warning": resist_info.get("warning", ""),
+        "days_in_zone": days_in_zone_val,
+    }
+
     # =========================================================
-    # V6.3+ EKLENTI: Quick Summary (3 satır)
+    # QUICK SUMMARY — 3 satır (aksiyon / neden / risk)
     # =========================================================
     trend_text = (
         "güçlü" if (trend_stack_ok and (price_above_ema150 or price_near_ema150))
@@ -1183,100 +1181,92 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     vol_text = "uygun" if vol_ok else ("agresif" if vol_border else "yüksek")
 
     if status_tag.startswith("🟢"):
-        _qs_action = "AL — Giriş bandında, koşullar uygun."
-    elif "MOMENTUM ZAYIF" in status_tag:
-        _qs_action = "BEKLE — Giriş bandında ama momentum zayıf."
-    elif "ZAMANLAMA ZAYIF" in status_tag:
-        _qs_action = "BEKLE — Giriş bandında ama zamanlama yetersiz."
-    elif "SETUP YOK" in status_tag or "SETUP ZAYIF" in status_tag:
-        _qs_action = "UZAK DUR — Setup koşulları oluşmamış."
-    elif status_tag.startswith("⚫"):
-        _qs_action = "RİSKLİ — Fiyat uzamış, kovalama."
-    elif status_tag.startswith("🔴"):
-        _qs_action = "UZAK DUR — Trend bozuk veya setup yetersiz."
-    elif status_tag.startswith("🟣"):
-        _qs_action = "UZAK DUR — 52W dip filtresi geçmiyor."
-    elif status_tag.startswith("🔵"):
-        _qs_action = "BEKLE — Konsolidasyon, kırılımı izle."
+        _qs_action = "AL"
+    elif status_tag.startswith("🟡"):
+        _qs_action = "BEKLE"
     else:
-        _qs_action = "BEKLE — Pullback bekleniyor."
+        _qs_action = "PAS"
 
-    _qs_reason = f"Trend: {trend_text} | Momentum (RSI): {mom_text}"
-
-    # En kritik uyarı
     _qs_warnings: list[str] = []
     if stop_structural_flag:
         _qs_warnings.append("Stop yapısal değil (cap devrede)")
     if resist_info.get("warning"):
         _qs_warnings.append(resist_info["warning"].replace("⚠️ ", ""))
     if band_info.get("band_wide_warning"):
-        _qs_warnings.append("Band geniş (>%5), entry belirsiz")
+        _qs_warnings.append("Band geniş (>%5)")
     if high_vol_warning:
         _qs_warnings.append("Yüksek volatilite")
     _qs_risk = _qs_warnings[0] if _qs_warnings else "Kritik uyarı yok"
-    quick_summary = f"{_qs_action}\n{_qs_reason}\nRisk: {_qs_risk}"
 
+    quick_summary = (
+        f"Aksiyon: {_qs_action} — {status_detail}\n"
+        f"Neden: Trend {trend_text}, momentum {mom_text}\n"
+        f"Risk: {_qs_risk}"
+    )
+
+    # =========================================================
+    # TIMING + SCENARIO
+    # =========================================================
     if status_tag.startswith("🟢"):
         timing_cmd = "ALIM ARANIR"
-    elif status_tag.startswith(("🟡", "🔵")):
+    elif status_tag.startswith("🟡"):
         timing_cmd = "BEKLE / İZLE"
     else:
         timing_cmd = "UZAK DUR / ŞARTLAR OLUŞSUN"
 
+    # Senaryo: status_detail'e göre
+    _sd = status_detail.lower()
     if status_tag.startswith("🟢"):
         scenario = (
             "Fiyat giriş bandında (EMA20–EMA50). Bu bölgede satış baskısı zayıflayıp küçük gövdeli mumlar + "
             "hacim düşüşü ile sıkışma görülürse, trend yönünde devam denemesi yapılabilir. Stop altına sarkarsa iptal."
         )
-    elif "MOMENTUM ZAYIF" in status_tag:
+    elif "momentum" in _sd:
         scenario = (
             "Fiyat giriş bandında ancak RSI momentumu zayıflıyor. Continuation riski mevcut. "
-            "Momentum toparlanmadan (RSI slope pozitife dönmeden) giriş riski yüksektir. "
-            "Sabırlı ol — RSI yön değiştirirse setup tekrar aktifleşir."
+            "Momentum toparlanmadan giriş riski yüksektir. RSI yön değiştirirse setup tekrar aktifleşir."
         )
-    elif "ZAMANLAMA ZAYIF" in status_tag:
+    elif "zamanlama" in _sd:
         scenario = (
-            "Fiyat giriş bandında fakat zamanlama skoru yetersiz. Muhtemelen uzama veya bant kenarına "
-            "yakınlık sorunu var. Bandın ortasına doğru çekilme + hacim kuruması ile netleşmeyi bekle."
+            "Fiyat giriş bandında fakat zamanlama skoru yetersiz. "
+            "Bandın ortasına doğru çekilme + hacim kuruması ile netleşmeyi bekle."
         )
-    elif "SETUP YOK" in status_tag:
+    elif "setup" in _sd and "düşük" in _sd:
         scenario = (
-            "Setup skoru çok düşük (< 45). Temel trend koşulları oluşmamış. "
-            "Ortalamaların dizilmesi ve fiyat yapısının güçlenmesi gerekiyor. Swing setup yok."
+            "Setup skoru çok düşük. Temel trend koşulları oluşmamış. "
+            "Ortalamaların dizilmesi ve fiyat yapısının güçlenmesi gerekiyor."
         )
-    elif "SETUP ZAYIF" in status_tag:
+    elif "setup" in _sd and "zayıf" in _sd:
         scenario = (
-            "Fiyat giriş bandında olsa da setup kalitesi yetersiz (< 60). Trend yapısı henüz olgunlaşmamış. "
+            "Setup kalitesi yetersiz. Trend yapısı henüz olgunlaşmamış. "
             "EMA dizilimi ve momentum güçlenene kadar giriş yapılmamalı."
         )
-    elif status_tag.startswith("🟡"):
+    elif "uzamış" in _sd:
         scenario = (
-            "Fiyat şu an giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
-            "konsolidasyon beklenir. Bu gerçekleşmeden yapılan alım kovalamaya girer."
+            "Fiyat EMA50'ye göre uzamış. Pullback gelmeden giriş riskli. Giriş bandına yaklaşmasını bekle."
         )
-    elif status_tag.startswith("🔵"):
+    elif "konsolidasyon" in _sd:
         scenario = (
             "Düşük volatilite ile yatay sıkışma var. Kırılımı takip et: güçlü kapanış + hacim artışı gelirse "
-            "setup aktifleşir; aksi halde zaman kaybı."
+            "setup aktifleşir."
         )
-    elif status_tag.startswith("⚫"):
+    elif "52w" in _sd:
         scenario = (
-            "Fiyat EMA50'ye göre uzamış. Pullback gelmeden giriş riskli. En iyi plan: giriş bandına yaklaşmasını "
-            "bekle ve orada güç işareti (higher low / güçlü kapanış) ara."
+            "Minervini #5 filtresi geçmiyor. Dipten yeni çıkan zayıf yapı olabilir. "
+            "Önce güç kanıtı gelmeden swing setup yok."
         )
-    elif status_tag.startswith("🟣"):
+    elif "pullback" in _sd:
         scenario = (
-            "Minervini #5 filtresi geçmiyor (fiyat 52W dip +%25 üstünde değil). Dipten yeni çıkan zayıf yapı olabilir. "
-            "Önce güç kanıtı (trend + fiyat aksiyonu) gelmeden swing setup yok."
+            "Fiyat giriş bandının dışında. EMA20–EMA50 bandına geri çekilme + hacimde düşüş ile "
+            "konsolidasyon beklenir."
         )
     else:
         scenario = (
-            "Trend filtresi bozulmuş. Önce yeniden EMA150/EMA200 üstüne dönüş ve ortalamaların toparlanması gerekir; "
-            "aksi halde swing setup yok."
+            "Trend filtresi bozulmuş. Önce EMA150/EMA200 üstüne dönüş gerekir."
         )
 
     # V6.3: Stage bilgisi narrative'e eklendi
-    stage_label = {-10: "Late Stage (risk)", 5: "İdeal", 10: "Early Trend"}.get(stage_pts, "—")
+    stage_label = {-5: "Late Stage (risk)", 3: "İdeal", 5: "Early Trend"}.get(stage_pts, "—")
 
     targets_reason = (
         f"Targets: kapasite={cap_level}, beklenen taşıma ≈ %{expected_move_pct:.1f} "
@@ -1379,15 +1369,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         "base_bonus_pts": base_bonus_pts,
         "breakout_bonus_pts": breakout_bonus_pts,
         "base_breakout_details": base_result["details"],
-        "band_width_pct": band_info.get("band_width_pct", float("nan")),
-        "band_wide_warning": band_info.get("band_wide_warning", False),
-        "band_approach": band_info.get("approach", "—"),
-        "stop_structural_flag": stop_structural_flag,
-        "trailing_stop_tp1": trailing_stop_tp1,
-        "trailing_stop_tp2": trailing_stop_tp2,
-        "resistance_levels": resist_info.get("levels", []),
-        "resistance_warning": resist_info.get("warning", ""),
-        "days_in_zone": days_in_zone_val,
+        "context": context,
     }
 
     return TradePlan(
@@ -1396,6 +1378,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         setup_score=int(setup_score),
         timing_score=int(timing_score),
         status_tag=status_tag,
+        status_detail=status_detail,
         entry_low=float(entry_low),
         entry_high=float(entry_high),
         entry_mid=float(entry_mid),
@@ -1422,18 +1405,10 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         dist_to_52w_high_pct=float(dist_to_52w_high_pct) if np.isfinite(dist_to_52w_high_pct) else float("nan"),
         narrative=narrative,
         scenario=scenario,
+        quick_summary=str(quick_summary),
+        context=context,
         debug=debug,
         breakdown=breakdown,
-        band_width_pct=float(band_info.get("band_width_pct", float("nan"))),
-        band_wide_warning=bool(band_info.get("band_wide_warning", False)),
-        band_approach=str(band_info.get("approach", "—")),
-        stop_structural_flag=bool(stop_structural_flag),
-        trailing_stop_tp1=float(trailing_stop_tp1),
-        trailing_stop_tp2=float(trailing_stop_tp2),
-        resistance_levels=resist_info.get("levels", []),
-        resistance_warning=str(resist_info.get("warning", "")),
-        days_in_zone=int(days_in_zone_val),
-        quick_summary=str(quick_summary),
     )
 
 # =========================================================
@@ -1581,20 +1556,11 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
     return story
 
 def _status_badge(status_tag: str, st_styles: dict, page_w: float) -> Table:
-    tag_lower = status_tag.lower()
-    # Emoji prefix öncelikli — sarı "ALIM BÖLGESİ" tag'lerinin yeşil olmasını önler
+    # 3 durum: 🟢 yeşil, 🟡 amber, 🔴 kırmızı
     if status_tag.startswith("🟢"):
         bg = _C_GREEN
     elif status_tag.startswith("🟡"):
         bg = _C_AMBER
-    elif status_tag.startswith("🔵") or "konsolidasyon" in tag_lower:
-        bg = _C_ACCENT
-    elif status_tag.startswith("🟣") or "52w" in tag_lower:
-        bg = _C_PURPLE
-    elif status_tag.startswith("⚫") or "uzam" in tag_lower:
-        bg = colors.HexColor("#374151")
-    elif status_tag.startswith("🔴"):
-        bg = _C_RED
     else:
         bg = _C_RED
 
@@ -1793,8 +1759,6 @@ def build_pdf_bytes_single(
     plan: TradePlan,
     quote: dict | None,
     logo_b64_str: str = "",
-    account_size: float = 10000.0,
-    risk_pct: float = 1.0,
 ):
     fn, fn_bold = _setup_pdf_fonts()
     sty = _pdf_styles(fn, fn_bold)
@@ -1962,46 +1926,44 @@ def build_pdf_bytes_single(
     story.append(yorum_tbl)
 
     # =========================================================
-    # V6.3+ EKLENTI: PDF — Ek Bilgiler (Trailing / Band / Resistance / Position Sizing)
+    # PDF — Ek Bilgiler (Context Layer)
     # =========================================================
+    ctx = plan.context
     story += _section_header("Ek Bilgiler", sty, page_w)
 
-    # Trailing Stop satırı
-    ts1 = f"{plan.trailing_stop_tp1:.2f}" if np.isfinite(plan.trailing_stop_tp1) else "—"
-    ts2 = f"{plan.trailing_stop_tp2:.2f}" if np.isfinite(plan.trailing_stop_tp2) else "—"
-    story.append(_kpi_row([
-        ("TRAILING — TP1 HIT", f"Stop → {ts1}"),
-        ("TRAILING — TP2 HIT", f"Stop → {ts2}"),
-        ("BANDDA GÜN", str(plan.days_in_zone)),
-    ], sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, _C_ACCENT]))
-    story.append(Spacer(1, 4))
-
-    # Band intelligence + Position sizing satırı
-    bw_str = f"%{plan.band_width_pct:.1f}" if np.isfinite(plan.band_width_pct) else "—"
-    _pdf_risk_dollar = account_size * risk_pct / 100.0
-    _pdf_rps = float(plan.entry_mid - plan.stop) if np.isfinite(plan.entry_mid) and np.isfinite(plan.stop) and plan.entry_mid > plan.stop else float("nan")
-    _pdf_pos = int(_pdf_risk_dollar / _pdf_rps) if np.isfinite(_pdf_rps) and _pdf_rps > 0 else 0
-    pos_str = f"{_pdf_pos} adet (${_pdf_pos * plan.entry_mid:,.0f})" if _pdf_pos > 0 and np.isfinite(plan.entry_mid) else "—"
-
+    # Band + Days in Zone satırı
+    _bw = ctx.get("band_width_pct", float("nan"))
+    bw_str = f"%{_bw:.1f}" if np.isfinite(_bw) else "—"
+    _ba = ctx.get("band_approach", "—")
+    _diz = ctx.get("days_in_zone", 0)
     story.append(_kpi_row([
         ("BAND GENİŞLİĞİ", bw_str),
-        ("YAKLAŞIM", _strip_emoji(plan.band_approach)),
-        ("POZİSYON BOYUTU", pos_str),
+        ("YAKLAŞIM", _strip_emoji(str(_ba))),
+        ("BANDDA GÜN", str(_diz)),
     ], sty, page_w, accent_colors=[
-        _C_RED if plan.band_wide_warning else _C_ACCENT,
+        _C_RED if ctx.get("band_wide_warning") else _C_ACCENT,
         _C_ACCENT,
         _C_ACCENT,
     ]))
     story.append(Spacer(1, 4))
 
+    # Trailing stop önerisi (sadece text)
+    story.append(Paragraph(
+        "<b>Trailing Stop Onerisi:</b> TP1 ulasildiginda stop → entry'ye cekilir. "
+        "TP2 ulasildiginda stop → TP1'e cekilir.",
+        sty["small"],
+    ))
+    story.append(Spacer(1, 4))
+
     # Uyarı kutusu (varsa)
     _pdf_warns: list[str] = []
-    if plan.stop_structural_flag:
+    if ctx.get("stop_structural_flag"):
         _pdf_warns.append("Stop yapısal degil — cap nedeniyle invalidation seviyesinden farkli.")
-    if plan.resistance_warning:
-        _pdf_warns.append(_strip_emoji(plan.resistance_warning))
-    if plan.band_wide_warning:
-        _pdf_warns.append(f"Band genislik (%{plan.band_width_pct:.1f}) yuksek — entry belirsiz.")
+    _rw = ctx.get("resistance_warning", "")
+    if _rw:
+        _pdf_warns.append(_strip_emoji(str(_rw)))
+    if ctx.get("band_wide_warning"):
+        _pdf_warns.append(f"Band genislik (%{_bw:.1f}) yuksek — entry belirsiz.")
     if _pdf_warns:
         warn_text = " | ".join(_pdf_warns)
         _pdf_warn_tbl = Table(
@@ -2019,8 +1981,9 @@ def build_pdf_bytes_single(
         story.append(Spacer(1, 4))
 
     # Direnç seviyeleri (varsa)
-    if plan.resistance_levels:
-        resist_str = ", ".join(f"{r:.2f}" for r in plan.resistance_levels)
+    _rl = ctx.get("resistance_levels", [])
+    if _rl:
+        resist_str = ", ".join(f"{r:.2f}" for r in _rl)
         story.append(Paragraph(f"<b>Direnc Seviyeleri (entry→TP2):</b> {html.escape(resist_str)}", sty["body"]))
         story.append(Spacer(1, 4))
 
@@ -2033,9 +1996,9 @@ def build_pdf_bytes_single(
         ("Volatilite (ATR%)", b.volatility_atr, 15),
         ("Uzama (EMA50)", b.extension_vs_ema50, 15),
         ("52W Zirve", b.near_52w_high, 10),
-        ("RSI Yönü", b.rsi_direction, 10),
-        ("Trend Stage", b.stage_pts, 10),
-        ("Entry Quality", b.entry_quality, 5),
+        ("RSI Yönü", b.rsi_direction, 5),
+        ("Trend Stage", b.stage_pts, 5),
+        ("Entry Quality", b.entry_quality, 2),
         ("Dar Baz (bonus)", b.base_bonus, 7),
         ("Kırılım (bonus)", b.breakout_bonus, 8),
     ]
@@ -2327,10 +2290,11 @@ def held_action_comment(
     if not plan.minervini5_ok:
         return "TUT/İZLE", "Minervini #5 geçmiyor → ekleme yok; güç kanıtı bekle."
     if plan.status_tag.startswith("🔴"):
-        return "RİSK AZALT", "Trend bozuk → ekleme yok; stopu sıkılaştır / pozisyon azaltmayı düşün."
-    if plan.status_tag.startswith("⚫"):
+        return "RİSK AZALT", "Trade yok → ekleme yok; stopu sıkılaştır / pozisyon azaltmayı düşün."
+    _det = plan.status_detail.lower()
+    if "uzamış" in _det:
         return "TUT", "Uzamış → ekleme yok; pullback ile yeniden değerlendir."
-    if plan.status_tag.startswith("🔵"):
+    if "konsolidasyon" in _det:
         return "TUT/İZLE", "Sıkışma → kırılım/bozulma gelene kadar sabır."
     if np.isfinite(user_tp2) and price >= user_tp2:
         return "KARAR NOKTASI", "TP2 bölgesi → momentum bozulursa kısmi/çıkış; korunuyorsa trailing stop."
@@ -2717,13 +2681,6 @@ with st.sidebar:
     show_quote = st.checkbox("Quote (anlık fiyat) kullan", value=False)
     st.caption("Quote açarsan +1 API çağrısı (ticker başına). Free planda pre/post-market genelde yok.")
     st.divider()
-    st.subheader("💰 Pozisyon Boyutlama")
-    account_size = st.number_input(
-        "Hesap Büyüklüğü ($)", min_value=0.0, value=10000.0, step=500.0, format="%.0f",
-        help="Pozisyon boyutu hesaplamak için kullanılır. Risk: hesabın %1'i.",
-    )
-    risk_pct_input = st.slider("Risk Oranı (%)", min_value=0.5, max_value=3.0, value=1.0, step=0.25)
-    st.divider()
     st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
     if st.session_state.daily_tests:
         df_mem = pd.DataFrame(st.session_state.daily_tests)
@@ -2881,52 +2838,47 @@ with tab_single:
                     st.divider()
 
                     # =========================================================
-                    # V6.3+ EKLENTI: Hızlı Özet (3 satır)
+                    # Hızlı Özet (3 satır: Aksiyon / Neden / Risk)
                     # =========================================================
                     for _qs_line in plan.quick_summary.split("\n"):
-                        if _qs_line.startswith("AL"):
+                        if _qs_line.startswith("Aksiyon: AL"):
                             st.success(f"**{_qs_line}**")
-                        elif _qs_line.startswith(("BEKLE", "Risk:")):
-                            st.warning(f"**{_qs_line}**")
-                        elif _qs_line.startswith(("UZAK DUR", "RİSKLİ")):
+                        elif _qs_line.startswith("Aksiyon: PAS"):
                             st.error(f"**{_qs_line}**")
                         else:
-                            st.info(f"**{_qs_line}**")
+                            st.warning(f"**{_qs_line}**")
 
                     st.subheader("📊 Strateji Özeti")
                     colm1, colm2, colm3 = st.columns(3)
                     with colm1:
                         st.metric("Güncel Fiyat", f"{float(last_price_line):.2f}")
-                        st.metric("Durum", plan.status_tag)
+                        st.metric("Durum", f"{plan.status_tag}")
                     with colm2:
                         st.metric("Toplam Skor", f"{plan.total_score} / 100")
                         st.metric("Setup / Timing", f"{plan.setup_score} / {plan.timing_score}")
                     with colm3:
                         st.metric("Stop (Aktif)", f"{plan.stop:.2f}")
                         st.metric("TP1 / TP2", f"{plan.tp1:.2f} / {plan.tp2:.2f}")
+                    st.caption(f"**Detay:** {plan.status_detail}")
                     st.caption(
                         f"Yapısal: {plan.debug.get('stop_structural', float('nan')):.2f} | "
                         f"Noise: {plan.debug.get('stop_noise', float('nan')):.2f} | "
                         f"Cap: %{plan.debug.get('stop_debug', {}).get('max_risk_pct', 7):.0f}"
                     )
 
-                    # V6.3+ EKLENTI: Stop risk flag
-                    if plan.stop_structural_flag:
-                        st.warning("⚠️ **Stop yapısal değil** — Cap nedeniyle gerçek invalidation seviyesinden farklı. Risk artabilir.")
-
+                    # Context layer uyarıları
+                    _ctx = plan.context
+                    if _ctx.get("stop_structural_flag"):
+                        st.warning("⚠️ **Stop yapısal değil** — Cap devrede, gerçek invalidation seviyesinden farklı.")
                     if plan.high_vol_warning:
-                        st.warning(
-                            f"⚠️ **Yüksek Volatilite:** Stop cap devreye girdi. "
-                            f"ATR% yüksek — gerçek yapısal stop daha aşağıda. Pozisyon boyunu küçült."
-                        )
+                        st.warning("⚠️ **Yüksek Volatilite** — Stop cap devreye girdi. Pozisyon boyunu küçült.")
                     if weekly_info.get("warning"):
                         st.warning(weekly_info["warning"])
-
-                    # V6.3+ EKLENTI: Band intelligence + resistance + days in zone
-                    if plan.band_wide_warning:
-                        st.warning(f"⚠️ **Band geniş** — EMA20–EMA50 arası %{plan.band_width_pct:.1f}. Giriş noktası belirsiz.")
-                    if plan.resistance_warning:
-                        st.warning(plan.resistance_warning)
+                    if _ctx.get("band_wide_warning"):
+                        _bw = _ctx.get("band_width_pct", 0)
+                        st.warning(f"⚠️ **Band geniş** — %{_bw:.1f}. Giriş noktası belirsiz.")
+                    if _ctx.get("resistance_warning"):
+                        st.warning(_ctx["resistance_warning"])
 
                     col_baz, col_kir = st.columns(2)
                     _intraday_note = "" if interval_label == "Günlük (1day)" else " · Aktif timeframe bazlı"
@@ -2956,7 +2908,7 @@ with tab_single:
                         dist_label = f"%{plan.dist_to_52w_high_pct:.1f} uzakta" if np.isfinite(plan.dist_to_52w_high_pct) else "—"
                         st.metric("52W Zirveye Uzaklık", dist_label)
                     with col_stage:
-                        stage_label = {-10: "Late Stage", 5: "İdeal", 10: "Early Trend"}.get(plan.breakdown.stage_pts, "—")
+                        stage_label = {-5: "Late Stage", 3: "İdeal", 5: "Early Trend"}.get(plan.breakdown.stage_pts, "—")
                         st.metric("Trend Stage", stage_label, help="Early trend ödüllendirilir, late stage (zirveye <3%) cezalandırılır.")
 
                     st.caption(
@@ -3004,33 +2956,25 @@ with tab_single:
                     })
                     st.table(table)
 
-                    # V6.3+ EKLENTI: Trailing Stop Planı
+                    # Trailing stop önerisi (sadece text)
                     st.caption(
-                        f"**Trailing Stop:** TP1 hit → Stop = {plan.trailing_stop_tp1:.2f} (entry) | "
-                        f"TP2 hit → Stop = {plan.trailing_stop_tp2:.2f} (TP1)"
+                        "**Trailing Stop Önerisi:** TP1 hit → stop entry'ye çekilir | TP2 hit → stop TP1'e çekilir"
                     )
 
-                    # V6.3+ EKLENTI: Ek bilgiler satırı
-                    col_bi, col_dz, col_ps = st.columns(3)
+                    # Context bilgileri
+                    col_bi, col_dz = st.columns(2)
                     with col_bi:
-                        bw_str = f"%{plan.band_width_pct:.1f}" if np.isfinite(plan.band_width_pct) else "—"
+                        _bw = _ctx.get("band_width_pct", float("nan"))
+                        bw_str = f"%{_bw:.1f}" if np.isfinite(_bw) else "—"
                         st.metric("Band Genişliği", bw_str, help="EMA20–EMA50 arası mesafe yüzdesi")
-                        st.caption(f"Yaklaşım: {plan.band_approach}")
+                        st.caption(f"Yaklaşım: {_ctx.get('band_approach', '—')}")
                     with col_dz:
-                        st.metric("Giriş Bandında (gün)", str(plan.days_in_zone), help="Fiyat kaç gündür entry bandında")
-                    with col_ps:
-                        _risk_dollar = account_size * risk_pct_input / 100.0
-                        _risk_per_share = float(plan.entry_mid - plan.stop) if np.isfinite(plan.entry_mid) and np.isfinite(plan.stop) and plan.entry_mid > plan.stop else float("nan")
-                        _pos_size = int(_risk_dollar / _risk_per_share) if np.isfinite(_risk_per_share) and _risk_per_share > 0 else 0
-                        _pos_value = _pos_size * plan.entry_mid if _pos_size > 0 and np.isfinite(plan.entry_mid) else 0
-                        st.metric("Pozisyon Boyutu", f"{_pos_size} adet" if _pos_size > 0 else "—",
-                                  help=f"Hesap: ${account_size:,.0f} | Risk: %{risk_pct_input} = ${_risk_dollar:,.0f}")
-                        if _pos_size > 0:
-                            st.caption(f"Pozisyon değeri: ${_pos_value:,.0f} | Risk/hisse: ${_risk_per_share:.2f}")
+                        st.metric("Giriş Bandında (gün)", str(_ctx.get("days_in_zone", 0)), help="Fiyat kaç gündür entry bandında")
 
-                    # V6.3+ EKLENTI: Direnç seviyeleri
-                    if plan.resistance_levels:
-                        st.caption(f"**Direnç Seviyeleri (entry→TP2):** {', '.join(f'{r:.2f}' for r in plan.resistance_levels)}")
+                    # Direnç seviyeleri
+                    _rl = _ctx.get("resistance_levels", [])
+                    if _rl:
+                        st.caption(f"**Direnç Seviyeleri (entry→TP2):** {', '.join(f'{r:.2f}' for r in _rl)}")
 
                     st.subheader("🧠 Skor Dağılımı")
                     b = plan.breakdown
@@ -3047,13 +2991,13 @@ with tab_single:
                             b.stage_pts, b.entry_quality,
                             b.base_bonus, b.breakout_bonus
                         ],
-                        "Maks": [30, 20, 20, 15, 15, 10, 10, 10, 5, 7, 8],
+                        "Maks": [30, 20, 20, 15, 15, 10, 5, 5, 2, 7, 8],
                     })
                     st.table(bdf)
                     st.caption(
-                        "Toplam 150 maks → 100'e normalize edilir. "
-                        "RSI yönü artık ±10 puan. Trend Stage: early +10 / ideal +5 / late -10. "
-                        "Entry Quality: bantta RSI↑ +5 / RSI↓ -5. "
+                        "Toplam 137 maks → 100'e normalize edilir. "
+                        "RSI yönü ±5 puan. Trend Stage: early +5 / ideal +3 / late -5. "
+                        "Entry Quality: bantta RSI↑ +2 / RSI↓ -2 (sadece skor, karara müdahale etmez). "
                         "Breakout bonus RSI slope ile doğrulanır (zayıf breakout → 3 puan). "
                         "Minervini #5 geçmezse tavan 55."
                     )
@@ -3130,7 +3074,7 @@ with tab_single:
                         st.caption("Yönetim önerileri için fiyatın entry/TP seviyelerine yaklaşmasını bekle.")
 
                     st.subheader("📄 Rapor")
-                    pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, account_size=account_size, risk_pct=risk_pct_input)
+                    pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64)
                     st.download_button(
                         label="Raporu PDF'e Çevir (İndir)",
                         data=pdf_bytes,
@@ -3395,15 +3339,11 @@ with tab_portfolio:
                 if not out.empty and "Durum" in out.columns:
                     a = out[out["Durum"].astype(str).str.startswith("🟢")]
                     b = out[out["Durum"].astype(str).str.startswith("🟡")]
-                    c = out[out["Durum"].astype(str).str.startswith("⚫")]
                     d = out[out["Durum"].astype(str).str.startswith("🔴")]
-                    e = out[out["Durum"].astype(str).str.startswith("🟣")]
-                    colx, coly, colz, colw, colv = st.columns(5)
-                    colx.metric("🟢 Alım Bölgesi", len(a))
-                    coly.metric("🟡 Pullback", len(b))
-                    colz.metric("⚫ Uzamış", len(c))
-                    colw.metric("🔴 Trend Bozuk", len(d))
-                    colv.metric("🟣 52W Filtresi", len(e))
+                    colx, coly, colw = st.columns(3)
+                    colx.metric("🟢 Trade Var", len(a))
+                    coly.metric("🟡 Riskli / Bekle", len(b))
+                    colw.metric("🔴 Trade Yok", len(d))
 
                 if not out.empty and "Yüksek Vol Uyarı" in out.columns:
                     vol_warn_tickers = out[out["Yüksek Vol Uyarı"] == "⚠️"]["Ticker"].tolist()
