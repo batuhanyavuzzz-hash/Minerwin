@@ -3061,12 +3061,9 @@ with tab_single:
                             sug_stop = max(stop0, entry0)
                             suggestions.append(f"Entry'ye göre %+{move_pct:.1f}. Stop'u en az **break-even** seviyesine çek: {sug_stop:.2f}")
                     if np.isfinite(tp1_0) and cur_price >= tp1_0:
-                        ema20_now = float(df.iloc[-1]["ema20"])
-                        ema50_now = float(df.iloc[-1]["ema50"])
-                        trail = max(stop0, min(cur_price * 0.995, max(ema20_now, ema50_now) * 0.995))
-                        suggestions.append(f"TP1 bölgesi: stop'u **EMA bazlı** yukarı taşı: {trail:.2f}")
+                        suggestions.append("TP1 bölgesi: stop'u en az **entry seviyesine** çek.")
                     if np.isfinite(tp2_0) and cur_price >= tp2_0:
-                        suggestions.append("TP2 bölgesi: Momentum bozulursa kısmi/çıkış; korunuyorsa trailing stop.")
+                        suggestions.append("TP2 bölgesi: stop'u **TP1 seviyesine** çek. Momentum bozulursa kısmi/çıkış.")
 
                     if suggestions:
                         st.info("**Yönetim Önerisi:**\n\n- " + "\n- ".join(suggestions))
