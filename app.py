@@ -1,5 +1,17 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.2.1) — Twelve Data
+# MinerWin — Tek Hisse + Portföy Analiz (V6.3) — Twelve Data
+#
+# V6.3 Değişiklikleri (V6.2.1 üzerine — yeni özellikler):
+#  A. Piyasa Sağlığı Paneli: SPY bazlı rejim göstergesi (🟢 RİSK AÇIK / 🟡 TEMKİNLİ /
+#     🔴 RİSK KAPALI). Sekmelerin üstünde butonla, analizlerde otomatik gösterilir.
+#     Rejim kırmızıysa alım uyarısı verilir.
+#  B. Bilanço (Earnings) Uyarısı: Yaklaşan bilanço 14 gün içindeyse gap riski uyarısı.
+#     Tek hissede banner, portföyde "Bilanço" kolonu. Sidebar'dan kapatılabilir.
+#     Not: Twelve Data free planda earnings endpoint'i desteklenmeyebilir — bu durumda
+#     uygulama kırılmaz, bilgi notu gösterilir.
+#  C. MTF Özet (Haftalık + Günlük): Hangi timeframe'de analiz yaparsan yap, haftalık
+#     setup skoru + günlük timing skoru yan yana gösterilir; birleşik karar
+#     (🟢 SİNYAL / 🟡 İZLE / 🔴 UZAK DUR) ve haftalık EMA20–EMA50 alarm bandı verilir.
 #
 # V6.2.1 Değişiklikleri (V6.2 üzerine — kod incelemesi düzeltmeleri):
 #  1. FIX: max_loss_stop artık sadece gerçek zarar üreten bacakları topluyor
@@ -64,6 +76,9 @@ BLUE_SKY_THRESHOLD = 0.98
 EXTENDED_EMA50_PCT = 8.0
 PIVOT_LOOKBACK = 20
 RSI_MOMENTUM_LOOKBACK = 5
+
+# NEW (V6.3): Bilanço uyarısı için gün eşiği
+EARNINGS_WARN_DAYS = 14
 
 # FIX (V6.2.1): Rapor tarihleri için Türkiye saat dilimi
 TR_TZ = ZoneInfo("Europe/Istanbul")
@@ -133,7 +148,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V6.2.1</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3</div>
 """,
     unsafe_allow_html=True,
 )
@@ -397,6 +412,163 @@ def check_weekly_trend(symbol: str) -> Dict[str, Any]:
         # FIX (V6.2.1): Hata sessizce yutulmuyor — UI'da gösterilmek üzere kaydedilir
         result["error"] = str(e)
     return result
+
+
+# =========================================================
+# BİLANÇO (EARNINGS) — NEW V6.3
+# =========================================================
+@st.cache_data(ttl=3600)
+def td_earnings(symbol: str) -> dict:
+    """Twelve Data /earnings — sembolün geçmiş + yaklaşan bilanço tarihleri.
+    Not: Free planda bu endpoint desteklenmeyebilir; çağıran taraf hatayı
+    yakalayıp bilgi notu gösterir, uygulama kırılmaz."""
+    return _td_get(
+        "earnings",
+        params={"symbol": symbol, "outputsize": 8, "apikey": API_KEY, "format": "JSON"},
+        timeout=20,
+    )
+
+
+def next_earnings_info(symbol: str) -> Dict[str, Any]:
+    """En yakın gelecek bilanço tarihini ve kaç gün kaldığını döndürür."""
+    out = {"date": None, "days": None, "error": ""}
+    try:
+        data = td_earnings(symbol)
+        if isinstance(data, dict) and data.get("status") == "error":
+            out["error"] = str(data.get("message", "earnings hatası"))
+            return out
+        vals = []
+        if isinstance(data, dict):
+            vals = data.get("earnings") or data.get("values") or []
+        today = datetime.now(TR_TZ).date()
+        future_dates = []
+        for e in vals:
+            if not isinstance(e, dict):
+                continue
+            dstr = str(e.get("date", ""))
+            try:
+                d = datetime.strptime(dstr, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if d >= today:
+                future_dates.append(d)
+        if future_dates:
+            nd = min(future_dates)
+            out["date"] = nd.isoformat()
+            out["days"] = int((nd - today).days)
+    except Exception as ex:
+        out["error"] = str(ex)
+    return out
+
+
+# =========================================================
+# PİYASA SAĞLIĞI (SPY REJİM) — NEW V6.3
+# =========================================================
+def market_health_pack(spy_df: pd.DataFrame) -> Dict[str, Any]:
+    """SPY üzerinden piyasa rejimini belirler (Minervini'nin M harfi).
+    🟢 RİSK AÇIK: close > EMA50 > EMA200 ve EMA200 eğimi pozitif
+    🔴 RİSK KAPALI: close < EMA200 veya (close < EMA50 ve EMA50 eğimi negatif)
+    🟡 TEMKİNLİ: aradaki her durum"""
+    out = {
+        "regime": "—", "detail": "", "swing_ok": None, "error": "",
+        "close": float("nan"), "ema50": float("nan"), "ema200": float("nan"),
+        "dist_ema50_pct": float("nan"), "ema200_slope": float("nan"),
+    }
+    try:
+        if spy_df is None or spy_df.empty or len(spy_df) < 210:
+            out["error"] = "SPY verisi yetersiz (min 210 bar gerekli)"
+            return out
+        d = spy_df.copy()
+        d["ema50"] = ema(d["close"], 50)
+        d["ema200"] = ema(d["close"], 200)
+        close = float(d["close"].iloc[-1])
+        e50 = float(d["ema50"].iloc[-1])
+        e200 = float(d["ema200"].iloc[-1])
+        s200 = slope(d["ema200"], lookback=20)
+        s50 = slope(d["ema50"], lookback=10)
+        out.update({
+            "close": close, "ema50": e50, "ema200": e200,
+            "dist_ema50_pct": pct(close, e50),
+            "ema200_slope": float(s200) if np.isfinite(s200) else float("nan"),
+        })
+        if close > e50 and e50 > e200 and np.isfinite(s200) and s200 > 0:
+            out["regime"] = "🟢 RİSK AÇIK"
+            out["detail"] = "SPY > EMA50 > EMA200 ve uzun trend pozitif — swing alımları için ortam uygun."
+            out["swing_ok"] = True
+        elif close < e200 or (close < e50 and np.isfinite(s50) and s50 < 0):
+            out["regime"] = "🔴 RİSK KAPALI"
+            out["detail"] = "SPY zayıf (EMA200 altı veya EMA50 altı + negatif eğim) — yeni swing alımı için koşullar uygun değil."
+            out["swing_ok"] = False
+        else:
+            out["regime"] = "🟡 TEMKİNLİ"
+            out["detail"] = "SPY karışık bölgede — pozisyon boyunu küçült, sadece en güçlü setuplara odaklan."
+            out["swing_ok"] = None
+    except Exception as ex:
+        out["error"] = str(ex)
+    return out
+
+
+def render_market_health(mh: Dict[str, Any]):
+    if mh.get("error"):
+        st.caption(f"ℹ️ Piyasa sağlığı hesaplanamadı: {mh['error']}")
+        return
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Piyasa Rejimi (SPY)", mh.get("regime", "—"))
+    m2.metric("SPY Kapanış", f"{mh.get('close', float('nan')):.2f}" if np.isfinite(mh.get("close", np.nan)) else "—")
+    m3.metric("EMA50 Mesafe", f"{mh.get('dist_ema50_pct', float('nan')):+.2f}%" if np.isfinite(mh.get("dist_ema50_pct", np.nan)) else "—")
+    m4.metric("EMA200 Eğim", f"{mh.get('ema200_slope', float('nan')):.3f}" if np.isfinite(mh.get("ema200_slope", np.nan)) else "—")
+    st.caption(mh.get("detail", ""))
+
+
+# =========================================================
+# MTF ÖZET (HAFTALIK + GÜNLÜK) — NEW V6.3
+# =========================================================
+def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df["ema20"] = ema(df["close"], 20)
+    df["ema50"] = ema(df["close"], 50)
+    df["ema150"] = ema(df["close"], 150)
+    df["ema200"] = ema(df["close"], 200)
+    df["rsi14"] = rsi(df["close"], 14)
+    df["atr14"] = atr(df, 14)
+    return df
+
+
+def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str, Any]:
+    """Haftalık setup + günlük timing'i tek pakette döndürür.
+    Kullanıcının iş akışı: haftalık giriş bandına alarm kur → alarm çalınca
+    günlük ile teyit et. Bu özet iki adımı tek ekranda birleştirir."""
+    out = {"error": ""}
+    try:
+        wdf = _add_indicators(_fetch_weekly_df(symbol, 260))
+        w_plan = build_trade_plan(wdf, low_52w=low_52w, high_52w=high_52w)
+
+        ddf = _add_indicators(_fetch_daily_df(symbol, 320))
+        d_plan = build_trade_plan(ddf, low_52w=low_52w, high_52w=high_52w)
+
+        weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
+        daily_green = d_plan.status_tag.startswith("🟢")
+
+        if not weekly_ok:
+            verdict = "🔴 UZAK DUR — haftalık trend teyitsiz, alarm kurmaya bile değmez"
+            verdict_kind = "error"
+        elif daily_green:
+            verdict = "🟢 SİNYAL — haftalık trend + günlük timing uyumlu"
+            verdict_kind = "success"
+        else:
+            verdict = "🟡 İZLE — haftalık uygun, günlük timing bekleniyor (alarm bandını takip et)"
+            verdict_kind = "warning"
+
+        out.update({
+            "w_setup": w_plan.setup_score, "w_status": w_plan.status_tag,
+            "w_entry_low": w_plan.entry_low, "w_entry_high": w_plan.entry_high,
+            "d_timing": d_plan.timing_score, "d_status": d_plan.status_tag,
+            "d_entry_low": d_plan.entry_low, "d_entry_high": d_plan.entry_high,
+            "verdict": verdict, "verdict_kind": verdict_kind,
+            "weekly_ok": weekly_ok, "daily_green": daily_green,
+        })
+    except Exception as ex:
+        out["error"] = str(ex)
+    return out
 
 
 def compute_52w_levels(df: pd.DataFrame, bars_1day: int = 260) -> Tuple[float, float]:
@@ -2497,7 +2669,7 @@ def build_portfolio_excel_bytes(
         ws_sum.column_dimensions[col].width = w
 
     # FIX (V6.2.1): gereksiz f-string kaldırıldı (ws_sum[f"A13"] → ws_sum["A13"])
-    ws_sum["A13"] = "MinerWin V6.2.1 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
+    ws_sum["A13"] = "MinerWin V6.3 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
     ws_sum["A13"].font = FONT_FOOT
     ws_sum.merge_cells("A13:K13")
 
@@ -2510,7 +2682,7 @@ def build_portfolio_excel_bytes(
             "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %",
             "Stop", "Stop Mesafe %", "TP1", "TP1 Mesafe %", "TP2", "TP2 Mesafe %",
             "R (TP1/Stop)", "R (TP2/Stop)",
-            "Setup", "Timing", "Durum", "Minervini #5",
+            "Setup", "Timing", "Durum", "Minervini #5", "Bilanço",
             "Liderlik", "RS Rating", "RS Yeni Zirve",
             "Endekse Üstünlük 3A", "Hacim Kuruması", "Kuruma Oranı",
             "52W Zirve Uzaklık %", "Blue Sky", "İz Süren Yapı",
@@ -2609,7 +2781,7 @@ def build_portfolio_excel_bytes(
             "TP1":12, "TP1 Mesafe %":13, "TP2":12, "TP2 Mesafe %":13,
             "R (TP1/Stop)":12, "R (TP2/Stop)":12,
             "Setup":10, "Timing":10,
-            "Durum":26, "Minervini #5":13, "Liderlik":14,
+            "Durum":26, "Minervini #5":13, "Bilanço":16, "Liderlik":14,
             "RS Rating":12, "RS Yeni Zirve":14,
             "Endekse Üstünlük 3A":18, "Hacim Kuruması":16, "Kuruma Oranı":14,
             "52W Zirve Uzaklık %":18, "Blue Sky":10, "İz Süren Yapı":28,
@@ -2653,6 +2825,12 @@ with st.sidebar:
     show_quote = st.checkbox("Quote (anlık fiyat) kullan", value=False)
     st.caption("Quote açarsan +1 API çağrısı (ticker başına). Free planda pre/post-market genelde yok.")
 
+    # NEW (V6.3): MTF ve bilanço kontrol seçenekleri
+    show_mtf = st.checkbox("MTF özet (Haftalık + Günlük)", value=True)
+    st.caption("Tek hisse analizinde haftalık setup + günlük timing özeti. +1-2 API çağrısı (cache'li).")
+    check_earnings = st.checkbox("Bilanço (earnings) kontrolü", value=True)
+    st.caption("Yaklaşan bilanço uyarısı. +1 API çağrısı/ticker (1 saat cache'li). Free planda desteklenmeyebilir.")
+
     st.divider()
     st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
     if st.session_state.daily_tests:
@@ -2689,6 +2867,21 @@ with st.sidebar:
             st.info("history.csv yok veya boş.")
         else:
             st.dataframe(hist_df.tail(200), use_container_width=True, hide_index=True)
+
+
+# =========================================================
+# PİYASA SAĞLIĞI PANELİ — NEW V6.3
+# =========================================================
+mh_c1, mh_c2 = st.columns([0.28, 0.72])
+with mh_c1:
+    if st.button("📡 Piyasa Sağlığını Getir (SPY)", use_container_width=True):
+        try:
+            st.session_state["__mh"] = market_health_pack(_fetch_spy_daily(320))
+        except Exception as e:
+            st.session_state["__mh"] = {"error": str(e)}
+if st.session_state.get("__mh"):
+    render_market_health(st.session_state["__mh"])
+st.divider()
 
 
 # =========================================================
@@ -2760,6 +2953,19 @@ with tab_single:
                         weekly_info = check_weekly_trend(ticker)
                     except Exception:
                         pass
+
+                    # NEW (V6.3): Bilanço kontrolü
+                    earn = next_earnings_info(ticker) if check_earnings else {}
+
+                    # NEW (V6.3): Piyasa sağlığı (SPY leadership_pack ile zaten cache'te)
+                    try:
+                        mh = market_health_pack(_fetch_spy_daily(320))
+                        st.session_state["__mh"] = mh
+                    except Exception:
+                        mh = {}
+
+                    # NEW (V6.3): MTF özet (haftalık setup + günlük timing)
+                    mtf = build_mtf_summary(ticker, low_52w, high_52w) if show_mtf else {}
 
                     if show_quote:
                         try:
@@ -2858,6 +3064,24 @@ with tab_single:
                     if weekly_info.get("error"):
                         st.caption(f"ℹ️ Weekly trend kontrolü yapılamadı: {weekly_info['error']}")
 
+                    # NEW (V6.3): Piyasa rejimi uyarısı
+                    if mh.get("swing_ok") is False:
+                        st.error(f"🔴 **Piyasa Rejimi (SPY):** {mh.get('detail', '')}")
+                    elif str(mh.get("regime", "")).startswith("🟡"):
+                        st.warning(f"🟡 **Piyasa Rejimi (SPY):** {mh.get('detail', '')}")
+
+                    # NEW (V6.3): Bilanço uyarısı — gece gap'i stop'a saygı duymaz
+                    if earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
+                        st.error(
+                            f"📅 **Yaklaşan Bilanço:** {earn['date']} ({earn['days']} gün sonra) — "
+                            f"gece açılan gap stop koruması tanımaz. Swing girişini buna göre planla "
+                            f"veya bilanço sonrasını bekle."
+                        )
+                    elif earn.get("date"):
+                        st.caption(f"📅 Sonraki bilanço: {earn['date']} ({earn['days']} gün sonra)")
+                    elif check_earnings and earn.get("error"):
+                        st.caption(f"ℹ️ Bilanço verisi alınamadı (mevcut API planında olmayabilir): {earn['error']}")
+
                     col_baz, col_kir = st.columns(2)
                     _intraday_note = "" if interval_label == "Günlük (1day)" else " · Aktif timeframe bazlı"
                     with col_baz:
@@ -2891,6 +3115,34 @@ with tab_single:
                         f"{'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'} | "
                         f"Kapasite: {plan.capacity_level}"
                     )
+
+                    # NEW (V6.3): MTF Özet — haftalık setup + günlük timing tek ekranda
+                    if show_mtf:
+                        st.subheader("🧭 MTF Özet (Haftalık + Günlük)")
+                        if mtf.get("error"):
+                            st.caption(f"ℹ️ MTF hesaplanamadı: {mtf['error']}")
+                        elif mtf:
+                            cM1, cM2, cM3, cM4 = st.columns(4)
+                            cM1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
+                            cM2.metric("Haftalık Durum", mtf["w_status"])
+                            cM3.metric("Günlük Timing", f"{mtf['d_timing']} / 100")
+                            cM4.metric("Günlük Durum", mtf["d_status"])
+                            if mtf["verdict_kind"] == "success":
+                                st.success(mtf["verdict"])
+                            elif mtf["verdict_kind"] == "warning":
+                                st.warning(mtf["verdict"])
+                            else:
+                                st.error(mtf["verdict"])
+                            st.info(
+                                f"🔔 **Bu haftanın alarm bandı (haftalık EMA20–EMA50):** "
+                                f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}  |  "
+                                f"**Günlük teyit bandı:** {mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"
+                            )
+                            st.caption(
+                                "İş akışı: haftalık alarm bandına fiyat alarmı kur → alarm çalınca "
+                                "günlük durum 🟢 ise teyitli giriş ara. Haftalık bant her hafta kayar — "
+                                "alarmları hafta kapanışında yenile."
+                            )
 
                     st.subheader("🏁 Liderlik (Hacim + RS)")
                     cL1, cL2, cL3, cL4 = st.columns(4)
@@ -3151,6 +3403,11 @@ with tab_portfolio:
                     except Exception:
                         pass
 
+                    # NEW (V6.3): Piyasa sağlığı — SPY zaten elimizde, ekstra çağrı yok
+                    mh_pf = market_health_pack(spy_df_shared) if not spy_df_shared.empty else {}
+                    if mh_pf:
+                        st.session_state["__mh"] = mh_pf
+
                     for _, r in dfp.iterrows():
                         tkr = str(r.get("ticker", "")).upper().strip()
                         if not tkr:
@@ -3212,6 +3469,15 @@ with tab_portfolio:
 
                             action, comment = held_action_comment(plan, price, avg_cost, user_stop, user_tp1, user_tp2)
 
+                            # NEW (V6.3): Bilanço kontrolü (+1 API çağrısı/ticker, 1 saat cache'li)
+                            earn_str = ""
+                            if check_earnings:
+                                _earn = next_earnings_info(tkr)
+                                if _earn.get("days") is not None and _earn["days"] <= EARNINGS_WARN_DAYS:
+                                    earn_str = f"⚠️ {_earn['date']} ({_earn['days']}g)"
+                                elif _earn.get("date"):
+                                    earn_str = str(_earn["date"])
+
                             pos_value = (qty * price) if np.isfinite(qty) and np.isfinite(price) else np.nan
 
                             risk_per_share = (avg_cost - user_stop) if (np.isfinite(user_stop) and np.isfinite(avg_cost)) else np.nan
@@ -3244,6 +3510,7 @@ with tab_portfolio:
                                 "Hacim Kuruması": "✅" if lead.get("dryup_ok") else "",
                                 "Kuruma Oranı": round(float(lead.get("dryup_ratio", np.nan)), 2) if np.isfinite(lead.get("dryup_ratio", np.nan)) else "",
                                 "Liderlik": str(lead.get("leader_label", "—")),
+                                "Bilanço": earn_str,
                                 "Auto Stop": round(plan.stop, 2),
                                 "Auto TP1": round(plan.tp1, 2),
                                 "Auto TP2": round(plan.tp2, 2),
@@ -3277,6 +3544,16 @@ with tab_portfolio:
 
                 out = pd.DataFrame(rows)
 
+                # NEW (V6.3): Piyasa rejimi — sonuçların en üstünde
+                if mh_pf:
+                    st.markdown("### 📡 Piyasa Rejimi")
+                    render_market_health(mh_pf)
+                    if mh_pf.get("swing_ok") is False:
+                        st.error(
+                            "🔴 Piyasa rejimi zayıf — bu ortamda yeni swing alımı önerilmez; "
+                            "mevcut pozisyonlarda stop disiplini öncelik."
+                        )
+
                 st.markdown("### Sonuç Tablosu")
                 st.dataframe(out, use_container_width=True, hide_index=True)
 
@@ -3296,7 +3573,7 @@ with tab_portfolio:
                 )
 
                 st.markdown("### ⬇️ İndir")
-                title = "MinerWin – Portföy Analizi V6.2.1"
+                title = "MinerWin – Portföy Analizi V6.3"
                 pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64)
                 xls_bytes = build_portfolio_excel_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars)
 
@@ -3338,3 +3615,12 @@ with tab_portfolio:
                     vol_warn_tickers = out[out["Yüksek Vol Uyarı"] == "⚠️"]["Ticker"].tolist()
                     if vol_warn_tickers:
                         st.warning(f"⚠️ Yüksek volatilite uyarısı: **{', '.join(vol_warn_tickers)}** — stop cap devrede, pozisyon boylarını kontrol et.")
+
+                # NEW (V6.3): Yaklaşan bilanço toplu uyarısı
+                if check_earnings and not out.empty and "Bilanço" in out.columns:
+                    earn_warn_tickers = out[out["Bilanço"].astype(str).str.startswith("⚠️")]["Ticker"].tolist()
+                    if earn_warn_tickers:
+                        st.error(
+                            f"📅 Yaklaşan bilanço ({EARNINGS_WARN_DAYS} gün içinde): "
+                            f"**{', '.join(earn_warn_tickers)}** — gece gap riski, stop koruma sağlamaz!"
+                        )
