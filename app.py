@@ -1,5 +1,12 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.3.1) — Twelve Data
+# MinerWin — Tek Hisse + Portföy Analiz (V6.3.2) — Twelve Data + Finnhub
+#
+# V6.3.2 Değişiklikleri (V6.3.1 üzerine):
+#  + Finnhub yedek kaynağı: Bilanço tarihleri için Twelve Data /earnings
+#    başarısız olursa (403 = planda yok) otomatik Finnhub'a düşülür.
+#    Secrets'a FINNHUB_API_KEY eklenmesi yeterli — yoksa eski davranış korunur.
+#  + Sanitizer artık Finnhub'ın token= parametresini de maskeler.
+#  + UI'da bilanço kaynağı gösterilir (TwelveData / Finnhub).
 #
 # V6.3.1 Değişiklikleri (V6.3 üzerine — GÜVENLİK düzeltmesi):
 #  !! Hata mesajlarında API anahtarı sızıntısı kapatıldı. requests'in HTTPError
@@ -50,7 +57,7 @@ import requests
 import streamlit as st
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Tuple
 
@@ -155,18 +162,27 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3.1</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3.2</div>
 """,
     unsafe_allow_html=True,
 )
 st.divider()
 
 API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
+# FIX (V6.3.1): Secrets'a yapıştırırken kalan boşluk/tırnak 401'e yol açabiliyor
+if isinstance(API_KEY, str):
+    API_KEY = API_KEY.strip().strip('"').strip("'")
 if not API_KEY:
     st.error('TWELVEDATA_API_KEY bulunamadı. Streamlit Cloud → Settings → Secrets içine ekle: TWELVEDATA_API_KEY="..."')
     st.stop()
 
 BASE_URL = "https://api.twelvedata.com"
+
+# NEW (V6.3.2): Finnhub — bilanço tarihleri için opsiyonel yedek kaynak.
+# Tanımlı değilse uygulama aynen çalışır, sadece TD 403 verirse bilanço özelliği susar.
+FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
+if isinstance(FINNHUB_API_KEY, str):
+    FINNHUB_API_KEY = FINNHUB_API_KEY.strip().strip('"').strip("'")
 HISTORY_FILE = "history.csv"
 PORTFOLIO_FILE = "portfolio.csv"
 
@@ -294,11 +310,12 @@ def rsi_slope(rsi_series: pd.Series, lookback: int = RSI_MOMENTUM_LOOKBACK) -> f
 # FIX (V6.3.1): Hata mesajlarından API anahtarını maskeler.
 # requests'in HTTPError string'i tam URL'yi (apikey dahil) içerir —
 # bu mesaj UI'da gösterildiğinde anahtar sızıyordu.
-_APIKEY_RE = _re.compile(r"apikey=[A-Za-z0-9]+")
+# NEW (V6.3.2): Finnhub'ın token= parametresi de maskelenir.
+_APIKEY_RE = _re.compile(r"(apikey|token)=[A-Za-z0-9]+")
 
 
 def _sanitize_err(msg) -> str:
-    return _APIKEY_RE.sub("apikey=***", str(msg))
+    return _APIKEY_RE.sub(r"\1=***", str(msg))
 
 
 def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2) -> dict:
@@ -318,6 +335,12 @@ def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2
                 time.sleep(15)
                 continue
             raise RuntimeError(f"TwelveData rate limit: {last_msg}. Biraz bekleyip tekrar dene.")
+        if r.status_code == 401:
+            raise RuntimeError(
+                "TwelveData: 401 Unauthorized — API anahtarı geçersiz veya iptal edilmiş. "
+                "Streamlit Cloud → Settings → Secrets içindeki TWELVEDATA_API_KEY değerini "
+                "yeni anahtarla güncelle ve uygulamayı yeniden başlat (Reboot)."
+            )
         if r.status_code == 403:
             raise RuntimeError(
                 f"TwelveData /{endpoint}: 403 Forbidden — bu endpoint mevcut API planında desteklenmiyor."
@@ -455,42 +478,96 @@ def td_earnings(symbol: str) -> dict:
     )
 
 
+@st.cache_data(ttl=3600)
+def finnhub_earnings(symbol: str) -> dict:
+    """NEW (V6.3.2): Finnhub earnings calendar — Twelve Data /earnings planda
+    yoksa yedek kaynak. Bugünden +120 güne kadarki bilanço tarihlerini çeker."""
+    if not FINNHUB_API_KEY:
+        raise RuntimeError("FINNHUB_API_KEY tanımlı değil (Streamlit Secrets).")
+    today = datetime.now(TR_TZ).date()
+    r = requests.get(
+        "https://finnhub.io/api/v1/calendar/earnings",
+        params={
+            "from": today.isoformat(),
+            "to": (today + timedelta(days=120)).isoformat(),
+            "symbol": symbol,
+            "token": FINNHUB_API_KEY,
+        },
+        timeout=20,
+    )
+    if r.status_code == 401:
+        raise RuntimeError("Finnhub: 401 — API anahtarı geçersiz (Secrets'taki FINNHUB_API_KEY'i kontrol et).")
+    if r.status_code == 429:
+        raise RuntimeError("Finnhub: 429 — dakikalık limit doldu, biraz sonra tekrar dene.")
+    try:
+        r.raise_for_status()
+    except requests.exceptions.HTTPError as he:
+        raise RuntimeError(_sanitize_err(he)) from None
+    return r.json()
+
+
+def _parse_dates(items, key: str = "date") -> list:
+    """Sözlük listesinden geçerli YYYY-MM-DD tarihlerini ayrıştırır."""
+    dates = []
+    for e in items:
+        if not isinstance(e, dict):
+            continue
+        try:
+            dates.append(datetime.strptime(str(e.get(key, "")), "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    return dates
+
+
 def next_earnings_info(symbol: str) -> Dict[str, Any]:
     """En yakın gelecek bilanço tarihini ve kaç gün kaldığını döndürür.
-    FIX (V6.3.1): 403 (plan desteklemiyor) alındıysa oturum boyunca tekrar
-    denenmez — portföyde ticker başına boşa kredi harcanmaz."""
-    out = {"date": None, "days": None, "error": ""}
-    if st.session_state.get("__earnings_unsupported"):
-        out["error"] = "Earnings endpoint mevcut API planında desteklenmiyor (bu oturumda tekrar denenmeyecek)."
-        return out
-    try:
-        data = td_earnings(symbol)
-        if isinstance(data, dict) and data.get("status") == "error":
-            out["error"] = _sanitize_err(data.get("message", "earnings hatası"))
-            return out
-        vals = []
-        if isinstance(data, dict):
-            vals = data.get("earnings") or data.get("values") or []
-        today = datetime.now(TR_TZ).date()
-        future_dates = []
-        for e in vals:
-            if not isinstance(e, dict):
-                continue
-            dstr = str(e.get("date", ""))
-            try:
-                d = datetime.strptime(dstr, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-            if d >= today:
-                future_dates.append(d)
-        if future_dates:
-            nd = min(future_dates)
+    FIX (V6.3.1): TD 403 (plan desteklemiyor) alındıysa oturum boyunca tekrar
+    denenmez — portföyde ticker başına boşa kredi harcanmaz.
+    NEW (V6.3.2): TD başarısız olursa Finnhub'a düşülür (anahtar tanımlıysa)."""
+    out = {"date": None, "days": None, "error": "", "source": ""}
+    today = datetime.now(TR_TZ).date()
+
+    def _pick(dates) -> bool:
+        future = [d for d in dates if d >= today]
+        if future:
+            nd = min(future)
             out["date"] = nd.isoformat()
             out["days"] = int((nd - today).days)
-    except Exception as ex:
-        out["error"] = _sanitize_err(ex)
-        if "403" in out["error"] or "desteklenmiyor" in out["error"]:
-            st.session_state["__earnings_unsupported"] = True
+            return True
+        return False
+
+    # --- 1) Twelve Data (plan destekliyorsa) ---
+    if not st.session_state.get("__earnings_unsupported"):
+        try:
+            data = td_earnings(symbol)
+            if isinstance(data, dict) and data.get("status") == "error":
+                raise RuntimeError(_sanitize_err(data.get("message", "earnings hatası")))
+            vals = (data.get("earnings") or data.get("values") or []) if isinstance(data, dict) else []
+            _pick(_parse_dates(vals))
+            out["source"] = "TwelveData"
+            return out
+        except Exception as ex:
+            out["error"] = _sanitize_err(ex)
+            if "403" in out["error"] or "desteklenmiyor" in out["error"]:
+                st.session_state["__earnings_unsupported"] = True
+            # Finnhub başarılı olursa bu hata aşağıda temizlenir
+
+    # --- 2) Finnhub fallback ---
+    if FINNHUB_API_KEY:
+        try:
+            data = finnhub_earnings(symbol)
+            cal = data.get("earningsCalendar", []) if isinstance(data, dict) else []
+            _pick(_parse_dates(cal))
+            out["source"] = "Finnhub"
+            out["error"] = ""
+            return out
+        except Exception as ex:
+            fh_err = _sanitize_err(ex)
+            out["error"] = (out["error"] + " | " if out["error"] else "") + fh_err
+            return out
+
+    if not out["error"]:
+        out["error"] = "Earnings kaynağı yok (Twelve Data planı desteklemiyor, FINNHUB_API_KEY tanımlı değil)."
     return out
 
 
@@ -2862,7 +2939,7 @@ with st.sidebar:
     show_mtf = st.checkbox("MTF özet (Haftalık + Günlük)", value=True)
     st.caption("Tek hisse analizinde haftalık setup + günlük timing özeti. +1-2 API çağrısı (cache'li).")
     check_earnings = st.checkbox("Bilanço (earnings) kontrolü", value=True)
-    st.caption("Yaklaşan bilanço uyarısı. +1 API çağrısı/ticker (1 saat cache'li). Free planda desteklenmeyebilir.")
+    st.caption("Yaklaşan bilanço uyarısı. Önce Twelve Data, olmazsa Finnhub denenir (1 saat cache'li).")
 
     st.divider()
     st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
@@ -3111,7 +3188,7 @@ with tab_single:
                             f"veya bilanço sonrasını bekle."
                         )
                     elif earn.get("date"):
-                        st.caption(f"📅 Sonraki bilanço: {earn['date']} ({earn['days']} gün sonra)")
+                        st.caption(f"📅 Sonraki bilanço: {earn['date']} ({earn['days']} gün sonra) — kaynak: {earn.get('source', '?')}")
                     elif check_earnings and earn.get("error"):
                         st.caption(f"ℹ️ Bilanço verisi alınamadı (mevcut API planında olmayabilir): {earn['error']}")
 
