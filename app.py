@@ -1,24 +1,29 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.2) — Twelve Data
+# MinerWin — Tek Hisse + Portföy Analiz (V6.2.1) — Twelve Data
 #
-# V6.2 Değişiklikleri (V6.1 üzerine):
-# 1. Weekly trend uyarısı eklendi (veto yok, sadece UI uyarısı)
-# 2. RSI slope eşiği 0.5 → 0.3 (daha erken sinyal)
-# 3. TP2 52W cap eşiği 0.995 → 0.99 (zirveye biraz daha yakın TP2)
-# 4. TP2 zemin (3.5R) garantisi eklendi — cap sonrası da geçerli
-# 5. TP2 hesap sırası netleştirildi (5 adım, yorum satırları ile)
-# 6. PDF yeniden yazıldı: DejaVu font, KPI kartları, renkli tablolar
-# 7. Excel yeniden yazıldı: zebra satır, koşullu biçimlendirme, TableStyle
-# 8. HRFlowable üst import'a taşındı (NameError riski giderildi)
-# 9. PDF hücrelerinde html.escape eklendi (&, <, > güvenliği)
-# 10. UI versiyon metinleri V6.1 → V6.2 güncellendi
-# 11. Intraday timeframe'de baz/kırılım uyarısı eklendi
+# V6.2.1 Değişiklikleri (V6.2 üzerine — kod incelemesi düzeltmeleri):
+#  1. FIX: max_loss_stop artık sadece gerçek zarar üreten bacakları topluyor
+#     (break-even üstü stoplar "maks zarar"ı yanlış şişiriyordu)
+#  2. FIX: RSI — hiç düşüş olmayan pencerede NaN yerine 100 üretir
+#  3. FIX: history.csv — mevcut dosyanın header'ına hizalanarak yazılır (şema kayması önlendi)
+#  4. FIX: Dar baz tespiti sabit referans pencere (120 bar) kullanır — bar slider'ından bağımsız
+#  5. FIX: Kırılım hacim teyidi shift(1) ile — bugünün hacmi kendi ortalamasını şişirmez
+#  6. FIX: Twelve Data rate limit (429) yakalanır, bekleyip 2 kez yeniden dener
+#  7. FIX: TP2 zemin garantisi cap'i deldiğinde işaretlenir ve UI'da uyarı gösterilir
+#  8. FIX: check_weekly_trend / quote hataları sessizce yutulmaz, UI'da caption gösterilir
+#  9. FIX: datetime.utcnow() (deprecated) → datetime.now(timezone.utc);
+#     rapor tarihleri Europe/Istanbul saat dilimiyle yazılır
+# 10. FIX: st.data_editor ayrı widget key ("pf_editor") ile kullanılır (rerun kayıp riskine karşı)
+# 11. FIX: import re dosya ortasından üste taşındı; ws_sum[f"A13"] → ws_sum["A13"]
+# 12. Portföy dosyası bölümüne ortak/geçici disk uyarısı eklendi (Streamlit Cloud)
 
 import io
 import os
 import csv
 import html
+import time
 import base64
+import re as _re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -26,7 +31,8 @@ import requests
 import streamlit as st
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, Tuple
 
 # PDF (ReportLab)
@@ -58,6 +64,9 @@ BLUE_SKY_THRESHOLD = 0.98
 EXTENDED_EMA50_PCT = 8.0
 PIVOT_LOOKBACK = 20
 RSI_MOMENTUM_LOOKBACK = 5
+
+# FIX (V6.2.1): Rapor tarihleri için Türkiye saat dilimi
+TR_TZ = ZoneInfo("Europe/Istanbul")
 
 TP_CAP_MOMENTUM = {
     "HIGH": (0.50, 0.85),
@@ -124,7 +133,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V6.2</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V6.2.1</div>
 """,
     unsafe_allow_html=True,
 )
@@ -220,6 +229,10 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / (avg_loss.replace(0, np.nan))
     out = 100 - (100 / (1 + rs))
+    # FIX (V6.2.1): Hiç düşüş olmayan pencerede avg_loss=0 → RSI NaN kalıyordu
+    # ve bfill() sondaki NaN'ları dolduramıyordu. Doğru değerler atanır:
+    out = out.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    out = out.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
     return out.bfill()
 
 
@@ -256,10 +269,37 @@ def rsi_slope(rsi_series: pd.Series, lookback: int = RSI_MOMENTUM_LOOKBACK) -> f
 # =========================================================
 # VERİ (Twelve Data)
 # =========================================================
+def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2) -> dict:
+    """
+    FIX (V6.2.1): Twelve Data GET — rate limit (429) durumunda bekleyip yeniden dener.
+    Free planda dakikada 8 kredi vardır; portföy analizi limiti kolayca aşabilir.
+    429 hem HTTP status hem JSON body içindeki "code" alanı olarak gelebilir.
+    """
+    last_msg = "rate limit"
+    for attempt in range(max_retries + 1):
+        r = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=timeout)
+        if r.status_code == 429:
+            last_msg = "HTTP 429 — dakikalık kredi doldu"
+            if attempt < max_retries:
+                time.sleep(15)
+                continue
+            raise RuntimeError(f"TwelveData rate limit: {last_msg}. Biraz bekleyip tekrar dene.")
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and str(data.get("code")) == "429":
+            last_msg = str(data.get("message", "rate limit"))
+            if attempt < max_retries:
+                time.sleep(15)
+                continue
+            raise RuntimeError(f"TwelveData rate limit: {last_msg}")
+        return data
+    raise RuntimeError(f"TwelveData rate limit: {last_msg}")
+
+
 @st.cache_data(ttl=120)
 def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
-    r = requests.get(
-        f"{BASE_URL}/time_series",
+    return _td_get(
+        "time_series",
         params={
             "symbol": symbol,
             "interval": interval,
@@ -269,19 +309,15 @@ def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
         },
         timeout=25,
     )
-    r.raise_for_status()
-    return r.json()
 
 
 @st.cache_data(ttl=120)
 def td_quote(symbol: str) -> dict:
-    r = requests.get(
-        f"{BASE_URL}/quote",
+    return _td_get(
+        "quote",
         params={"symbol": symbol, "apikey": API_KEY, "format": "JSON"},
         timeout=20,
     )
-    r.raise_for_status()
-    return r.json()
 
 
 def parse_ohlcv(payload: dict) -> pd.DataFrame:
@@ -357,8 +393,9 @@ def check_weekly_trend(symbol: str) -> Dict[str, Any]:
         result["weekly_ma10_slope"] = float(ma10_slope) if np.isfinite(ma10_slope) else float("nan")
         if not trend_ok:
             result["warning"] = "⚠️ Weekly trend zayıf — büyük trend teyitsiz"
-    except Exception:
-        pass
+    except Exception as e:
+        # FIX (V6.2.1): Hata sessizce yutulmuyor — UI'da gösterilmek üzere kaydedilir
+        result["error"] = str(e)
     return result
 
 
@@ -385,12 +422,30 @@ def get_daily_52w_levels(symbol: str, interval: str, current_df: pd.DataFrame) -
 # GEÇMİŞ (CSV) + OTURUM HAFIZASI
 # =========================================================
 def save_to_history(row: dict):
+    """
+    FIX (V6.2.1): Mevcut history.csv'nin header'ına hizalanarak yazar.
+    Eski sürümden kalan dosyaya yeni alanlı satır eklenince oluşan
+    ValueError / kolon kayması sorunu giderildi.
+    """
     file_exists = os.path.isfile(HISTORY_FILE)
-    with open(HISTORY_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if not file_exists:
+    if file_exists:
+        try:
+            with open(HISTORY_FILE, newline="", encoding="utf-8") as f:
+                existing_fields = next(csv.reader(f))
+        except (StopIteration, OSError):
+            existing_fields = list(row.keys())
+        if not existing_fields:
+            existing_fields = list(row.keys())
+        # Eksik alanlar boş bırakılır, dosyada olmayan yeni alanlar atlanır
+        aligned = {k: row.get(k, "") for k in existing_fields}
+        with open(HISTORY_FILE, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=existing_fields, extrasaction="ignore")
+            writer.writerow(aligned)
+    else:
+        with open(HISTORY_FILE, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
             writer.writeheader()
-        writer.writerow(row)
+            writer.writerow(row)
 
 
 def read_history_df() -> pd.DataFrame:
@@ -477,6 +532,11 @@ PIVOT_BREAK_LOOKBACK = 20
 ATR_CONTRACT_RATIO = 0.80
 VOL_DRY_RATIO = 0.75
 
+# FIX (V6.2.1): Dar baz tespitinde referans pencere sabitlendi.
+# Eskiden çekilen tüm pencere (bar slider'ı 120–800) referans alınıyordu;
+# aynı hissede slider değişince baz tespiti de değişiyordu.
+BASE_REF_WINDOW = 120
+
 BASE_BONUS_PTS = 7
 BREAKOUT_BONUS_PTS = 8
 
@@ -494,7 +554,9 @@ def detect_base_and_breakout(df: pd.DataFrame) -> Dict[str, Any]:
     if df is None or len(df) < BAZ_LOOKBACK + 10:
         return result
 
-    atr_full = float(df["atr14"].dropna().mean())
+    # FIX (V6.2.1): Referans olarak son BASE_REF_WINDOW bar kullanılır (sabit pencere)
+    ref = df.tail(BASE_REF_WINDOW)
+    atr_full = float(ref["atr14"].dropna().mean())
     atr_base = float(df["atr14"].iloc[-BAZ_LOOKBACK:].mean())
     atr_contracted = (
         np.isfinite(atr_full) and np.isfinite(atr_base)
@@ -503,7 +565,9 @@ def detect_base_and_breakout(df: pd.DataFrame) -> Dict[str, Any]:
     )
 
     vol = df["volume"].astype(float).fillna(0.0)
-    vol_full_mean = float(vol.mean())
+    # FIX (V6.2.1): Hacim referansı da sabit pencereden
+    vol_ref = vol.tail(BASE_REF_WINDOW)
+    vol_full_mean = float(vol_ref.mean())
     vol_base_mean = float(vol.iloc[-BAZ_LOOKBACK:].mean())
     vol_dried = (
         np.isfinite(vol_full_mean) and np.isfinite(vol_base_mean)
@@ -517,7 +581,9 @@ def detect_base_and_breakout(df: pd.DataFrame) -> Dict[str, Any]:
         pivot_high = float(df["high"].iloc[-(PIVOT_BREAK_LOOKBACK + 1):-1].max())
         last_close = float(df["close"].iloc[-1])
         last_vol = float(df["volume"].iloc[-1])
-        vol_50mean = float(vol.rolling(50).mean().iloc[-1])
+        # FIX (V6.2.1): shift(1) — bugünün dev hacmi kendi ortalamasını şişirip
+        # kırılım eşiğini yükseltmesin diye ortalama bir önceki bara kadar alınır
+        vol_50mean = float(vol.rolling(50).mean().shift(1).iloc[-1])
 
         price_broke = np.isfinite(pivot_high) and np.isfinite(last_close) and last_close > pivot_high
         vol_confirmed = (
@@ -760,7 +826,12 @@ def compute_tp1_tp2_minervini(
     if tp2 <= tp1:
         tp2 = tp1 * 1.06
 
+    # FIX (V6.2.1): 3.5R zemin garantisi cap'leri (momentum/52W) delebiliyor.
+    # Bu bilinçli bir tasarım tercihi ama artık işaretleniyor — UI'da uyarı gösterilir
+    # ki kullanıcı TP2'nin tarihsel cap'in üzerine zorlandığını bilsin.
+    tp2_before_floor = tp2
     tp2 = max(tp2, tp2_floor)
+    tp2_floor_override = bool(tp2 > tp2_before_floor + 1e-9)
 
     dbg = {
         "capacity": capacity,
@@ -776,6 +847,7 @@ def compute_tp1_tp2_minervini(
         "high_52w": high_52w,
         "dist_to_52w_high_pct": dist_to_52w_high_pct,
         "breakout_detected": breakout_detected,
+        "tp2_floor_override": tp2_floor_override,
     }
     return float(tp1), float(tp2), float(expected_move_pct), capacity, dbg
 
@@ -1126,6 +1198,9 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         f"(ATR/impuls/52W tavanı ile sınırlandı). "
         f"TP tavan: TP1≤%{targets_dbg.get('tp1_cap_pct', 0):.0f} / TP2≤%{targets_dbg.get('tp2_cap_pct', 0):.0f}"
     )
+    # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse bunu açıkça belirt
+    if targets_dbg.get("tp2_floor_override"):
+        targets_reason += " · ⚠️ TP2, 3.5R zemin garantisiyle tavanın üzerine yükseltildi — hedefi temkinli değerlendir."
 
     stop_reason = (
         f"Stop (aktif): noise(ATR) + yapısal(invalidation:{stop_dbg.get('inv_src')}) + dinamik_cap(%{stop_dbg.get('max_risk_pct'):.0f}) "
@@ -1280,7 +1355,7 @@ _C_WHITE     = colors.white
 _C_ZEBRA     = colors.HexColor("#F1F5F9")
 
 
-import re as _re
+# FIX (V6.2.1): "import re as _re" dosya ortasından üstteki import bloğuna taşındı.
 
 # Emoji'leri silerken Türkçe karakterleri koruyan yardımcı
 _EMOJI_RE = _re.compile(
@@ -1665,9 +1740,10 @@ def build_pdf_bytes_single(
 
     story = []
 
+    # FIX (V6.2.1): datetime.utcnow() deprecated → datetime.now(timezone.utc)
     subtitle = (f"Ticker: {ticker}  |  Zaman: {interval_label}  |  "
                 f"Bar: {bars}  |  "
-                f"Tarih: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+                f"Tarih: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     story += _pdf_header_story(logo_b64_str, "MinerWin — Teknik Analiz Raporu", subtitle, sty, page_w)
 
     story.append(_status_badge(plan.status_tag, sty, page_w))
@@ -1709,6 +1785,22 @@ def build_pdf_bytes_single(
             ("BOTTOMPADDING", (0,0), (-1,-1), 5),
         ]))
         story.append(warn_tbl)
+        story.append(Spacer(1, 6))
+
+    # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse PDF'te de uyarı göster
+    if plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
+        tp2_warn_tbl = Table(
+            [[Paragraph("NOT: TP2, 3.5R zemin garantisiyle tarihsel tavanın üzerine yükseltildi — hedefi temkinli değerlendir.", sty["warn"])]],
+            colWidths=[page_w],
+        )
+        tp2_warn_tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), _C_AMBER_BG),
+            ("BOX",           (0,0), (-1,-1), 0.5, _C_AMBER),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ]))
+        story.append(tp2_warn_tbl)
         story.append(Spacer(1, 6))
 
     story += _section_header("İşlem Planı", sty, page_w)
@@ -1914,6 +2006,8 @@ def analyze_volume_profile(daily_df: pd.DataFrame) -> Dict[str, Any]:
         return out
 
     vol_ma50 = float(v.rolling(50).mean().iloc[-1])
+    # FIX (V6.2.1): Kırılım hacim teyidi için bugünü içermeyen ortalama kullanılır
+    vol_ma50_prev = float(v.rolling(50).mean().shift(1).iloc[-1])
     vol_last10 = float(v.tail(10).mean())
     volume_today = float(v.iloc[-1])
 
@@ -1941,8 +2035,9 @@ def analyze_volume_profile(daily_df: pd.DataFrame) -> Dict[str, Any]:
     if len(d) >= 25:
         pivot = float(d["high"].astype(float).rolling(20).max().shift(1).iloc[-1])
         out["pivot_level"] = pivot
-        if np.isfinite(pivot) and close_ > pivot and np.isfinite(vol_ma50) and vol_ma50 > 0:
-            out["breakout_ok"] = bool(volume_today >= BREAKOUT_VOL_MULTIPLIER * vol_ma50)
+        # FIX (V6.2.1): vol_ma50 yerine vol_ma50_prev (bugünün hacmi eşiği şişirmesin)
+        if np.isfinite(pivot) and close_ > pivot and np.isfinite(vol_ma50_prev) and vol_ma50_prev > 0:
+            out["breakout_ok"] = bool(volume_today >= BREAKOUT_VOL_MULTIPLIER * vol_ma50_prev)
 
     return out
 
@@ -2184,8 +2279,13 @@ def compute_portfolio_kpis(out: pd.DataFrame) -> Dict[str, float]:
 
         stv = valid_cost[np.isfinite(valid_cost["Stop_n"]) & (valid_cost["Stop_n"] > 0)].copy()
         if not stv.empty:
-            raw_stop_pnl = float((stv["Qty_n"] * (stv["Stop_n"] - stv["Avg_n"])).sum())
-            k["max_loss_stop"] = abs(raw_stop_pnl)
+            # FIX (V6.2.1): Sadece gerçekten zarar üreten bacaklar toplanır.
+            # Eskiden abs(toplam) alınıyordu: stop'u maliyet üstüne çekilmiş
+            # pozisyonlarda (break-even+ stop) stop-avg_cost pozitif çıkıyor,
+            # bu da "maks zarar"ı yanlış şişiriyor/azaltıyordu.
+            stop_pnl = stv["Qty_n"] * (stv["Stop_n"] - stv["Avg_n"])
+            loss_legs = stop_pnl[stop_pnl < 0]
+            k["max_loss_stop"] = abs(float(loss_legs.sum())) if not loss_legs.empty else 0.0
 
     return k
 
@@ -2216,8 +2316,9 @@ def build_portfolio_pdf_bytes(
     )
     story = []
 
+    # FIX (V6.2.1): Rapor tarihi Türkiye saatiyle
     subtitle = (f"Zaman dilimi: {interval_label}  |  Bar: {bars}  |  "
-                f"Olusturma: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                f"Olusturma: {datetime.now(TR_TZ).strftime('%Y-%m-%d %H:%M')}")
     story += _pdf_header_story(logo_b64_str, title, subtitle, st_styles, page_w)
 
     pv   = kpis.get("portfolio_value", np.nan)
@@ -2340,7 +2441,8 @@ def build_portfolio_excel_bytes(
     ws_sum.merge_cells("A1:K1")
     ws_sum["A1"].alignment = ALN_L
 
-    ws_sum["A2"] = f"Zaman: {interval_label}  |  Bar: {bars}  |  Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    # FIX (V6.2.1): Rapor tarihi Türkiye saatiyle
+    ws_sum["A2"] = f"Zaman: {interval_label}  |  Bar: {bars}  |  Tarih: {datetime.now(TR_TZ).strftime('%Y-%m-%d %H:%M')}"
     ws_sum["A2"].font = FONT_SUB
     ws_sum.merge_cells("A2:K2")
 
@@ -2394,8 +2496,9 @@ def build_portfolio_excel_bytes(
                    ("I",22),("J",16),("K",16)]:
         ws_sum.column_dimensions[col].width = w
 
-    ws_sum[f"A13"] = "MinerWin V6.2 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
-    ws_sum[f"A13"].font = FONT_FOOT
+    # FIX (V6.2.1): gereksiz f-string kaldırıldı (ws_sum[f"A13"] → ws_sum["A13"])
+    ws_sum["A13"] = "MinerWin V6.2.1 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
+    ws_sum["A13"].font = FONT_FOOT
     ws_sum.merge_cells("A13:K13")
 
     if out is None or out.empty:
@@ -2668,8 +2771,10 @@ with tab_single:
                                         break
                                     except Exception:
                                         pass
-                        except Exception:
+                        except Exception as e:
+                            # FIX (V6.2.1): Quote hatası sessizce yutulmuyor
                             q = {}
+                            st.caption(f"ℹ️ Quote alınamadı, mum kapanışı kullanılıyor: {e}")
 
                     candle_close = float(df.iloc[-1]["close"])
                     last_price_line = (
@@ -2686,8 +2791,9 @@ with tab_single:
                     st.session_state["__interval_label"] = interval_label
                     st.session_state["__bars"] = bars
 
+                    # FIX (V6.2.1): timestamp Türkiye saatiyle
                     record = {
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                         "ticker": ticker,
                         "timeframe": interval,
                         "price": round(float(last_price_line), 4),
@@ -2738,8 +2844,19 @@ with tab_single:
                             f"ATR% yüksek — gerçek yapısal stop daha aşağıda. Pozisyon boyunu küçült."
                         )
 
+                    # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse UI'da uyarı
+                    if plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
+                        st.info(
+                            "ℹ️ **TP2 Notu:** TP2, 3.5R zemin garantisi nedeniyle tarihsel "
+                            "cap'in (momentum/52W tavanı) üzerine yükseltildi. Bu hedefi "
+                            "temkinli değerlendir — R/R oranı bu durumda kendi kendini doğrular."
+                        )
+
                     if weekly_info.get("warning"):
                         st.warning(weekly_info["warning"])
+                    # FIX (V6.2.1): Weekly kontrol hatası artık görünür
+                    if weekly_info.get("error"):
+                        st.caption(f"ℹ️ Weekly trend kontrolü yapılamadı: {weekly_info['error']}")
 
                     col_baz, col_kir = st.columns(2)
                     _intraday_note = "" if interval_label == "Günlük (1day)" else " · Aktif timeframe bazlı"
@@ -2747,7 +2864,7 @@ with tab_single:
                         st.metric(
                             "Dar Baz",
                             "✅ Tespit Edildi" if plan.base_detected else "— Yok",
-                            help=f"Son 20 barda ATR daralması + hacim kuruması birlikte varsa baz oluşmuştur.{_intraday_note}"
+                            help=f"Son 20 barda ATR daralması + hacim kuruması birlikte varsa baz oluşmuştur (referans: son {BASE_REF_WINDOW} bar).{_intraday_note}"
                         )
                     with col_kir:
                         st.metric(
@@ -2960,6 +3077,13 @@ with tab_portfolio:
                 disabled=(not bool(portfolio_csv_bytes())),
             )
 
+        # FIX (V6.2.1): Streamlit Cloud disk uyarısı — ortak ve geçici depolama
+        st.caption(
+            "⚠️ **Önemli:** portfolio.csv ve history.csv sunucu diskine yazılır. "
+            "Streamlit Cloud'da bu dosyalar **uygulamayı açan herkesle ortaktır** ve "
+            "her yeniden başlatma/deploy'da **silinir**. Verini düzenli olarak indir."
+        )
+
         st.markdown("### Hızlı İşlemler")
         if st.button("Portföyü Kaydet", type="primary", use_container_width=True):
             try:
@@ -2978,11 +3102,15 @@ with tab_portfolio:
 
     with top_left:
         st.markdown("### Portföy Girişi")
-        st.session_state.portfolio = st.data_editor(
+        # FIX (V6.2.1): data_editor ayrı widget key ile kullanılır ve sonucu
+        # state'e atanır — session_state key'i ile widget key'inin çakışmasından
+        # doğan "düzenleme kayboluyor" rerun sorunlarına karşı daha sağlam pattern.
+        edited_pf = st.data_editor(
             st.session_state.portfolio,
             num_rows="dynamic",
             use_container_width=True,
             hide_index=True,
+            key="pf_editor",
             column_config={
                 "ticker": st.column_config.TextColumn("Ticker", required=True),
                 "qty": st.column_config.NumberColumn("Adet", min_value=0.0, step=1.0),
@@ -2992,6 +3120,7 @@ with tab_portfolio:
                 "tp2": st.column_config.NumberColumn("TP2", min_value=0.0, step=0.01, format="%.2f"),
             },
         )
+        st.session_state.portfolio = edited_pf
 
         st.markdown("### Analiz")
         interval_label_pf = st.selectbox(
@@ -3015,7 +3144,7 @@ with tab_portfolio:
                 interval = INTERVAL_MAP[interval_label_pf]
                 rows = []
 
-                with st.spinner("Portföy verileri çekiliyor..."):
+                with st.spinner("Portföy verileri çekiliyor... (rate limit'e takılırsa otomatik bekler)"):
                     spy_df_shared = pd.DataFrame()
                     try:
                         spy_df_shared = _fetch_spy_daily(320)
@@ -3160,17 +3289,22 @@ with tab_portfolio:
                 c3.metric("Anlık P&L (%)", fmt_pct(kpis.get("pnl_pct", np.nan)))
                 c4.metric("TP1 Hepsi Olursa", fmt_money(kpis.get("max_profit_tp1", np.nan)))
                 c5.metric("Stop Hepsi Olursa", fmt_money(kpis.get("max_loss_stop", np.nan)))
+                # FIX (V6.2.1): max_loss_stop artık sadece zarar üreten bacakları içerir
+                st.caption(
+                    "ℹ️ 'Stop Hepsi Olursa' yalnızca maliyet altındaki stoplardan gelen "
+                    "gerçek zararı gösterir; break-even üstüne çekilmiş stoplar dahil edilmez."
+                )
 
                 st.markdown("### ⬇️ İndir")
-                title = "MinerWin – Portföy Analizi V6.2"
+                title = "MinerWin – Portföy Analizi V6.2.1"
                 pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64)
                 xls_bytes = build_portfolio_excel_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars)
 
                 d1, d2 = st.columns(2)
                 with d1:
-                    st.download_button("📄 Portföy Raporu (PDF) indir", data=pdf_bytes, file_name=f"MinerWin_Portfoy_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", mime="application/pdf", use_container_width=True)
+                    st.download_button("📄 Portföy Raporu (PDF) indir", data=pdf_bytes, file_name=f"MinerWin_Portfoy_{datetime.now(TR_TZ).strftime('%Y%m%d_%H%M')}.pdf", mime="application/pdf", use_container_width=True)
                 with d2:
-                    st.download_button("📊 Portföy Raporu (Excel) indir", data=xls_bytes, file_name=f"MinerWin_Portfoy_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                    st.download_button("📊 Portföy Raporu (Excel) indir", data=xls_bytes, file_name=f"MinerWin_Portfoy_{datetime.now(TR_TZ).strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
                 st.markdown("### 🔵 Blue Sky Evresi")
                 if not out.empty and "Blue Sky" in out.columns:
