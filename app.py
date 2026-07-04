@@ -1,5 +1,12 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.3) — Twelve Data
+# MinerWin — Tek Hisse + Portföy Analiz (V6.3.1) — Twelve Data
+#
+# V6.3.1 Değişiklikleri (V6.3 üzerine — GÜVENLİK düzeltmesi):
+#  !! Hata mesajlarında API anahtarı sızıntısı kapatıldı. requests'in HTTPError
+#     mesajı tam URL'yi (apikey dahil) içeriyordu ve UI'da gösteriliyordu.
+#     Artık tüm hata mesajlarından apikey maskeleniyor (_sanitize_err).
+#  !! 403 (plan desteklemiyor) hatası kullanıcı dostu mesaja çevrildi.
+#  !! Earnings 403 alınca oturum boyunca tekrar denenmez (kredi israfı önlenir).
 #
 # V6.3 Değişiklikleri (V6.2.1 üzerine — yeni özellikler):
 #  A. Piyasa Sağlığı Paneli: SPY bazlı rejim göstergesi (🟢 RİSK AÇIK / 🟡 TEMKİNLİ /
@@ -148,7 +155,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3.1</div>
 """,
     unsafe_allow_html=True,
 )
@@ -284,11 +291,23 @@ def rsi_slope(rsi_series: pd.Series, lookback: int = RSI_MOMENTUM_LOOKBACK) -> f
 # =========================================================
 # VERİ (Twelve Data)
 # =========================================================
+# FIX (V6.3.1): Hata mesajlarından API anahtarını maskeler.
+# requests'in HTTPError string'i tam URL'yi (apikey dahil) içerir —
+# bu mesaj UI'da gösterildiğinde anahtar sızıyordu.
+_APIKEY_RE = _re.compile(r"apikey=[A-Za-z0-9]+")
+
+
+def _sanitize_err(msg) -> str:
+    return _APIKEY_RE.sub("apikey=***", str(msg))
+
+
 def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2) -> dict:
     """
     FIX (V6.2.1): Twelve Data GET — rate limit (429) durumunda bekleyip yeniden dener.
     Free planda dakikada 8 kredi vardır; portföy analizi limiti kolayca aşabilir.
     429 hem HTTP status hem JSON body içindeki "code" alanı olarak gelebilir.
+    FIX (V6.3.1): HTTP hataları apikey maskelenerek fırlatılır; 403 için
+    kullanıcı dostu "plan desteklemiyor" mesajı verilir.
     """
     last_msg = "rate limit"
     for attempt in range(max_retries + 1):
@@ -299,16 +318,23 @@ def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2
                 time.sleep(15)
                 continue
             raise RuntimeError(f"TwelveData rate limit: {last_msg}. Biraz bekleyip tekrar dene.")
-        r.raise_for_status()
+        if r.status_code == 403:
+            raise RuntimeError(
+                f"TwelveData /{endpoint}: 403 Forbidden — bu endpoint mevcut API planında desteklenmiyor."
+            )
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as he:
+            raise RuntimeError(_sanitize_err(he)) from None
         data = r.json()
         if isinstance(data, dict) and str(data.get("code")) == "429":
             last_msg = str(data.get("message", "rate limit"))
             if attempt < max_retries:
                 time.sleep(15)
                 continue
-            raise RuntimeError(f"TwelveData rate limit: {last_msg}")
+            raise RuntimeError(f"TwelveData rate limit: {_sanitize_err(last_msg)}")
         return data
-    raise RuntimeError(f"TwelveData rate limit: {last_msg}")
+    raise RuntimeError(f"TwelveData rate limit: {_sanitize_err(last_msg)}")
 
 
 @st.cache_data(ttl=120)
@@ -410,7 +436,7 @@ def check_weekly_trend(symbol: str) -> Dict[str, Any]:
             result["warning"] = "⚠️ Weekly trend zayıf — büyük trend teyitsiz"
     except Exception as e:
         # FIX (V6.2.1): Hata sessizce yutulmuyor — UI'da gösterilmek üzere kaydedilir
-        result["error"] = str(e)
+        result["error"] = _sanitize_err(e)
     return result
 
 
@@ -430,12 +456,17 @@ def td_earnings(symbol: str) -> dict:
 
 
 def next_earnings_info(symbol: str) -> Dict[str, Any]:
-    """En yakın gelecek bilanço tarihini ve kaç gün kaldığını döndürür."""
+    """En yakın gelecek bilanço tarihini ve kaç gün kaldığını döndürür.
+    FIX (V6.3.1): 403 (plan desteklemiyor) alındıysa oturum boyunca tekrar
+    denenmez — portföyde ticker başına boşa kredi harcanmaz."""
     out = {"date": None, "days": None, "error": ""}
+    if st.session_state.get("__earnings_unsupported"):
+        out["error"] = "Earnings endpoint mevcut API planında desteklenmiyor (bu oturumda tekrar denenmeyecek)."
+        return out
     try:
         data = td_earnings(symbol)
         if isinstance(data, dict) and data.get("status") == "error":
-            out["error"] = str(data.get("message", "earnings hatası"))
+            out["error"] = _sanitize_err(data.get("message", "earnings hatası"))
             return out
         vals = []
         if isinstance(data, dict):
@@ -457,7 +488,9 @@ def next_earnings_info(symbol: str) -> Dict[str, Any]:
             out["date"] = nd.isoformat()
             out["days"] = int((nd - today).days)
     except Exception as ex:
-        out["error"] = str(ex)
+        out["error"] = _sanitize_err(ex)
+        if "403" in out["error"] or "desteklenmiyor" in out["error"]:
+            st.session_state["__earnings_unsupported"] = True
     return out
 
 
@@ -504,7 +537,7 @@ def market_health_pack(spy_df: pd.DataFrame) -> Dict[str, Any]:
             out["detail"] = "SPY karışık bölgede — pozisyon boyunu küçült, sadece en güçlü setuplara odaklan."
             out["swing_ok"] = None
     except Exception as ex:
-        out["error"] = str(ex)
+        out["error"] = _sanitize_err(ex)
     return out
 
 
@@ -567,7 +600,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
         })
     except Exception as ex:
-        out["error"] = str(ex)
+        out["error"] = _sanitize_err(ex)
     return out
 
 
@@ -2920,7 +2953,7 @@ with tab_single:
                         payload = td_time_series(ticker, interval, bars)
                         df = parse_ohlcv(payload)
                     except Exception as e:
-                        st.error(f"Veri alınamadı: {e}")
+                        st.error(f"Veri alınamadı: {_sanitize_err(e)}")
 
                 if not df.empty:
                     df["ema20"] = ema(df["close"], 20)
@@ -2933,7 +2966,7 @@ with tab_single:
                     try:
                         low_52w, high_52w, daily_df_for_52w = get_daily_52w_levels(ticker, interval, df)
                     except Exception as e:
-                        st.error(f"Daily veri / 52W hesap hatası: {e}")
+                        st.error(f"Daily veri / 52W hesap hatası: {_sanitize_err(e)}")
                         daily_df_for_52w = pd.DataFrame()
                         low_52w, high_52w = float("nan"), float("nan")
 
@@ -2980,7 +3013,7 @@ with tab_single:
                         except Exception as e:
                             # FIX (V6.2.1): Quote hatası sessizce yutulmuyor
                             q = {}
-                            st.caption(f"ℹ️ Quote alınamadı, mum kapanışı kullanılıyor: {e}")
+                            st.caption(f"ℹ️ Quote alınamadı, mum kapanışı kullanılıyor: {_sanitize_err(e)}")
 
                     candle_close = float(df.iloc[-1]["close"])
                     last_price_line = (
@@ -3538,7 +3571,7 @@ with tab_portfolio:
                                 "52W Zirve Uzaklık %": "",
                                 "Auto Stop": "", "Auto TP1": "", "Auto TP2": "",
                                 "Poz. Değeri": "", "Risk $": "",
-                                "Aksiyon": "HATA", "Not": f"Veri/analiz hatası: {e}",
+                                "Aksiyon": "HATA", "Not": f"Veri/analiz hatası: {_sanitize_err(e)}",
                                 "52W High": "", "Blue Sky": "", "İz Süren Yapı": "",
                             })
 
