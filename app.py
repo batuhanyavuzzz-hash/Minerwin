@@ -1,5 +1,12 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.3.2) — Twelve Data + Finnhub
+# MinerWin — Tek Hisse + Portföy Analiz (V6.3.3) — Twelve Data + Finnhub
+#
+# V6.3.3 Değişiklikleri (V6.3.2 üzerine):
+#  + PDF çıktıları V6.3 özellikleriyle senkronize edildi:
+#    - Tek hisse PDF: Piyasa rejimi + sonraki bilanço KPI satırı,
+#      yaklaşan bilanço uyarı kutusu (≤14 gün), MTF Özet tablosu
+#      (haftalık setup/günlük timing/karar/alarm bandı)
+#    - Portföy PDF: Piyasa rejimi KPI'ı + "Bilanço" kolonu
 #
 # V6.3.2 Değişiklikleri (V6.3.1 üzerine):
 #  + Finnhub yedek kaynağı: Bilanço tarihleri için Twelve Data /earnings
@@ -162,7 +169,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3.2</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3.3</div>
 """,
     unsafe_allow_html=True,
 )
@@ -2006,6 +2013,9 @@ def build_pdf_bytes_single(
     plan: TradePlan,
     quote: dict | None,
     logo_b64_str: str = "",
+    earn: dict | None = None,
+    mh: dict | None = None,
+    mtf: dict | None = None,
 ):
     fn, fn_bold = _setup_pdf_fonts()
     sty = _pdf_styles(fn, fn_bold)
@@ -2052,6 +2062,27 @@ def build_pdf_bytes_single(
         ("MİNERVİNİ #5",  min5_str),
     ]
     story.append(_kpi_row(row2_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, min5_clr]))
+    story.append(Spacer(1, 5))
+
+    # NEW (V6.3.3): Piyasa rejimi + sonraki bilanço KPI satırı
+    regime_txt = _strip_emoji(str(mh.get("regime", "—"))) if mh else "—"
+    if mh and mh.get("swing_ok") is True:
+        regime_clr = _C_GREEN
+    elif mh and mh.get("swing_ok") is False:
+        regime_clr = _C_RED
+    else:
+        regime_clr = _C_AMBER
+    if earn and earn.get("date"):
+        earn_txt = f"{earn['date']} ({earn['days']} gün)"
+        earn_clr = _C_RED if (earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS) else _C_ACCENT
+    else:
+        earn_txt = "—"
+        earn_clr = _C_MID
+    row3_items = [
+        ("PİYASA REJİMİ (SPY)", regime_txt),
+        ("SONRAKİ BİLANÇO", earn_txt),
+    ]
+    story.append(_kpi_row(row3_items, sty, page_w, accent_colors=[regime_clr, earn_clr]))
     story.append(Spacer(1, 6))
 
     if plan.high_vol_warning:
@@ -2085,6 +2116,26 @@ def build_pdf_bytes_single(
         story.append(tp2_warn_tbl)
         story.append(Spacer(1, 6))
 
+    # NEW (V6.3.3): Yaklaşan bilanço uyarı kutusu (≤14 gün)
+    if earn and earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
+        earn_warn_tbl = Table(
+            [[Paragraph(
+                f"UYARI: Yaklaşan bilanço {earn['date']} ({earn['days']} gün sonra) — "
+                f"gece açılan gap stop koruması tanımaz. Swing girişini buna göre planla.",
+                sty["warn"],
+            )]],
+            colWidths=[page_w],
+        )
+        earn_warn_tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), _C_AMBER_BG),
+            ("BOX",           (0,0), (-1,-1), 0.5, _C_AMBER),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ]))
+        story.append(earn_warn_tbl)
+        story.append(Spacer(1, 6))
+
     story += _section_header("İşlem Planı", sty, page_w)
     rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
     rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
@@ -2115,6 +2166,21 @@ def build_pdf_bytes_single(
         ("BOTTOMPADDING",(0,0), (-1,-1), 0),
     ]))
     story.append(side_by_side)
+
+    # NEW (V6.3.3): MTF Özet tablosu (haftalık + günlük)
+    if mtf and not mtf.get("error") and "w_setup" in mtf:
+        story += _section_header("MTF Özet (Haftalık + Günlük)", sty, page_w)
+        mtf_rows = [
+            ["Haftalık Setup", f"{mtf['w_setup']} / 100"],
+            ["Haftalık Durum", _strip_emoji(str(mtf["w_status"]))],
+            ["Günlük Timing", f"{mtf['d_timing']} / 100"],
+            ["Günlük Durum", _strip_emoji(str(mtf["d_status"]))],
+            ["Karar", _strip_emoji(str(mtf["verdict"]))],
+            ["Haftalık Alarm Bandı (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
+            ["Günlük Teyit Bandı", f"{mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"],
+        ]
+        story.append(_data_table(["Parametre", "Değer"], mtf_rows, sty,
+                                 [page_w*0.42, page_w*0.58]))
 
     story += _section_header("Skor Dağılımı", sty, page_w)
     b = plan.breakdown
@@ -2582,6 +2648,7 @@ def build_portfolio_pdf_bytes(
     interval_label: str,
     bars: int,
     logo_b64_str: str = "",
+    mh: Dict[str, Any] | None = None,
 ) -> bytes:
     fn, fn_bold = _setup_pdf_fonts()
     st_styles = _pdf_styles(fn, fn_bold)
@@ -2624,6 +2691,22 @@ def build_portfolio_pdf_bytes(
         ("MAKS ZARAR (STOP)",  fmt_money(mxl)),
     ]
     story.append(_kpi_row(row2, st_styles, page_w, accent_colors=[_C_GREEN, _C_RED]))
+    story.append(Spacer(1, 5))
+
+    # NEW (V6.3.3): Piyasa rejimi KPI'ı
+    if mh and mh.get("regime") and mh.get("regime") != "—":
+        regime_txt = _strip_emoji(str(mh["regime"]))
+        if mh.get("swing_ok") is True:
+            regime_clr = _C_GREEN
+        elif mh.get("swing_ok") is False:
+            regime_clr = _C_RED
+        else:
+            regime_clr = _C_AMBER
+        story.append(_kpi_row(
+            [("PİYASA REJİMİ (SPY)", regime_txt),
+             ("SPY KAPANIŞ", f"{mh.get('close', float('nan')):.2f}" if np.isfinite(mh.get("close", np.nan)) else "—")],
+            st_styles, page_w, accent_colors=[regime_clr, _C_ACCENT],
+        ))
     story.append(Spacer(1, 6))
 
     story += _section_header("Pozisyonlar", st_styles, page_w)
@@ -2634,7 +2717,7 @@ def build_portfolio_pdf_bytes(
         preferred_cols = [
             "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %",
             "Stop", "TP1", "TP2", "Setup", "Timing",
-            "Durum", "Liderlik", "RS Rating",
+            "Durum", "Bilanço", "Liderlik", "RS Rating",
             "52W Zirve Uzaklık %", "Blue Sky", "RSI Yönü",
         ]
         col_map = {
@@ -2663,7 +2746,7 @@ def build_portfolio_pdf_bytes(
         w_map = {
             "Ticker": 0.07, "Fiyat": 0.07, "Qty": 0.05, "Alış Ort.": 0.08,
             "P&L %": 0.06, "Stop": 0.07, "TP1": 0.07, "TP2": 0.07,
-            "Setup": 0.05, "Timing": 0.05, "Durum": 0.14, "Liderlik": 0.07,
+            "Setup": 0.05, "Timing": 0.05, "Durum": 0.14, "Bilanço": 0.09, "Liderlik": 0.07,
             "RS Rating": 0.06, "52W Zirve Uzaklık %": 0.08,
             "Blue Sky": 0.05, "RSI Yönü": 0.06,
         }
@@ -3388,7 +3471,7 @@ with tab_single:
                         st.caption("Yönetim önerileri için fiyatın entry/TP seviyelerine yaklaşmasını bekle.")
 
                     st.subheader("📄 Rapor")
-                    pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64)
+                    pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None))
                     st.download_button(
                         label="Raporu PDF'e Çevir (İndir)",
                         data=pdf_bytes,
@@ -3684,7 +3767,7 @@ with tab_portfolio:
 
                 st.markdown("### ⬇️ İndir")
                 title = "MinerWin – Portföy Analizi V6.3"
-                pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64)
+                pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64, mh=mh_pf)
                 xls_bytes = build_portfolio_excel_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars)
 
                 d1, d2 = st.columns(2)
