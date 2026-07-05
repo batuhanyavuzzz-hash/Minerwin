@@ -12,6 +12,13 @@
 #  ★ Motor koduna DOKUNULMADI — aynı hesaplar, yeni sunum. API maliyeti artmadı.
 #  + build_mtf_summary artık plan/df nesnelerini de döndürür (_w_plan, _d_plan,
 #    _wdf, _ddf) — Swing Modu grafiği ve planı bunlardan çizer.
+#  ★ RİSK YÖNETİMİ: Sidebar'a hesap büyüklüğü + işlem başına risk% girişi.
+#    Pozisyon boyutu hesaplayıcı (adet/maliyet/risk $) Swing ve Gelişmiş modda;
+#    portföyde Toplam Açık Risk, Açık Risk/Hesap %, En Büyük Pozisyon % KPI'ları.
+#  ★ RS RATING KARARA BAĞLANDI: RS < 45 → 🔴 veto; RS < 60 → 🟢 verilmez (🟡'ya
+#    düşürülür). Minervini prensibi: lider olmayan hisse aday bile değildir.
+#  ★ DAĞITIM GÜNÜ SAYIMI: SPY'da son 25 seansta fiyat ↓ + hacim ↑ günleri sayılır.
+#    ≥6 dağıtım günü → rejim 🟢'den 🟡'ya düşürülür (kurumsal satış erken uyarısı).
 #
 # V6.3.3 Değişiklikleri (V6.3.2 üzerine):
 #  + PDF çıktıları V6.3 özellikleriyle senkronize edildi:
@@ -269,6 +276,36 @@ def fmt_pct(x: float) -> str:
     if not np.isfinite(x):
         return "—"
     return f"{x:+.2f}%"
+
+
+# NEW (V7.0): Pozisyon boyutu hesaplayıcı
+def position_size_calc(account_size: float, risk_pct: float, entry: float, stop: float) -> Dict[str, Any]:
+    """shares = (hesap × risk%) ÷ (giriş − stop). Maliyet hesabı aşarsa
+    kaldıraçsız üst sınıra çekilir ve 'capped' işaretlenir."""
+    out = {"shares": np.nan, "cost": np.nan, "risk_amt": np.nan, "capped": False}
+    if not (np.isfinite(account_size) and account_size > 0
+            and np.isfinite(risk_pct) and risk_pct > 0
+            and np.isfinite(entry) and np.isfinite(stop)
+            and entry > stop > 0):
+        return out
+    risk_amt = account_size * (risk_pct / 100.0)
+    per_share_risk = entry - stop
+    shares = int(risk_amt // per_share_risk)
+    if shares <= 0:
+        return out
+    cost = shares * entry
+    if cost > account_size:
+        shares = int(account_size // entry)
+        if shares <= 0:
+            return out
+        cost = shares * entry
+        out["capped"] = True
+    out.update({
+        "shares": float(shares),
+        "cost": float(cost),
+        "risk_amt": float(shares * per_share_risk),
+    })
+    return out
 
 
 # =========================================================
@@ -620,6 +657,22 @@ def market_health_pack(spy_df: pd.DataFrame) -> Dict[str, Any]:
             "dist_ema50_pct": pct(close, e50),
             "ema200_slope": float(s200) if np.isfinite(s200) else float("nan"),
         })
+
+        # NEW (V7.0): Dağıtım günü sayımı (son 25 seans) — erken uyarı.
+        # Dağıtım günü: fiyat ≥%0.2 düşer + hacim önceki günden yüksektir
+        # (kurumsal satış izi). EMA'lar gecikmeli; bu sayaç tepeyi erken yakalar.
+        dist_days = 0
+        try:
+            if "volume" in d.columns and len(d) >= 30:
+                vv = d["volume"].astype(float).fillna(0.0)
+                cc = d["close"].astype(float)
+                down = cc < cc.shift(1) * 0.998
+                vol_up = vv > vv.shift(1)
+                dist_days = int((down & vol_up).tail(25).sum())
+        except Exception:
+            dist_days = 0
+        out["dist_days"] = dist_days
+
         if close > e50 and e50 > e200 and np.isfinite(s200) and s200 > 0:
             out["regime"] = "🟢 RİSK AÇIK"
             out["detail"] = "SPY > EMA50 > EMA200 ve uzun trend pozitif — swing alımları için ortam uygun."
@@ -632,6 +685,17 @@ def market_health_pack(spy_df: pd.DataFrame) -> Dict[str, Any]:
             out["regime"] = "🟡 TEMKİNLİ"
             out["detail"] = "SPY karışık bölgede — pozisyon boyunu küçült, sadece en güçlü setuplara odaklan."
             out["swing_ok"] = None
+
+        # NEW (V7.0): ≥6 dağıtım günü EMA'lar yeşilken bile rejimi düşürür
+        if dist_days >= 6 and out["swing_ok"] is True:
+            out["regime"] = "🟡 TEMKİNLİ"
+            out["swing_ok"] = None
+            out["detail"] = (
+                f"EMA dizilimi pozitif AMA son 25 seansta {dist_days} dağıtım günü — "
+                f"kurumsal satış birikiyor; pozisyon boyunu küçült, agresif alım yapma."
+            )
+        elif dist_days >= 4:
+            out["detail"] += f" (Dağıtım günü: {dist_days}/25 — izlemede.)"
     except Exception as ex:
         out["error"] = _sanitize_err(ex)
     return out
@@ -641,11 +705,15 @@ def render_market_health(mh: Dict[str, Any]):
     if mh.get("error"):
         st.caption(f"ℹ️ Piyasa sağlığı hesaplanamadı: {mh['error']}")
         return
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Piyasa Rejimi (SPY)", mh.get("regime", "—"))
     m2.metric("SPY Kapanış", f"{mh.get('close', float('nan')):.2f}" if np.isfinite(mh.get("close", np.nan)) else "—")
     m3.metric("EMA50 Mesafe", f"{mh.get('dist_ema50_pct', float('nan')):+.2f}%" if np.isfinite(mh.get("dist_ema50_pct", np.nan)) else "—")
     m4.metric("EMA200 Eğim", f"{mh.get('ema200_slope', float('nan')):.3f}" if np.isfinite(mh.get("ema200_slope", np.nan)) else "—")
+    m5.metric(
+        "Dağıtım Günü (25g)", f"{mh.get('dist_days', 0)}",
+        help="Fiyat ≥%0.2 düşüp hacmin arttığı günler. ≥6 kurumsal satış uyarısıdır ve rejimi düşürür.",
+    )
     st.caption(mh.get("detail", ""))
 
 
@@ -674,15 +742,34 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         ddf = _add_indicators(_fetch_daily_df(symbol, 320))
         d_plan = build_trade_plan(ddf, low_52w=low_52w, high_52w=high_52w)
 
+        # NEW (V7.0): RS Rating hesaplanır ve KARARA BAĞLANIR.
+        # Minervini prensibi: endekse karşı zayıf hisse lider değildir —
+        # teknik görünüm ne olursa olsun aday bile olamaz.
+        rs_rating = float("nan")
+        try:
+            spy_df = _fetch_spy_daily(320)
+            rs = analyze_relative_strength(ddf, spy_df)
+            rs_rating = float(rs.get("rs_rating", float("nan")))
+        except Exception:
+            pass
+
         weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
         daily_green = d_plan.status_tag.startswith("🟢")
+        rs_weak = np.isfinite(rs_rating) and rs_rating < 60
+        rs_very_weak = np.isfinite(rs_rating) and rs_rating < 45
 
-        if not weekly_ok:
+        if rs_very_weak:
+            verdict = f"🔴 UZAK DUR — RS Rating {rs_rating:.0f}: endekse karşı belirgin zayıf, lider değil"
+            verdict_kind = "error"
+        elif not weekly_ok:
             verdict = "🔴 UZAK DUR — haftalık trend teyitsiz, alarm kurmaya bile değmez"
             verdict_kind = "error"
-        elif daily_green:
-            verdict = "🟢 SİNYAL — haftalık trend + günlük timing uyumlu"
+        elif daily_green and not rs_weak:
+            verdict = "🟢 SİNYAL — haftalık trend + günlük timing + göreli güç uyumlu"
             verdict_kind = "success"
+        elif daily_green and rs_weak:
+            verdict = f"🟡 İZLE — timing uygun ama RS Rating {rs_rating:.0f} (<60): lider adayı değil, seçici ol"
+            verdict_kind = "warning"
         else:
             verdict = "🟡 İZLE — haftalık uygun, günlük timing bekleniyor (alarm bandını takip et)"
             verdict_kind = "warning"
@@ -694,6 +781,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "d_entry_low": d_plan.entry_low, "d_entry_high": d_plan.entry_high,
             "verdict": verdict, "verdict_kind": verdict_kind,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
+            "rs_rating": rs_rating,
             # NEW (V7.0): Swing Modu bu nesnelerden grafik ve plan çizer
             "_w_plan": w_plan, "_d_plan": d_plan,
             "_wdf": wdf, "_ddf": ddf,
@@ -2650,6 +2738,20 @@ def compute_portfolio_kpis(out: pd.DataFrame) -> Dict[str, float]:
             loss_legs = stop_pnl[stop_pnl < 0]
             k["max_loss_stop"] = abs(float(loss_legs.sum())) if not loss_legs.empty else 0.0
 
+    # NEW (V7.0): Portföy seviyesinde risk KPI'ları
+    # Toplam açık risk: sadece gerçek risk taşıyan bacaklar (Risk $ > 0)
+    if "Risk $" in df.columns:
+        rk = df["Risk $"].apply(to_num)
+        pos_risk = rk[np.isfinite(rk) & (rk > 0)]
+        k["total_open_risk"] = float(pos_risk.sum()) if not pos_risk.empty else 0.0
+    else:
+        k["total_open_risk"] = np.nan
+    # En büyük pozisyonun portföy değerine oranı (konsantrasyon)
+    if np.isfinite(k["portfolio_value"]) and k["portfolio_value"] > 0:
+        k["max_pos_pct"] = float(valid["pos_value"].max() / k["portfolio_value"] * 100.0)
+    else:
+        k["max_pos_pct"] = np.nan
+
     return k
 
 
@@ -2704,8 +2806,9 @@ def build_portfolio_pdf_bytes(
     row2 = [
         ("MAKS KAR (TP1)",     fmt_money(mxp)),
         ("MAKS ZARAR (STOP)",  fmt_money(mxl)),
+        ("TOPLAM AÇIK RİSK",   fmt_money(kpis.get("total_open_risk", np.nan))),
     ]
-    story.append(_kpi_row(row2, st_styles, page_w, accent_colors=[_C_GREEN, _C_RED]))
+    story.append(_kpi_row(row2, st_styles, page_w, accent_colors=[_C_GREEN, _C_RED, _C_AMBER]))
     story.append(Spacer(1, 5))
 
     # NEW (V6.3.3): Piyasa rejimi KPI'ı
@@ -2836,7 +2939,7 @@ def build_portfolio_excel_bytes(
         ("Anlik P&L (%)",         kpis.get("pnl_pct", np.nan),          "pct"),
         ("Max Kar — TP1 ($)",     kpis.get("max_profit_tp1", np.nan),   "money"),
         ("Max Zarar — Stop ($)",  kpis.get("max_loss_stop", np.nan),    "money"),
-        ("Not", "Qty ve Alis Ort. girilmis satirlar icin gecerlidir.", "text"),
+        ("Toplam Acik Risk ($)",  kpis.get("total_open_risk", np.nan), "money"),
     ]
     card_positions = [
         ("A", "C", 4, 7), ("E", "G", 4, 7), ("I", "K", 4, 7),
@@ -3039,6 +3142,17 @@ with st.sidebar:
     check_earnings = st.checkbox("Bilanço (earnings) kontrolü", value=True)
     st.caption("Yaklaşan bilanço uyarısı. Önce Twelve Data, olmazsa Finnhub denenir (1 saat cache'li).")
 
+    # NEW (V7.0): Risk Yönetimi
+    st.divider()
+    st.subheader("💰 Risk Yönetimi")
+    account_size = st.number_input(
+        "Hesap büyüklüğü ($)", min_value=0.0, value=10000.0, step=500.0, key="acct_size",
+    )
+    risk_pct_per_trade = st.number_input(
+        "İşlem başına risk (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.25, key="risk_pct_trade",
+    )
+    st.caption("Pozisyon boyutu = (hesap × risk%) ÷ (giriş − stop). Hesabı 0 yaparsan hesaplayıcı kapanır.")
+
     st.divider()
     st.subheader("📌 Tek Hisse Test Hafızası (Oturum)")
     if st.session_state.daily_tests:
@@ -3080,7 +3194,8 @@ with st.sidebar:
 # =========================================================
 # SWING MODU — NEW V7.0
 # =========================================================
-def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool):
+def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
+                      acct_size: float = 0.0, risk_pct: float = 1.0):
     """Kullanıcının iş akışını tek ekranda yürüten sade görünüm:
     Piyasa rejimi → Karar → Haftalık (alarm bandı) → Günlük (plan) → Bilanço.
     Zaman dilimi seçimi yok — haftalık ve günlük otomatik yönetilir."""
@@ -3203,9 +3318,14 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool):
 
     # ---------- 1) HAFTALIK ----------
     st.markdown("#### 1️⃣ Haftalık — Büyük Resim")
-    w1, w2 = st.columns(2)
+    w1, w2, w3 = st.columns(3)
     w1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
     w2.metric("Haftalık Durum", mtf["w_status"])
+    rsr = mtf.get("rs_rating", float("nan"))
+    w3.metric(
+        "RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
+        help="Endekse (SPY) göre 3/6/12 aylık göreli güç. <60: lider değil, 🟢 verilmez. <45: veto.",
+    )
     if mtf["weekly_ok"]:
         st.info(
             f"🔔 **Alarmını buraya kur:** {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} "
@@ -3234,6 +3354,19 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool):
         st.warning("⚠️ Yüksek volatilite — stop cap devrede, pozisyon boyunu küçült.")
     if d_plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
         st.caption("ℹ️ TP2, 3.5R zemin garantisiyle tarihsel tavanın üzerine yükseltildi — temkinli değerlendir.")
+
+    # NEW (V7.0): Pozisyon boyutu — soyut riski somut adete çevirir
+    ps = position_size_calc(acct_size, risk_pct, d_plan.entry_mid, d_plan.stop)
+    if np.isfinite(ps.get("shares", np.nan)):
+        cap_note = " · ⚠️ hesap sınırına takıldı (gerçekleşen risk hedefin altında)" if ps["capped"] else ""
+        st.info(
+            f"💰 **Pozisyon Boyutu:** {int(ps['shares'])} adet ≈ ${ps['cost']:,.0f}  |  "
+            f"Riske edilen: ${ps['risk_amt']:,.0f} (hedef: hesabın %{risk_pct:.2f}'i){cap_note}  \n"
+            f"Referans: giriş = band ortası {d_plan.entry_mid:.2f}, stop = {d_plan.stop:.2f}. "
+            f"Gerçek giriş fiyatınla yeniden hesapla."
+        )
+    elif acct_size > 0:
+        st.caption("Pozisyon boyutu hesaplanamadı (giriş/stop geçersiz veya risk çok küçük).")
 
     # ---------- 3) BİLANÇO ----------
     st.markdown("#### 3️⃣ Bilanço Kontrolü")
@@ -3310,7 +3443,7 @@ with tab_single:
     )
     st.divider()
     if ui_mode.startswith("🎯"):
-        render_swing_mode(bars, show_quote, check_earnings)
+        render_swing_mode(bars, show_quote, check_earnings, account_size, risk_pct_per_trade)
     else:
         left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
@@ -3597,6 +3730,15 @@ with tab_single:
                             ],
                         })
                         st.table(table)
+
+                        # NEW (V7.0): Pozisyon boyutu (Gelişmiş mod)
+                        ps_adv = position_size_calc(account_size, risk_pct_per_trade, plan.entry_mid, plan.stop)
+                        if np.isfinite(ps_adv.get("shares", np.nan)):
+                            cap_note = " · ⚠️ hesap sınırına takıldı" if ps_adv["capped"] else ""
+                            st.info(
+                                f"💰 **Pozisyon Boyutu:** {int(ps_adv['shares'])} adet ≈ ${ps_adv['cost']:,.0f}  |  "
+                                f"Risk: ${ps_adv['risk_amt']:,.0f} (hedef %{risk_pct_per_trade:.2f}){cap_note}"
+                            )
 
                         st.subheader("🧠 Skor Dağılımı")
                         b = plan.breakdown
@@ -3984,6 +4126,23 @@ with tab_portfolio:
                 c3.metric("Anlık P&L (%)", fmt_pct(kpis.get("pnl_pct", np.nan)))
                 c4.metric("TP1 Hepsi Olursa", fmt_money(kpis.get("max_profit_tp1", np.nan)))
                 c5.metric("Stop Hepsi Olursa", fmt_money(kpis.get("max_loss_stop", np.nan)))
+
+                # NEW (V7.0): Risk yönetimi KPI satırı
+                r2c1, r2c2, r2c3 = st.columns(3)
+                tor = kpis.get("total_open_risk", np.nan)
+                r2c1.metric("Toplam Açık Risk", fmt_money(tor),
+                            help="Sadece gerçek risk taşıyan bacaklar: maliyet altındaki stoplardan gelen olası zarar toplamı.")
+                if np.isfinite(tor) and account_size > 0:
+                    _orp = tor / account_size * 100.0
+                    r2c2.metric("Açık Risk / Hesap", f"%{_orp:.2f}",
+                                help=f"Hesap büyüklüğü (${account_size:,.0f}) sidebar'dan.")
+                    if _orp > 6.0:
+                        st.warning(f"⚠️ Toplam açık risk hesabın %{_orp:.1f}'i — tüm stoplar aynı günde çalışırsa kayıp bu. %6 üstü agresif; pozisyon boylarını gözden geçir.")
+                else:
+                    r2c2.metric("Açık Risk / Hesap", "—", help="Sidebar'dan hesap büyüklüğü gir.")
+                mpp = kpis.get("max_pos_pct", np.nan)
+                r2c3.metric("En Büyük Pozisyon", f"%{mpp:.1f}" if np.isfinite(mpp) else "—",
+                            help="Portföy değerine oranı — konsantrasyon göstergesi.")
                 # FIX (V6.2.1): max_loss_stop artık sadece zarar üreten bacakları içerir
                 st.caption(
                     "ℹ️ 'Stop Hepsi Olursa' yalnızca maliyet altındaki stoplardan gelen "
