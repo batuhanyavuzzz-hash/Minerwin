@@ -1,5 +1,17 @@
 # app.py
-# MinerWin — Tek Hisse + Portföy Analiz (V6.3.3) — Twelve Data + Finnhub
+# MinerWin — Tek Hisse + Portföy Analiz (V7.0) — Twelve Data + Finnhub
+#
+# V7.0 Değişiklikleri (V6.3.3 üzerine — ARAYÜZ YENİLEME):
+#  ★ SWING MODU (yeni varsayılan görünüm): Kullanıcının gerçek iş akışını
+#    tek ekranda yürütür — zaman dilimi seçimi YOK, kafa karışıklığı YOK:
+#      Piyasa rejimi → Karar kartı (🟢/🟡/🔴 + gerekçe) → Haftalık bölüm
+#      (setup + ALARM BANDI) → Günlük bölüm (timing + stop/TP planı) →
+#      Bilanço kontrolü → Günlük/Haftalık geçişli grafik → detaylı PDF
+#  ★ GELİŞMİŞ MOD: Eski ekran olduğu gibi korundu (tüm zaman dilimleri,
+#    skor dağılımı, debug). Tek hisse sekmesinin üstündeki anahtarla geçilir.
+#  ★ Motor koduna DOKUNULMADI — aynı hesaplar, yeni sunum. API maliyeti artmadı.
+#  + build_mtf_summary artık plan/df nesnelerini de döndürür (_w_plan, _d_plan,
+#    _wdf, _ddf) — Swing Modu grafiği ve planı bunlardan çizer.
 #
 # V6.3.3 Değişiklikleri (V6.3.2 üzerine):
 #  + PDF çıktıları V6.3 özellikleriyle senkronize edildi:
@@ -169,7 +181,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V6.3.3</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V7.0</div>
 """,
     unsafe_allow_html=True,
 )
@@ -682,6 +694,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "d_entry_low": d_plan.entry_low, "d_entry_high": d_plan.entry_high,
             "verdict": verdict, "verdict_kind": verdict_kind,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
+            # NEW (V7.0): Swing Modu bu nesnelerden grafik ve plan çizer
+            "_w_plan": w_plan, "_d_plan": d_plan,
+            "_wdf": wdf, "_ddf": ddf,
         })
     except Exception as ex:
         out["error"] = _sanitize_err(ex)
@@ -2862,7 +2877,7 @@ def build_portfolio_excel_bytes(
         ws_sum.column_dimensions[col].width = w
 
     # FIX (V6.2.1): gereksiz f-string kaldırıldı (ws_sum[f"A13"] → ws_sum["A13"])
-    ws_sum["A13"] = "MinerWin V6.3 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
+    ws_sum["A13"] = "MinerWin V7.0 — Otomatik teknik analiz, yatirim tavsiyesi degildir."
     ws_sum["A13"].font = FONT_FOOT
     ws_sum.merge_cells("A13:K13")
 
@@ -3063,6 +3078,204 @@ with st.sidebar:
 
 
 # =========================================================
+# SWING MODU — NEW V7.0
+# =========================================================
+def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool):
+    """Kullanıcının iş akışını tek ekranda yürüten sade görünüm:
+    Piyasa rejimi → Karar → Haftalık (alarm bandı) → Günlük (plan) → Bilanço.
+    Zaman dilimi seçimi yok — haftalık ve günlük otomatik yönetilir."""
+    st.subheader("🎯 Swing Analiz")
+    st.caption("Haftalık karar → günlük teyit → bilanço kontrolü — tek akışta, zaman dilimi seçmeden.")
+
+    c_in1, c_in2 = st.columns([0.68, 0.32], vertical_alignment="bottom")
+    with c_in1:
+        sw_ticker = st.text_input("Ticker", placeholder="Örn: NVDA, ASTS, PLTR", key="sw_ticker").strip().upper()
+    with c_in2:
+        sw_run = st.button("Analiz Et", type="primary", use_container_width=True, key="sw_run")
+
+    if sw_run:
+        if not sw_ticker:
+            st.warning("Ticker gir.")
+        else:
+            with st.spinner("Haftalık + günlük analiz yapılıyor..."):
+                try:
+                    ddf_tmp = _fetch_daily_df(sw_ticker, 320)
+                    low_52w, high_52w = compute_52w_levels(ddf_tmp, 260)
+                    mtf = build_mtf_summary(sw_ticker, low_52w, high_52w)
+                    if mtf.get("error"):
+                        raise RuntimeError(mtf["error"])
+
+                    try:
+                        mh = market_health_pack(_fetch_spy_daily(320))
+                        st.session_state["__mh"] = mh
+                    except Exception:
+                        mh = {}
+
+                    earn = next_earnings_info(sw_ticker) if use_earnings else {}
+
+                    price = float(mtf["_ddf"].iloc[-1]["close"])
+                    if use_quote:
+                        try:
+                            q = td_quote(sw_ticker)
+                            if "price" in q:
+                                price = float(q["price"])
+                        except Exception:
+                            pass
+
+                    st.session_state["__sw"] = {
+                        "ticker": sw_ticker, "mtf": mtf, "mh": mh,
+                        "earn": earn, "price": price,
+                        "ts": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M"),
+                    }
+
+                    # Swing analizi de geçmişe yazılır (timeframe='swing')
+                    d_plan = mtf["_d_plan"]
+                    record = {
+                        "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                        "ticker": sw_ticker,
+                        "timeframe": "swing",
+                        "price": round(price, 4),
+                        "setup_score": int(mtf["w_setup"]),
+                        "timing_score": int(mtf["d_timing"]),
+                        "total_score": int(d_plan.total_score),
+                        "status_tag": mtf["verdict"],
+                        "minervini5_ok": bool(d_plan.minervini5_ok),
+                        "rsi_direction": d_plan.rsi_direction_label,
+                        "dist_to_52w_high_pct": round(float(d_plan.dist_to_52w_high_pct), 2) if np.isfinite(d_plan.dist_to_52w_high_pct) else "",
+                        "high_vol_warning": d_plan.high_vol_warning,
+                        "entry_low": round(float(mtf["w_entry_low"]), 4),
+                        "entry_high": round(float(mtf["w_entry_high"]), 4),
+                        "stop": round(float(d_plan.stop), 4),
+                        "tp1": round(float(d_plan.tp1), 4),
+                        "tp2": round(float(d_plan.tp2), 4),
+                        "rr_tp1": round(float(d_plan.rr_tp1), 4) if np.isfinite(d_plan.rr_tp1) else "",
+                        "rr_tp2": round(float(d_plan.rr_tp2), 4) if np.isfinite(d_plan.rr_tp2) else "",
+                        "capacity": d_plan.capacity_level,
+                    }
+                    try:
+                        save_to_history(record)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    st.error(f"Analiz başarısız: {_sanitize_err(e)}")
+                    st.session_state.pop("__sw", None)
+
+    sw = st.session_state.get("__sw")
+    if not sw:
+        st.info("Yukarıya ticker girip **Analiz Et** ile başla. Program haftalık ve günlük grafiği senin yerine yönetir.")
+        return
+
+    t = sw["ticker"]
+    mtf, mh, earn, price = sw["mtf"], sw["mh"], sw["earn"], sw["price"]
+    w_plan, d_plan = mtf["_w_plan"], mtf["_d_plan"]
+
+    st.divider()
+
+    # ---------- 0) Piyasa rejimi ----------
+    if mh:
+        render_market_health(mh)
+        if mh.get("swing_ok") is False:
+            st.error("🔴 Piyasa rejimi zayıf — aşağıdaki karar ne olursa olsun, bu ortamda yeni alım önerilmez.")
+        st.divider()
+
+    # ---------- KARAR KARTI ----------
+    hc1, hc2 = st.columns([0.3, 0.7])
+    hc1.metric(f"{t} — Fiyat", f"{price:.2f}")
+    with hc2:
+        if mtf["verdict_kind"] == "success":
+            st.success(f"### {mtf['verdict']}")
+            rationale = "Haftalık trend sağlam ve fiyat günlük giriş bandında — plan aktif, aşağıdaki seviyelerle çalış."
+        elif mtf["verdict_kind"] == "warning":
+            st.warning(f"### {mtf['verdict']}")
+            rationale = (
+                f"Haftalık uygun; fiyat günlük giriş bandına {d_plan.dist_to_entry_pct:+.1f}% uzaklıkta — "
+                f"alarmı kur, bandı bekle."
+            )
+        else:
+            st.error(f"### {mtf['verdict']}")
+            rationale = (
+                f"Haftalık setup {mtf['w_setup']}/100 ve durum '{_strip_emoji(str(mtf['w_status']))}' — "
+                f"büyük trend teyitsizken günlük sinyalin anlamı yok."
+            )
+        st.caption(rationale)
+
+    st.divider()
+
+    # ---------- 1) HAFTALIK ----------
+    st.markdown("#### 1️⃣ Haftalık — Büyük Resim")
+    w1, w2 = st.columns(2)
+    w1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
+    w2.metric("Haftalık Durum", mtf["w_status"])
+    if mtf["weekly_ok"]:
+        st.info(
+            f"🔔 **Alarmını buraya kur:** {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} "
+            f"(haftalık EMA20–EMA50 bandı)"
+        )
+        st.caption("Bant her hafta kayar — alarmları hafta kapanışında yenile.")
+    else:
+        st.caption("Haftalık teyitsiz — alarm kurmaya değmez; önce haftalık yapının düzelmesini bekle.")
+
+    # ---------- 2) GÜNLÜK ----------
+    st.markdown("#### 2️⃣ Günlük — Zamanlama & Plan")
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Günlük Timing", f"{mtf['d_timing']} / 100")
+    d2.metric("Günlük Durum", mtf["d_status"])
+    d3.metric("Giriş Bandına Mesafe", f"{d_plan.dist_to_entry_pct:+.1f}%")
+
+    rr1 = f"1:{d_plan.rr_tp1:.2f}" if np.isfinite(d_plan.rr_tp1) else "—"
+    rr2 = f"1:{d_plan.rr_tp2:.2f}" if np.isfinite(d_plan.rr_tp2) else "—"
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Teyit Bandı", f"{mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}")
+    p2.metric("Stop", f"{d_plan.stop:.2f}")
+    p3.metric("TP1", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
+    p4.metric("TP2", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
+
+    if d_plan.high_vol_warning:
+        st.warning("⚠️ Yüksek volatilite — stop cap devrede, pozisyon boyunu küçült.")
+    if d_plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
+        st.caption("ℹ️ TP2, 3.5R zemin garantisiyle tarihsel tavanın üzerine yükseltildi — temkinli değerlendir.")
+
+    # ---------- 3) BİLANÇO ----------
+    st.markdown("#### 3️⃣ Bilanço Kontrolü")
+    if earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
+        st.error(
+            f"📅 **Yaklaşan bilanço: {earn['date']} ({earn['days']} gün sonra)** — "
+            f"gece gap'i stop tanımaz. Girişi buna göre planla veya bilanço sonrasını bekle."
+        )
+    elif earn.get("date"):
+        st.success(f"✅ Bilanço engeli yok — sonraki: {earn['date']} ({earn['days']} gün sonra, kaynak: {earn.get('source', '?')})")
+    elif use_earnings and earn.get("error"):
+        st.caption(f"ℹ️ Bilanço verisi alınamadı: {earn['error']}")
+    else:
+        st.caption("Bilanço kontrolü kapalı (sidebar'dan açılabilir).")
+
+    st.divider()
+
+    # ---------- GRAFİK ----------
+    st.markdown("#### 📈 Grafik")
+    sw_tf = st.radio("Grafik zaman dilimi", ["Günlük", "Haftalık"], horizontal=True, key="sw_chart_tf")
+    if sw_tf == "Günlük":
+        fig = plot_chart(mtf["_ddf"], t, d_plan, price, show_candles, show_emas, show_line)
+    else:
+        w_last = float(mtf["_wdf"].iloc[-1]["close"])
+        fig = plot_chart(mtf["_wdf"], t, w_plan, w_last, show_candles, show_emas, show_line)
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Tetik anında 'göz muayenesi' için Haftalık'a geç: baz düzgün mü, son haftalık mum nasıl kapanmış?")
+
+    # ---------- PDF ----------
+    pdf_bytes = build_pdf_bytes_single(
+        ticker=t, interval_label="Günlük (1day) [Swing]", bars=bars_n,
+        plan=d_plan, quote=None, logo_b64_str=logo_b64,
+        earn=(earn if use_earnings else None), mh=mh, mtf=mtf,
+    )
+    st.download_button(
+        "📄 Swing Raporu (PDF) indir", data=pdf_bytes,
+        file_name=f"{t}_swing_rapor.pdf", mime="application/pdf",
+        use_container_width=True, key="sw_pdf",
+    )
+
+
+# =========================================================
 # PİYASA SAĞLIĞI PANELİ — NEW V6.3
 # =========================================================
 mh_c1, mh_c2 = st.columns([0.28, 0.72])
@@ -3087,413 +3300,425 @@ tab_single, tab_portfolio = st.tabs(["📈 Tek Hisse Analiz", "🧳 Portföy Ana
 # SEKME 1: TEK HİSSE
 # =========================================================
 with tab_single:
-    left, right = st.columns([0.36, 0.64], vertical_alignment="top")
+    # NEW (V7.0): Görünüm modu — Swing (senin iş akışın, varsayılan) / Gelişmiş (eski ekran)
+    ui_mode = st.radio(
+        "Görünüm modu",
+        ["🎯 Swing Modu", "🔬 Gelişmiş Mod"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="ui_mode",
+    )
+    st.divider()
+    if ui_mode.startswith("🎯"):
+        render_swing_mode(bars, show_quote, check_earnings)
+    else:
+        left, right = st.columns([0.36, 0.64], vertical_alignment="top")
 
-    with left:
-        st.subheader("Hisse")
-        ticker = st.text_input("Ticker", placeholder="Örn: NVDA, TSLA, PLTR").strip().upper()
-        interval_label = st.selectbox(
-            "Zaman çözünürlüğü",
-            list(INTERVAL_MAP.keys()),
-            index=list(INTERVAL_MAP.keys()).index(default_interval_label),
-        )
-        run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
+        with left:
+            st.subheader("Hisse")
+            ticker = st.text_input("Ticker", placeholder="Örn: NVDA, TSLA, PLTR").strip().upper()
+            interval_label = st.selectbox(
+                "Zaman çözünürlüğü",
+                list(INTERVAL_MAP.keys()),
+                index=list(INTERVAL_MAP.keys()).index(default_interval_label),
+            )
+            run = st.button("Getir & Analiz Et", type="primary", use_container_width=True)
 
-        if run:
-            if not ticker:
-                st.warning("Ticker gir.")
-            else:
-                interval = INTERVAL_MAP[interval_label]
-                df = pd.DataFrame()
-                q = {}
-                quote_price = None
+            if run:
+                if not ticker:
+                    st.warning("Ticker gir.")
+                else:
+                    interval = INTERVAL_MAP[interval_label]
+                    df = pd.DataFrame()
+                    q = {}
+                    quote_price = None
 
-                with st.spinner("Veri çekiliyor..."):
-                    try:
-                        payload = td_time_series(ticker, interval, bars)
-                        df = parse_ohlcv(payload)
-                    except Exception as e:
-                        st.error(f"Veri alınamadı: {_sanitize_err(e)}")
-
-                if not df.empty:
-                    df["ema20"] = ema(df["close"], 20)
-                    df["ema50"] = ema(df["close"], 50)
-                    df["ema150"] = ema(df["close"], 150)
-                    df["ema200"] = ema(df["close"], 200)
-                    df["rsi14"] = rsi(df["close"], 14)
-                    df["atr14"] = atr(df, 14)
-
-                    try:
-                        low_52w, high_52w, daily_df_for_52w = get_daily_52w_levels(ticker, interval, df)
-                    except Exception as e:
-                        st.error(f"Daily veri / 52W hesap hatası: {_sanitize_err(e)}")
-                        daily_df_for_52w = pd.DataFrame()
-                        low_52w, high_52w = float("nan"), float("nan")
-
-                    plan = build_trade_plan(df, low_52w=low_52w, high_52w=high_52w)
-
-                    lead = leadership_pack(
-                        ticker,
-                        interval,
-                        df,
-                        low_52w=low_52w,
-                        high_52w=high_52w,
-                        daily_df_override=daily_df_for_52w,
-                    )
-
-                    weekly_info = {}
-                    try:
-                        weekly_info = check_weekly_trend(ticker)
-                    except Exception:
-                        pass
-
-                    # NEW (V6.3): Bilanço kontrolü
-                    earn = next_earnings_info(ticker) if check_earnings else {}
-
-                    # NEW (V6.3): Piyasa sağlığı (SPY leadership_pack ile zaten cache'te)
-                    try:
-                        mh = market_health_pack(_fetch_spy_daily(320))
-                        st.session_state["__mh"] = mh
-                    except Exception:
-                        mh = {}
-
-                    # NEW (V6.3): MTF özet (haftalık setup + günlük timing)
-                    mtf = build_mtf_summary(ticker, low_52w, high_52w) if show_mtf else {}
-
-                    if show_quote:
+                    with st.spinner("Veri çekiliyor..."):
                         try:
-                            q = td_quote(ticker)
-                            for key in ["price", "close"]:
-                                if key in q:
-                                    try:
-                                        quote_price = float(q[key])
-                                        break
-                                    except Exception:
-                                        pass
+                            payload = td_time_series(ticker, interval, bars)
+                            df = parse_ohlcv(payload)
                         except Exception as e:
-                            # FIX (V6.2.1): Quote hatası sessizce yutulmuyor
-                            q = {}
-                            st.caption(f"ℹ️ Quote alınamadı, mum kapanışı kullanılıyor: {_sanitize_err(e)}")
+                            st.error(f"Veri alınamadı: {_sanitize_err(e)}")
 
-                    candle_close = float(df.iloc[-1]["close"])
-                    last_price_line = (
-                        quote_price
-                        if (quote_price is not None and np.isfinite(quote_price))
-                        else candle_close
-                    )
+                    if not df.empty:
+                        df["ema20"] = ema(df["close"], 20)
+                        df["ema50"] = ema(df["close"], 50)
+                        df["ema150"] = ema(df["close"], 150)
+                        df["ema200"] = ema(df["close"], 200)
+                        df["rsi14"] = rsi(df["close"], 14)
+                        df["atr14"] = atr(df, 14)
 
-                    st.session_state["__df"] = df
-                    st.session_state["__ticker"] = ticker
-                    st.session_state["__plan"] = plan
-                    st.session_state["__quote"] = q
-                    st.session_state["__last_price_line"] = float(last_price_line)
-                    st.session_state["__interval_label"] = interval_label
-                    st.session_state["__bars"] = bars
+                        try:
+                            low_52w, high_52w, daily_df_for_52w = get_daily_52w_levels(ticker, interval, df)
+                        except Exception as e:
+                            st.error(f"Daily veri / 52W hesap hatası: {_sanitize_err(e)}")
+                            daily_df_for_52w = pd.DataFrame()
+                            low_52w, high_52w = float("nan"), float("nan")
 
-                    # FIX (V6.2.1): timestamp Türkiye saatiyle
-                    record = {
-                        "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-                        "ticker": ticker,
-                        "timeframe": interval,
-                        "price": round(float(last_price_line), 4),
-                        "setup_score": int(plan.setup_score),
-                        "timing_score": int(plan.timing_score),
-                        "total_score": int(plan.total_score),
-                        "status_tag": plan.status_tag,
-                        "minervini5_ok": bool(plan.minervini5_ok),
-                        "rsi_direction": plan.rsi_direction_label,
-                        "dist_to_52w_high_pct": round(float(plan.dist_to_52w_high_pct), 2) if np.isfinite(plan.dist_to_52w_high_pct) else "",
-                        "high_vol_warning": plan.high_vol_warning,
-                        "entry_low": round(float(plan.entry_low), 4),
-                        "entry_high": round(float(plan.entry_high), 4),
-                        "stop": round(float(plan.stop), 4),
-                        "tp1": round(float(plan.tp1), 4),
-                        "tp2": round(float(plan.tp2), 4),
-                        "rr_tp1": round(float(plan.rr_tp1), 4) if np.isfinite(plan.rr_tp1) else "",
-                        "rr_tp2": round(float(plan.rr_tp2), 4) if np.isfinite(plan.rr_tp2) else "",
-                        "capacity": plan.capacity_level,
-                    }
-                    st.session_state.daily_tests.append(record)
-                    try:
-                        save_to_history(record)
-                    except Exception as e:
-                        st.warning(f"history.csv yazılamadı: {e}")
+                        plan = build_trade_plan(df, low_52w=low_52w, high_52w=high_52w)
 
-                    st.divider()
-                    st.subheader("📊 Strateji Özeti")
-                    colm1, colm2, colm3 = st.columns(3)
-                    with colm1:
-                        st.metric("Güncel Fiyat", f"{float(last_price_line):.2f}")
-                        st.metric("Durum", plan.status_tag)
-                    with colm2:
-                        st.metric("Toplam Skor", f"{plan.total_score} / 100")
-                        st.metric("Setup / Timing", f"{plan.setup_score} / {plan.timing_score}")
-                    with colm3:
-                        st.metric("Stop (Aktif)", f"{plan.stop:.2f}")
-                        st.metric("TP1 / TP2", f"{plan.tp1:.2f} / {plan.tp2:.2f}")
-                        st.caption(
-                            f"Yapısal: {plan.debug.get('stop_structural', float('nan')):.2f} | "
-                            f"Noise: {plan.debug.get('stop_noise', float('nan')):.2f} | "
-                            f"Cap: %{plan.debug.get('stop_debug', {}).get('max_risk_pct', 7):.0f}"
+                        lead = leadership_pack(
+                            ticker,
+                            interval,
+                            df,
+                            low_52w=low_52w,
+                            high_52w=high_52w,
+                            daily_df_override=daily_df_for_52w,
                         )
 
-                    if plan.high_vol_warning:
-                        st.warning(
-                            f"⚠️ **Yüksek Volatilite:** Stop cap devreye girdi. "
-                            f"ATR% yüksek — gerçek yapısal stop daha aşağıda. Pozisyon boyunu küçült."
+                        weekly_info = {}
+                        try:
+                            weekly_info = check_weekly_trend(ticker)
+                        except Exception:
+                            pass
+
+                        # NEW (V6.3): Bilanço kontrolü
+                        earn = next_earnings_info(ticker) if check_earnings else {}
+
+                        # NEW (V6.3): Piyasa sağlığı (SPY leadership_pack ile zaten cache'te)
+                        try:
+                            mh = market_health_pack(_fetch_spy_daily(320))
+                            st.session_state["__mh"] = mh
+                        except Exception:
+                            mh = {}
+
+                        # NEW (V6.3): MTF özet (haftalık setup + günlük timing)
+                        mtf = build_mtf_summary(ticker, low_52w, high_52w) if show_mtf else {}
+
+                        if show_quote:
+                            try:
+                                q = td_quote(ticker)
+                                for key in ["price", "close"]:
+                                    if key in q:
+                                        try:
+                                            quote_price = float(q[key])
+                                            break
+                                        except Exception:
+                                            pass
+                            except Exception as e:
+                                # FIX (V6.2.1): Quote hatası sessizce yutulmuyor
+                                q = {}
+                                st.caption(f"ℹ️ Quote alınamadı, mum kapanışı kullanılıyor: {_sanitize_err(e)}")
+
+                        candle_close = float(df.iloc[-1]["close"])
+                        last_price_line = (
+                            quote_price
+                            if (quote_price is not None and np.isfinite(quote_price))
+                            else candle_close
                         )
 
-                    # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse UI'da uyarı
-                    if plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
-                        st.info(
-                            "ℹ️ **TP2 Notu:** TP2, 3.5R zemin garantisi nedeniyle tarihsel "
-                            "cap'in (momentum/52W tavanı) üzerine yükseltildi. Bu hedefi "
-                            "temkinli değerlendir — R/R oranı bu durumda kendi kendini doğrular."
-                        )
+                        st.session_state["__df"] = df
+                        st.session_state["__ticker"] = ticker
+                        st.session_state["__plan"] = plan
+                        st.session_state["__quote"] = q
+                        st.session_state["__last_price_line"] = float(last_price_line)
+                        st.session_state["__interval_label"] = interval_label
+                        st.session_state["__bars"] = bars
 
-                    if weekly_info.get("warning"):
-                        st.warning(weekly_info["warning"])
-                    # FIX (V6.2.1): Weekly kontrol hatası artık görünür
-                    if weekly_info.get("error"):
-                        st.caption(f"ℹ️ Weekly trend kontrolü yapılamadı: {weekly_info['error']}")
+                        # FIX (V6.2.1): timestamp Türkiye saatiyle
+                        record = {
+                            "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                            "ticker": ticker,
+                            "timeframe": interval,
+                            "price": round(float(last_price_line), 4),
+                            "setup_score": int(plan.setup_score),
+                            "timing_score": int(plan.timing_score),
+                            "total_score": int(plan.total_score),
+                            "status_tag": plan.status_tag,
+                            "minervini5_ok": bool(plan.minervini5_ok),
+                            "rsi_direction": plan.rsi_direction_label,
+                            "dist_to_52w_high_pct": round(float(plan.dist_to_52w_high_pct), 2) if np.isfinite(plan.dist_to_52w_high_pct) else "",
+                            "high_vol_warning": plan.high_vol_warning,
+                            "entry_low": round(float(plan.entry_low), 4),
+                            "entry_high": round(float(plan.entry_high), 4),
+                            "stop": round(float(plan.stop), 4),
+                            "tp1": round(float(plan.tp1), 4),
+                            "tp2": round(float(plan.tp2), 4),
+                            "rr_tp1": round(float(plan.rr_tp1), 4) if np.isfinite(plan.rr_tp1) else "",
+                            "rr_tp2": round(float(plan.rr_tp2), 4) if np.isfinite(plan.rr_tp2) else "",
+                            "capacity": plan.capacity_level,
+                        }
+                        st.session_state.daily_tests.append(record)
+                        try:
+                            save_to_history(record)
+                        except Exception as e:
+                            st.warning(f"history.csv yazılamadı: {e}")
 
-                    # NEW (V6.3): Piyasa rejimi uyarısı
-                    if mh.get("swing_ok") is False:
-                        st.error(f"🔴 **Piyasa Rejimi (SPY):** {mh.get('detail', '')}")
-                    elif str(mh.get("regime", "")).startswith("🟡"):
-                        st.warning(f"🟡 **Piyasa Rejimi (SPY):** {mh.get('detail', '')}")
-
-                    # NEW (V6.3): Bilanço uyarısı — gece gap'i stop'a saygı duymaz
-                    if earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
-                        st.error(
-                            f"📅 **Yaklaşan Bilanço:** {earn['date']} ({earn['days']} gün sonra) — "
-                            f"gece açılan gap stop koruması tanımaz. Swing girişini buna göre planla "
-                            f"veya bilanço sonrasını bekle."
-                        )
-                    elif earn.get("date"):
-                        st.caption(f"📅 Sonraki bilanço: {earn['date']} ({earn['days']} gün sonra) — kaynak: {earn.get('source', '?')}")
-                    elif check_earnings and earn.get("error"):
-                        st.caption(f"ℹ️ Bilanço verisi alınamadı (mevcut API planında olmayabilir): {earn['error']}")
-
-                    col_baz, col_kir = st.columns(2)
-                    _intraday_note = "" if interval_label == "Günlük (1day)" else " · Aktif timeframe bazlı"
-                    with col_baz:
-                        st.metric(
-                            "Dar Baz",
-                            "✅ Tespit Edildi" if plan.base_detected else "— Yok",
-                            help=f"Son 20 barda ATR daralması + hacim kuruması birlikte varsa baz oluşmuştur (referans: son {BASE_REF_WINDOW} bar).{_intraday_note}"
-                        )
-                    with col_kir:
-                        st.metric(
-                            "Pivot Kırılımı",
-                            "✅ Kırıldı + Hacim" if plan.breakout_detected else "— Yok",
-                            help=f"Son 20 barın zirvesi kırıldı + hacim 50g ortalamasının %140 üstünde.{_intraday_note}"
-                        )
-                    if interval_label != "Günlük (1day)":
-                        st.caption("ℹ️ Dar baz ve pivot kırılımı aktif timeframe'e göre hesaplanır — günlük değil.")
-
-                    col_rsi, col_52w = st.columns(2)
-                    with col_rsi:
-                        st.metric(
-                            f"RSI Yönü (Son {RSI_MOMENTUM_LOOKBACK} Bar)",
-                            plan.rsi_direction_label,
-                            help="RSI yükseliyorsa momentum artıyor, düşüyorsa zayıflıyor."
-                        )
-                    with col_52w:
-                        dist_label = f"%{plan.dist_to_52w_high_pct:.1f} uzakta" if np.isfinite(plan.dist_to_52w_high_pct) else "—"
-                        st.metric("52W Zirveye Uzaklık", dist_label)
-
-                    st.caption(
-                        f"Minervini #5: 52W dip={plan.low_52w:.2f} → "
-                        f"{'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'} | "
-                        f"Kapasite: {plan.capacity_level}"
-                    )
-
-                    # NEW (V6.3): MTF Özet — haftalık setup + günlük timing tek ekranda
-                    if show_mtf:
-                        st.subheader("🧭 MTF Özet (Haftalık + Günlük)")
-                        if mtf.get("error"):
-                            st.caption(f"ℹ️ MTF hesaplanamadı: {mtf['error']}")
-                        elif mtf:
-                            cM1, cM2, cM3, cM4 = st.columns(4)
-                            cM1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
-                            cM2.metric("Haftalık Durum", mtf["w_status"])
-                            cM3.metric("Günlük Timing", f"{mtf['d_timing']} / 100")
-                            cM4.metric("Günlük Durum", mtf["d_status"])
-                            if mtf["verdict_kind"] == "success":
-                                st.success(mtf["verdict"])
-                            elif mtf["verdict_kind"] == "warning":
-                                st.warning(mtf["verdict"])
-                            else:
-                                st.error(mtf["verdict"])
-                            st.info(
-                                f"🔔 **Bu haftanın alarm bandı (haftalık EMA20–EMA50):** "
-                                f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}  |  "
-                                f"**Günlük teyit bandı:** {mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"
-                            )
+                        st.divider()
+                        st.subheader("📊 Strateji Özeti")
+                        colm1, colm2, colm3 = st.columns(3)
+                        with colm1:
+                            st.metric("Güncel Fiyat", f"{float(last_price_line):.2f}")
+                            st.metric("Durum", plan.status_tag)
+                        with colm2:
+                            st.metric("Toplam Skor", f"{plan.total_score} / 100")
+                            st.metric("Setup / Timing", f"{plan.setup_score} / {plan.timing_score}")
+                        with colm3:
+                            st.metric("Stop (Aktif)", f"{plan.stop:.2f}")
+                            st.metric("TP1 / TP2", f"{plan.tp1:.2f} / {plan.tp2:.2f}")
                             st.caption(
-                                "İş akışı: haftalık alarm bandına fiyat alarmı kur → alarm çalınca "
-                                "günlük durum 🟢 ise teyitli giriş ara. Haftalık bant her hafta kayar — "
-                                "alarmları hafta kapanışında yenile."
+                                f"Yapısal: {plan.debug.get('stop_structural', float('nan')):.2f} | "
+                                f"Noise: {plan.debug.get('stop_noise', float('nan')):.2f} | "
+                                f"Cap: %{plan.debug.get('stop_debug', {}).get('max_risk_pct', 7):.0f}"
                             )
 
-                    st.subheader("🏁 Liderlik (Hacim + RS)")
-                    cL1, cL2, cL3, cL4 = st.columns(4)
-                    cL1.metric("Liderlik", str(lead.get("leader_label", "—")))
-                    rsr = lead.get("rs_rating", np.nan)
-                    cL2.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—")
-                    cL3.metric("RS Yeni Zirve (60g)", "✅" if lead.get("rs_new_high_60d") else "—")
-                    d52 = lead.get("dist_to_52w_high_pct", np.nan)
-                    cL4.metric("52W Zirve Uzaklık", f"%{d52:.1f}" if np.isfinite(d52) else "—")
+                        if plan.high_vol_warning:
+                            st.warning(
+                                f"⚠️ **Yüksek Volatilite:** Stop cap devreye girdi. "
+                                f"ATR% yüksek — gerçek yapısal stop daha aşağıda. Pozisyon boyunu küçült."
+                            )
 
-                    with st.expander("Detay (Hacim/RS)", expanded=False):
-                        dr = lead.get("dryup_ratio", np.nan)
-                        st.write({
-                            "Hacim Kuruması": "✅" if lead.get("dryup_ok") else "—",
-                            "Kuruma Oranı (10g/50g)": f"{dr:.2f}" if np.isfinite(dr) else "—",
-                            "Kırılım Hacmi": "✅" if lead.get("breakout_ok") else "—",
-                            "Endekse Üstünlük 3A": f"{lead.get('edge_3m'):+.1f}%" if np.isfinite(lead.get('edge_3m', np.nan)) else "—",
-                            "Endekse Üstünlük 6A": f"{lead.get('edge_6m'):+.1f}%" if np.isfinite(lead.get('edge_6m', np.nan)) else "—",
-                            "Endekse Üstünlük 12A": f"{lead.get('edge_12m'):+.1f}%" if np.isfinite(lead.get('edge_12m', np.nan)) else "—",
+                        # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse UI'da uyarı
+                        if plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
+                            st.info(
+                                "ℹ️ **TP2 Notu:** TP2, 3.5R zemin garantisi nedeniyle tarihsel "
+                                "cap'in (momentum/52W tavanı) üzerine yükseltildi. Bu hedefi "
+                                "temkinli değerlendir — R/R oranı bu durumda kendi kendini doğrular."
+                            )
+
+                        if weekly_info.get("warning"):
+                            st.warning(weekly_info["warning"])
+                        # FIX (V6.2.1): Weekly kontrol hatası artık görünür
+                        if weekly_info.get("error"):
+                            st.caption(f"ℹ️ Weekly trend kontrolü yapılamadı: {weekly_info['error']}")
+
+                        # NEW (V6.3): Piyasa rejimi uyarısı
+                        if mh.get("swing_ok") is False:
+                            st.error(f"🔴 **Piyasa Rejimi (SPY):** {mh.get('detail', '')}")
+                        elif str(mh.get("regime", "")).startswith("🟡"):
+                            st.warning(f"🟡 **Piyasa Rejimi (SPY):** {mh.get('detail', '')}")
+
+                        # NEW (V6.3): Bilanço uyarısı — gece gap'i stop'a saygı duymaz
+                        if earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
+                            st.error(
+                                f"📅 **Yaklaşan Bilanço:** {earn['date']} ({earn['days']} gün sonra) — "
+                                f"gece açılan gap stop koruması tanımaz. Swing girişini buna göre planla "
+                                f"veya bilanço sonrasını bekle."
+                            )
+                        elif earn.get("date"):
+                            st.caption(f"📅 Sonraki bilanço: {earn['date']} ({earn['days']} gün sonra) — kaynak: {earn.get('source', '?')}")
+                        elif check_earnings and earn.get("error"):
+                            st.caption(f"ℹ️ Bilanço verisi alınamadı (mevcut API planında olmayabilir): {earn['error']}")
+
+                        col_baz, col_kir = st.columns(2)
+                        _intraday_note = "" if interval_label == "Günlük (1day)" else " · Aktif timeframe bazlı"
+                        with col_baz:
+                            st.metric(
+                                "Dar Baz",
+                                "✅ Tespit Edildi" if plan.base_detected else "— Yok",
+                                help=f"Son 20 barda ATR daralması + hacim kuruması birlikte varsa baz oluşmuştur (referans: son {BASE_REF_WINDOW} bar).{_intraday_note}"
+                            )
+                        with col_kir:
+                            st.metric(
+                                "Pivot Kırılımı",
+                                "✅ Kırıldı + Hacim" if plan.breakout_detected else "— Yok",
+                                help=f"Son 20 barın zirvesi kırıldı + hacim 50g ortalamasının %140 üstünde.{_intraday_note}"
+                            )
+                        if interval_label != "Günlük (1day)":
+                            st.caption("ℹ️ Dar baz ve pivot kırılımı aktif timeframe'e göre hesaplanır — günlük değil.")
+
+                        col_rsi, col_52w = st.columns(2)
+                        with col_rsi:
+                            st.metric(
+                                f"RSI Yönü (Son {RSI_MOMENTUM_LOOKBACK} Bar)",
+                                plan.rsi_direction_label,
+                                help="RSI yükseliyorsa momentum artıyor, düşüyorsa zayıflıyor."
+                            )
+                        with col_52w:
+                            dist_label = f"%{plan.dist_to_52w_high_pct:.1f} uzakta" if np.isfinite(plan.dist_to_52w_high_pct) else "—"
+                            st.metric("52W Zirveye Uzaklık", dist_label)
+
+                        st.caption(
+                            f"Minervini #5: 52W dip={plan.low_52w:.2f} → "
+                            f"{'✅ geçiyor' if plan.minervini5_ok else '❌ geçmiyor'} | "
+                            f"Kapasite: {plan.capacity_level}"
+                        )
+
+                        # NEW (V6.3): MTF Özet — haftalık setup + günlük timing tek ekranda
+                        if show_mtf:
+                            st.subheader("🧭 MTF Özet (Haftalık + Günlük)")
+                            if mtf.get("error"):
+                                st.caption(f"ℹ️ MTF hesaplanamadı: {mtf['error']}")
+                            elif mtf:
+                                cM1, cM2, cM3, cM4 = st.columns(4)
+                                cM1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
+                                cM2.metric("Haftalık Durum", mtf["w_status"])
+                                cM3.metric("Günlük Timing", f"{mtf['d_timing']} / 100")
+                                cM4.metric("Günlük Durum", mtf["d_status"])
+                                if mtf["verdict_kind"] == "success":
+                                    st.success(mtf["verdict"])
+                                elif mtf["verdict_kind"] == "warning":
+                                    st.warning(mtf["verdict"])
+                                else:
+                                    st.error(mtf["verdict"])
+                                st.info(
+                                    f"🔔 **Bu haftanın alarm bandı (haftalık EMA20–EMA50):** "
+                                    f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}  |  "
+                                    f"**Günlük teyit bandı:** {mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"
+                                )
+                                st.caption(
+                                    "İş akışı: haftalık alarm bandına fiyat alarmı kur → alarm çalınca "
+                                    "günlük durum 🟢 ise teyitli giriş ara. Haftalık bant her hafta kayar — "
+                                    "alarmları hafta kapanışında yenile."
+                                )
+
+                        st.subheader("🏁 Liderlik (Hacim + RS)")
+                        cL1, cL2, cL3, cL4 = st.columns(4)
+                        cL1.metric("Liderlik", str(lead.get("leader_label", "—")))
+                        rsr = lead.get("rs_rating", np.nan)
+                        cL2.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—")
+                        cL3.metric("RS Yeni Zirve (60g)", "✅" if lead.get("rs_new_high_60d") else "—")
+                        d52 = lead.get("dist_to_52w_high_pct", np.nan)
+                        cL4.metric("52W Zirve Uzaklık", f"%{d52:.1f}" if np.isfinite(d52) else "—")
+
+                        with st.expander("Detay (Hacim/RS)", expanded=False):
+                            dr = lead.get("dryup_ratio", np.nan)
+                            st.write({
+                                "Hacim Kuruması": "✅" if lead.get("dryup_ok") else "—",
+                                "Kuruma Oranı (10g/50g)": f"{dr:.2f}" if np.isfinite(dr) else "—",
+                                "Kırılım Hacmi": "✅" if lead.get("breakout_ok") else "—",
+                                "Endekse Üstünlük 3A": f"{lead.get('edge_3m'):+.1f}%" if np.isfinite(lead.get('edge_3m', np.nan)) else "—",
+                                "Endekse Üstünlük 6A": f"{lead.get('edge_6m'):+.1f}%" if np.isfinite(lead.get('edge_6m', np.nan)) else "—",
+                                "Endekse Üstünlük 12A": f"{lead.get('edge_12m'):+.1f}%" if np.isfinite(lead.get('edge_12m', np.nan)) else "—",
+                            })
+
+                        st.subheader("📌 İşlem Planı")
+                        table = pd.DataFrame({
+                            "Parametre": ["Giriş Bölgesi", "Giriş Mesafesi", "Stop", "TP1", "TP2", "R/R (TP1)", "R/R (TP2)", "Kapasite"],
+                            "Değer": [
+                                f"{plan.entry_low:.2f} – {plan.entry_high:.2f}",
+                                f"{plan.dist_to_entry_pct:+.2f}%",
+                                f"{plan.stop:.2f}",
+                                f"{plan.tp1:.2f}",
+                                f"{plan.tp2:.2f}",
+                                f"1 : {plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—",
+                                f"1 : {plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—",
+                                plan.capacity_level,
+                            ],
                         })
+                        st.table(table)
 
-                    st.subheader("📌 İşlem Planı")
-                    table = pd.DataFrame({
-                        "Parametre": ["Giriş Bölgesi", "Giriş Mesafesi", "Stop", "TP1", "TP2", "R/R (TP1)", "R/R (TP2)", "Kapasite"],
-                        "Değer": [
-                            f"{plan.entry_low:.2f} – {plan.entry_high:.2f}",
-                            f"{plan.dist_to_entry_pct:+.2f}%",
-                            f"{plan.stop:.2f}",
-                            f"{plan.tp1:.2f}",
-                            f"{plan.tp2:.2f}",
-                            f"1 : {plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—",
-                            f"1 : {plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—",
-                            plan.capacity_level,
-                        ],
-                    })
-                    st.table(table)
+                        st.subheader("🧠 Skor Dağılımı")
+                        b = plan.breakdown
+                        bdf = pd.DataFrame({
+                            "Bileşen": [
+                                "Trend", "Fiyat/EMA150", "Momentum (RSI)",
+                                "Volatilite (ATR%)", "Uzama (EMA50)",
+                                "52W Zirve Yakınlığı", "RSI Yönü", "Dar Baz (bonus)", "Pivot Kırılımı (bonus)"
+                            ],
+                            "Puan": [
+                                b.trend_stack, b.price_vs_ema150, b.momentum_rsi,
+                                b.volatility_atr, b.extension_vs_ema50,
+                                b.near_52w_high, b.rsi_direction, b.base_bonus, b.breakout_bonus
+                            ],
+                            "Maks": [30, 20, 20, 15, 15, 10, 5, 7, 8],
+                        })
+                        st.table(bdf)
+                        st.caption("Toplam 130 maks → 100'e normalize edilir. Dar baz (+7), pivot kırılımı (+8) bonus puandır. RSI yönü (+5 / 0 / -5) skora dahildir. Minervini #5 geçmezse tavan 55.")
 
-                    st.subheader("🧠 Skor Dağılımı")
-                    b = plan.breakdown
-                    bdf = pd.DataFrame({
-                        "Bileşen": [
-                            "Trend", "Fiyat/EMA150", "Momentum (RSI)",
-                            "Volatilite (ATR%)", "Uzama (EMA50)",
-                            "52W Zirve Yakınlığı", "RSI Yönü", "Dar Baz (bonus)", "Pivot Kırılımı (bonus)"
-                        ],
-                        "Puan": [
-                            b.trend_stack, b.price_vs_ema150, b.momentum_rsi,
-                            b.volatility_atr, b.extension_vs_ema50,
-                            b.near_52w_high, b.rsi_direction, b.base_bonus, b.breakout_bonus
-                        ],
-                        "Maks": [30, 20, 20, 15, 15, 10, 5, 7, 8],
-                    })
-                    st.table(bdf)
-                    st.caption("Toplam 130 maks → 100'e normalize edilir. Dar baz (+7), pivot kırılımı (+8) bonus puandır. RSI yönü (+5 / 0 / -5) skora dahildir. Minervini #5 geçmezse tavan 55.")
+                        st.subheader("🧭 Senaryo")
+                        st.write(plan.scenario)
 
-                    st.subheader("🧭 Senaryo")
-                    st.write(plan.scenario)
+                        st.subheader("📝 Otomatik Teknik Yorum")
+                        st.markdown(plan.narrative)
 
-                    st.subheader("📝 Otomatik Teknik Yorum")
-                    st.markdown(plan.narrative)
+                        if show_quote and q:
+                            st.subheader("⚡ Quote (Anlık Özet)")
+                            keys = ["symbol", "name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]
+                            compact = {k: q[k] for k in keys if k in q}
+                            st.write(compact)
 
-                    if show_quote and q:
-                        st.subheader("⚡ Quote (Anlık Özet)")
-                        keys = ["symbol", "name", "exchange", "currency", "price", "close", "change", "percent_change", "previous_close"]
-                        compact = {k: q[k] for k in keys if k in q}
-                        st.write(compact)
+                        st.subheader("🧩 İşlem Yönetimi (Eldeki Hisse)")
+                        st.caption("Stop asla gevşetilmez.")
 
-                    st.subheader("🧩 İşlem Yönetimi (Eldeki Hisse)")
-                    st.caption("Stop asla gevşetilmez.")
+                        if ticker not in st.session_state.trade_mgmt:
+                            st.session_state.trade_mgmt[ticker] = {
+                                "entry": float(plan.entry_mid),
+                                "stop": float(plan.stop),
+                                "tp1": float(plan.tp1),
+                                "tp2": float(plan.tp2),
+                            }
 
-                    if ticker not in st.session_state.trade_mgmt:
-                        st.session_state.trade_mgmt[ticker] = {
-                            "entry": float(plan.entry_mid),
-                            "stop": float(plan.stop),
-                            "tp1": float(plan.tp1),
-                            "tp2": float(plan.tp2),
-                        }
+                        mg = st.session_state.trade_mgmt[ticker].copy()
 
-                    mg = st.session_state.trade_mgmt[ticker].copy()
+                        with st.form(key=f"mgmt_form_{ticker}", clear_on_submit=False):
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                entry_in = st.number_input("Entry (maliyet/plan giriş)", value=float(mg.get("entry", plan.entry_mid)), step=0.01, format="%.2f")
+                                stop_in = st.number_input("Stop (mevcut)", value=float(mg.get("stop", plan.stop)), step=0.01, format="%.2f")
+                            with c2:
+                                tp1_in = st.number_input("TP1 (mevcut)", value=float(mg.get("tp1", plan.tp1)), step=0.01, format="%.2f")
+                                tp2_in = st.number_input("TP2 (mevcut)", value=float(mg.get("tp2", plan.tp2)), step=0.01, format="%.2f")
 
-                    with st.form(key=f"mgmt_form_{ticker}", clear_on_submit=False):
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            entry_in = st.number_input("Entry (maliyet/plan giriş)", value=float(mg.get("entry", plan.entry_mid)), step=0.01, format="%.2f")
-                            stop_in = st.number_input("Stop (mevcut)", value=float(mg.get("stop", plan.stop)), step=0.01, format="%.2f")
-                        with c2:
-                            tp1_in = st.number_input("TP1 (mevcut)", value=float(mg.get("tp1", plan.tp1)), step=0.01, format="%.2f")
-                            tp2_in = st.number_input("TP2 (mevcut)", value=float(mg.get("tp2", plan.tp2)), step=0.01, format="%.2f")
+                            submitted = st.form_submit_button("Kaydet / Güncelle", use_container_width=True)
 
-                        submitted = st.form_submit_button("Kaydet / Güncelle", use_container_width=True)
+                        if submitted:
+                            old_stop = float(mg.get("stop", plan.stop))
+                            new_stop = float(stop_in)
+                            if new_stop < old_stop:
+                                st.warning("Stop geri çekilemez. Eski stop korunuyor.")
+                                new_stop = old_stop
 
-                    if submitted:
-                        old_stop = float(mg.get("stop", plan.stop))
-                        new_stop = float(stop_in)
-                        if new_stop < old_stop:
-                            st.warning("Stop geri çekilemez. Eski stop korunuyor.")
-                            new_stop = old_stop
+                            st.session_state.trade_mgmt[ticker] = {
+                                "entry": float(entry_in),
+                                "stop": float(new_stop),
+                                "tp1": float(tp1_in),
+                                "tp2": float(tp2_in),
+                            }
+                            st.success("İşlem yönetimi değerleri kaydedildi.")
 
-                        st.session_state.trade_mgmt[ticker] = {
-                            "entry": float(entry_in),
-                            "stop": float(new_stop),
-                            "tp1": float(tp1_in),
-                            "tp2": float(tp2_in),
-                        }
-                        st.success("İşlem yönetimi değerleri kaydedildi.")
+                        mg = st.session_state.trade_mgmt[ticker]
+                        cur_price = float(last_price_line)
+                        entry0 = float(mg["entry"])
+                        stop0 = float(mg["stop"])
+                        tp1_0 = float(mg["tp1"])
+                        tp2_0 = float(mg["tp2"])
 
-                    mg = st.session_state.trade_mgmt[ticker]
-                    cur_price = float(last_price_line)
-                    entry0 = float(mg["entry"])
-                    stop0 = float(mg["stop"])
-                    tp1_0 = float(mg["tp1"])
-                    tp2_0 = float(mg["tp2"])
+                        suggestions = []
+                        if np.isfinite(cur_price) and np.isfinite(entry0) and entry0 > 0:
+                            move_pct = (cur_price - entry0) / entry0 * 100.0
+                            if move_pct >= 5.0:
+                                sug_stop = max(stop0, entry0)
+                                suggestions.append(f"Entry'ye göre %+{move_pct:.1f}. Stop'u en az **break-even** seviyesine çek: {sug_stop:.2f}")
 
-                    suggestions = []
-                    if np.isfinite(cur_price) and np.isfinite(entry0) and entry0 > 0:
-                        move_pct = (cur_price - entry0) / entry0 * 100.0
-                        if move_pct >= 5.0:
-                            sug_stop = max(stop0, entry0)
-                            suggestions.append(f"Entry'ye göre %+{move_pct:.1f}. Stop'u en az **break-even** seviyesine çek: {sug_stop:.2f}")
+                        if np.isfinite(tp1_0) and cur_price >= tp1_0:
+                            ema20_now = float(df.iloc[-1]["ema20"])
+                            ema50_now = float(df.iloc[-1]["ema50"])
+                            trail = max(stop0, min(cur_price * 0.995, max(ema20_now, ema50_now) * 0.995))
+                            suggestions.append(f"TP1 bölgesi: stop'u **EMA bazlı** yukarı taşı: {trail:.2f}")
 
-                    if np.isfinite(tp1_0) and cur_price >= tp1_0:
-                        ema20_now = float(df.iloc[-1]["ema20"])
-                        ema50_now = float(df.iloc[-1]["ema50"])
-                        trail = max(stop0, min(cur_price * 0.995, max(ema20_now, ema50_now) * 0.995))
-                        suggestions.append(f"TP1 bölgesi: stop'u **EMA bazlı** yukarı taşı: {trail:.2f}")
+                        if np.isfinite(tp2_0) and cur_price >= tp2_0:
+                            suggestions.append("TP2 bölgesi: Momentum bozulursa kısmi/çıkış; korunuyorsa trailing stop.")
 
-                    if np.isfinite(tp2_0) and cur_price >= tp2_0:
-                        suggestions.append("TP2 bölgesi: Momentum bozulursa kısmi/çıkış; korunuyorsa trailing stop.")
+                        if suggestions:
+                            st.info("**Yönetim Önerisi:**\n\n- " + "\n- ".join(suggestions))
+                        else:
+                            st.caption("Yönetim önerileri için fiyatın entry/TP seviyelerine yaklaşmasını bekle.")
 
-                    if suggestions:
-                        st.info("**Yönetim Önerisi:**\n\n- " + "\n- ".join(suggestions))
-                    else:
-                        st.caption("Yönetim önerileri için fiyatın entry/TP seviyelerine yaklaşmasını bekle.")
+                        st.subheader("📄 Rapor")
+                        pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None))
+                        st.download_button(
+                            label="Raporu PDF'e Çevir (İndir)",
+                            data=pdf_bytes,
+                            file_name=f"{ticker}_{interval}_rapor.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                        )
 
-                    st.subheader("📄 Rapor")
-                    pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None))
-                    st.download_button(
-                        label="Raporu PDF'e Çevir (İndir)",
-                        data=pdf_bytes,
-                        file_name=f"{ticker}_{interval}_rapor.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
+                        with st.expander("Detay (debug)"):
+                            st.json(plan.debug)
 
-                    with st.expander("Detay (debug)"):
-                        st.json(plan.debug)
-
-    with right:
-        st.subheader("Grafik")
-        if "__df" not in st.session_state:
-            st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
-        else:
-            df = st.session_state["__df"]
-            ticker = st.session_state["__ticker"]
-            plan = st.session_state["__plan"]
-            last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
-            fig = plot_chart(df, ticker, plan, last_price_line, show_candles, show_emas, show_line)
-            st.plotly_chart(fig, use_container_width=True)
+        with right:
+            st.subheader("Grafik")
+            if "__df" not in st.session_state:
+                st.info("Soldan ticker girip **Getir & Analiz Et** ile başla.")
+            else:
+                df = st.session_state["__df"]
+                ticker = st.session_state["__ticker"]
+                plan = st.session_state["__plan"]
+                last_price_line = float(st.session_state.get("__last_price_line", float(df.iloc[-1]["close"])))
+                fig = plot_chart(df, ticker, plan, last_price_line, show_candles, show_emas, show_line)
+                st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
@@ -3766,7 +3991,7 @@ with tab_portfolio:
                 )
 
                 st.markdown("### ⬇️ İndir")
-                title = "MinerWin – Portföy Analizi V6.3"
+                title = "MinerWin – Portföy Analizi V7.0"
                 pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64, mh=mh_pf)
                 xls_bytes = build_portfolio_excel_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars)
 
