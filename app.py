@@ -19,6 +19,18 @@
 #    düşürülür). Minervini prensibi: lider olmayan hisse aday bile değildir.
 #  ★ DAĞITIM GÜNÜ SAYIMI: SPY'da son 25 seansta fiyat ↓ + hacim ↑ günleri sayılır.
 #    ≥6 dağıtım günü → rejim 🟢'den 🟡'ya düşürülür (kurumsal satış erken uyarısı).
+#  ★ SWING KARAR RÖTUŞLARI (saha geri bildirimi):
+#    - Haftalık ⚫ UZAMIŞ ise karar 🟢 olamaz → bilgilendirici 🟡 (devam girişi
+#      kovalamadır; kullanıcının stratejisi haftalık banda pullback beklemektir)
+#    - 🟡 mesajları aktif takip planı içerir (alarm bandı + "alarmın kurulu kalsın")
+#    - Pozisyon boyutu: "hesaplanamadı" yerine gerçek sebep ("1 adet bile hedef
+#      riski aşıyor — bu hisse mevcut risk kuralınla alınamaz")
+#    - Teyit bandı bekleme durumlarında bağlamlı nota dönüşür (bugünkü değer,
+#      giriş gününde geçerli olmayacak uyarısıyla); sadece 🟢'de metrik kalır
+#  ★ PDF PROFESYONELLEŞTİRME (Seviye 1 — veri bütünlüğü):
+#    - Tek hisse: Pozisyon Boyutu satırı, MTF tablosuna RS Rating,
+#      KPI'lara Dağıtım Günü sayısı
+#    - Portföy: Açık Risk/Hesap %, En Büyük Pozisyon %, tabloya Aksiyon kolonu
 #
 # V6.3.3 Değişiklikleri (V6.3.2 üzerine):
 #  + PDF çıktıları V6.3 özellikleriyle senkronize edildi:
@@ -290,8 +302,11 @@ def position_size_calc(account_size: float, risk_pct: float, entry: float, stop:
         return out
     risk_amt = account_size * (risk_pct / 100.0)
     per_share_risk = entry - stop
+    out["per_share_risk"] = float(per_share_risk)
     shares = int(risk_amt // per_share_risk)
     if shares <= 0:
+        # NEW (V7.0): 1 adet bile hedef riski aşıyor — sessiz NaN yerine sebep döndür
+        out["reason"] = "risk_exceeds"
         return out
     cost = shares * entry
     if cost > account_size:
@@ -755,6 +770,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
 
         weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
         daily_green = d_plan.status_tag.startswith("🟢")
+        # NEW (V7.0): Haftalık UZAMIŞ → 🟢 verilmez. Kullanıcının stratejisi
+        # haftalık banda pullback beklemek; uzamıştan devam girişi kovalamadır.
+        w_extended = w_plan.status_tag.startswith("⚫")
         rs_weak = np.isfinite(rs_rating) and rs_rating < 60
         rs_very_weak = np.isfinite(rs_rating) and rs_rating < 45
 
@@ -764,12 +782,15 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         elif not weekly_ok:
             verdict = "🔴 UZAK DUR — haftalık trend teyitsiz, alarm kurmaya bile değmez"
             verdict_kind = "error"
-        elif daily_green and not rs_weak:
-            verdict = "🟢 SİNYAL — haftalık trend + günlük timing + göreli güç uyumlu"
-            verdict_kind = "success"
+        elif daily_green and w_extended:
+            verdict = "🟡 İZLE — günlük timing uygun AMA haftalık UZAMIŞ: devam girişi kovalamadır, haftalık banda pullback bekle"
+            verdict_kind = "warning"
         elif daily_green and rs_weak:
             verdict = f"🟡 İZLE — timing uygun ama RS Rating {rs_rating:.0f} (<60): lider adayı değil, seçici ol"
             verdict_kind = "warning"
+        elif daily_green:
+            verdict = "🟢 SİNYAL — haftalık trend + günlük timing + göreli güç uyumlu"
+            verdict_kind = "success"
         else:
             verdict = "🟡 İZLE — haftalık uygun, günlük timing bekleniyor (alarm bandını takip et)"
             verdict_kind = "warning"
@@ -782,6 +803,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "verdict": verdict, "verdict_kind": verdict_kind,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
             "rs_rating": rs_rating,
+            "w_extended": w_extended,
             # NEW (V7.0): Swing Modu bu nesnelerden grafik ve plan çizer
             "_w_plan": w_plan, "_d_plan": d_plan,
             "_wdf": wdf, "_ddf": ddf,
@@ -2119,6 +2141,8 @@ def build_pdf_bytes_single(
     earn: dict | None = None,
     mh: dict | None = None,
     mtf: dict | None = None,
+    ps: dict | None = None,
+    risk_pct: float = float("nan"),
 ):
     fn, fn_bold = _setup_pdf_fonts()
     sty = _pdf_styles(fn, fn_bold)
@@ -2181,11 +2205,16 @@ def build_pdf_bytes_single(
     else:
         earn_txt = "—"
         earn_clr = _C_MID
+    # NEW (V7.0): Dağıtım günü sayısı — rejim kararının 'neden'i raporda görünür
+    dist_val = mh.get("dist_days") if mh else None
+    dist_txt = f"{dist_val} / 25" if dist_val is not None else "—"
+    dist_clr = _C_RED if (isinstance(dist_val, int) and dist_val >= 6) else (_C_AMBER if (isinstance(dist_val, int) and dist_val >= 4) else _C_MID)
     row3_items = [
         ("PİYASA REJİMİ (SPY)", regime_txt),
+        ("DAĞITIM GÜNÜ (25G)", dist_txt),
         ("SONRAKİ BİLANÇO", earn_txt),
     ]
-    story.append(_kpi_row(row3_items, sty, page_w, accent_colors=[regime_clr, earn_clr]))
+    story.append(_kpi_row(row3_items, sty, page_w, accent_colors=[regime_clr, dist_clr, earn_clr]))
     story.append(Spacer(1, 6))
 
     if plan.high_vol_warning:
@@ -2249,6 +2278,16 @@ def build_pdf_bytes_single(
         ["TP1  (R/R)",         f"{plan.tp1:.2f}  ({rr1})"],
         ["TP2  (R/R)",         f"{plan.tp2:.2f}  ({rr2})"],
     ]
+    # NEW (V7.0): Pozisyon boyutu — raporun cevaplamadığı son eyleme dönük soru
+    if ps is not None:
+        if np.isfinite(ps.get("shares", float("nan"))):
+            _rp = f" (hedef %{risk_pct:.2f})" if np.isfinite(risk_pct) else ""
+            plan_left.append([
+                "Pozisyon Boyutu",
+                f"{int(ps['shares'])} adet ≈ ${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{_rp}",
+            ])
+        elif ps.get("reason") == "risk_exceeds":
+            plan_left.append(["Pozisyon Boyutu", "ALINAMAZ — 1 adet bile hedef riski aşıyor"])
     plan_right = [
         ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
         ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
@@ -2279,6 +2318,7 @@ def build_pdf_bytes_single(
             ["Günlük Timing", f"{mtf['d_timing']} / 100"],
             ["Günlük Durum", _strip_emoji(str(mtf["d_status"]))],
             ["Karar", _strip_emoji(str(mtf["verdict"]))],
+            ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
             ["Haftalık Alarm Bandı (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
             ["Günlük Teyit Bandı", f"{mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"],
         ]
@@ -2766,6 +2806,7 @@ def build_portfolio_pdf_bytes(
     bars: int,
     logo_b64_str: str = "",
     mh: Dict[str, Any] | None = None,
+    account_size: float = 0.0,
 ) -> bytes:
     fn, fn_bold = _setup_pdf_fonts()
     st_styles = _pdf_styles(fn, fn_bold)
@@ -2811,7 +2852,11 @@ def build_portfolio_pdf_bytes(
     story.append(_kpi_row(row2, st_styles, page_w, accent_colors=[_C_GREEN, _C_RED, _C_AMBER]))
     story.append(Spacer(1, 5))
 
-    # NEW (V6.3.3): Piyasa rejimi KPI'ı
+    # NEW (V6.3.3 + V7.0): Piyasa rejimi + risk yüzdeleri KPI satırı
+    tor = kpis.get("total_open_risk", np.nan)
+    orp_txt = f"%{tor/account_size*100.0:.2f}" if (np.isfinite(tor) and account_size > 0) else "—"
+    mpp = kpis.get("max_pos_pct", np.nan)
+    mpp_txt = f"%{mpp:.1f}" if np.isfinite(mpp) else "—"
     if mh and mh.get("regime") and mh.get("regime") != "—":
         regime_txt = _strip_emoji(str(mh["regime"]))
         if mh.get("swing_ok") is True:
@@ -2822,8 +2867,15 @@ def build_portfolio_pdf_bytes(
             regime_clr = _C_AMBER
         story.append(_kpi_row(
             [("PİYASA REJİMİ (SPY)", regime_txt),
-             ("SPY KAPANIŞ", f"{mh.get('close', float('nan')):.2f}" if np.isfinite(mh.get("close", np.nan)) else "—")],
-            st_styles, page_w, accent_colors=[regime_clr, _C_ACCENT],
+             ("SPY KAPANIŞ", f"{mh.get('close', float('nan')):.2f}" if np.isfinite(mh.get("close", np.nan)) else "—"),
+             ("AÇIK RİSK / HESAP", orp_txt),
+             ("EN BÜYÜK POZİSYON", mpp_txt)],
+            st_styles, page_w, accent_colors=[regime_clr, _C_ACCENT, _C_AMBER, _C_ACCENT],
+        ))
+    else:
+        story.append(_kpi_row(
+            [("AÇIK RİSK / HESAP", orp_txt), ("EN BÜYÜK POZİSYON", mpp_txt)],
+            st_styles, page_w, accent_colors=[_C_AMBER, _C_ACCENT],
         ))
     story.append(Spacer(1, 6))
 
@@ -2835,7 +2887,7 @@ def build_portfolio_pdf_bytes(
         preferred_cols = [
             "Ticker", "Fiyat", "Qty", "Alış Ort.", "P&L %",
             "Stop", "TP1", "TP2", "Setup", "Timing",
-            "Durum", "Bilanço", "Liderlik", "RS Rating",
+            "Durum", "Bilanço", "Aksiyon", "Liderlik", "RS Rating",
             "52W Zirve Uzaklık %", "Blue Sky", "RSI Yönü",
         ]
         col_map = {
@@ -2864,7 +2916,7 @@ def build_portfolio_pdf_bytes(
         w_map = {
             "Ticker": 0.07, "Fiyat": 0.07, "Qty": 0.05, "Alış Ort.": 0.08,
             "P&L %": 0.06, "Stop": 0.07, "TP1": 0.07, "TP2": 0.07,
-            "Setup": 0.05, "Timing": 0.05, "Durum": 0.14, "Bilanço": 0.09, "Liderlik": 0.07,
+            "Setup": 0.05, "Timing": 0.05, "Durum": 0.13, "Bilanço": 0.08, "Aksiyon": 0.08, "Liderlik": 0.06,
             "RS Rating": 0.06, "52W Zirve Uzaklık %": 0.08,
             "Blue Sky": 0.05, "RSI Yönü": 0.06,
         }
@@ -3302,10 +3354,20 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
             rationale = "Haftalık trend sağlam ve fiyat günlük giriş bandında — plan aktif, aşağıdaki seviyelerle çalış."
         elif mtf["verdict_kind"] == "warning":
             st.warning(f"### {mtf['verdict']}")
-            rationale = (
-                f"Haftalık uygun; fiyat günlük giriş bandına {d_plan.dist_to_entry_pct:+.1f}% uzaklıkta — "
-                f"alarmı kur, bandı bekle."
-            )
+            # NEW (V7.0): 🟡 mesajları aktif takip planı içerir
+            if mtf.get("w_extended") and mtf.get("daily_green"):
+                _wh = mtf.get("w_entry_high", float("nan"))
+                _wdist = ((price - _wh) / _wh * 100.0) if (np.isfinite(_wh) and _wh > 0) else float("nan")
+                rationale = (
+                    f"Fiyat haftalık bandın %{_wdist:.1f} üstünde. Alarm bandı: "
+                    f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} — bu güçte hisseler "
+                    f"genelde birkaç haftada banda uğrar; alarmın kurulu kalsın, kovalamana gerek yok."
+                )
+            else:
+                rationale = (
+                    f"Haftalık uygun; fiyat günlük giriş bandına {d_plan.dist_to_entry_pct:+.1f}% uzaklıkta — "
+                    f"alarmı kur, bandı bekle."
+                )
         else:
             st.error(f"### {mtf['verdict']}")
             rationale = (
@@ -3344,11 +3406,25 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
 
     rr1 = f"1:{d_plan.rr_tp1:.2f}" if np.isfinite(d_plan.rr_tp1) else "—"
     rr2 = f"1:{d_plan.rr_tp2:.2f}" if np.isfinite(d_plan.rr_tp2) else "—"
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Teyit Bandı", f"{mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}")
-    p2.metric("Stop", f"{d_plan.stop:.2f}")
-    p3.metric("TP1", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
-    p4.metric("TP2", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
+    # NEW (V7.0): Teyit bandı sadece 🟢'de eyleme dönük metriktir;
+    # bekleme durumlarında bugünkü değeri gösteren bağlamlı nota dönüşür
+    # (giriş günü geldiğinde bant da inmiş olacak — bugünkü değer taşınamaz).
+    if mtf["verdict_kind"] == "success":
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Teyit Bandı", f"{mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}")
+        p2.metric("Stop", f"{d_plan.stop:.2f}")
+        p3.metric("TP1", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
+        p4.metric("TP2", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
+    else:
+        p2, p3, p4 = st.columns(3)
+        p2.metric("Stop (bugünkü)", f"{d_plan.stop:.2f}")
+        p3.metric("TP1 (bugünkü)", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
+        p4.metric("TP2 (bugünkü)", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
+        st.caption(
+            f"ℹ️ Günlük teyit bandı bugünkü değeriyle {mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f} — "
+            f"fiyat alarm bandına geldiğinde bu bant da inmiş olacak. "
+            f"Giriş günü analizi yeniden çalıştırıp GÜNCEL bandı ve seviyeleri kullan."
+        )
 
     if d_plan.high_vol_warning:
         st.warning("⚠️ Yüksek volatilite — stop cap devrede, pozisyon boyunu küçült.")
@@ -3365,8 +3441,17 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
             f"Referans: giriş = band ortası {d_plan.entry_mid:.2f}, stop = {d_plan.stop:.2f}. "
             f"Gerçek giriş fiyatınla yeniden hesapla."
         )
+    elif ps.get("reason") == "risk_exceeds" and acct_size > 0:
+        # NEW (V7.0): Değerli bilgiyi gizleme — 1 adet bile kurala sığmıyor
+        _pr = ps.get("per_share_risk", float("nan"))
+        _pr_pct = (_pr / acct_size * 100.0) if (np.isfinite(_pr) and acct_size > 0) else float("nan")
+        st.warning(
+            f"💰 **Bu hisse mevcut risk kuralınla ALINAMAZ:** 1 adet bile hedef riski aşıyor — "
+            f"adet başına risk ${_pr:,.0f} = hesabın %{_pr_pct:.2f}'i (hedefin: %{risk_pct:.2f}). "
+            f"Fiyat banda çekilip stop yaklaşırsa yeniden hesapla; ya da bu hisseyi izleme listende tut."
+        )
     elif acct_size > 0:
-        st.caption("Pozisyon boyutu hesaplanamadı (giriş/stop geçersiz veya risk çok küçük).")
+        st.caption("Pozisyon boyutu hesaplanamadı (giriş/stop geçersiz).")
 
     # ---------- 3) BİLANÇO ----------
     st.markdown("#### 3️⃣ Bilanço Kontrolü")
@@ -3400,6 +3485,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         ticker=t, interval_label="Günlük (1day) [Swing]", bars=bars_n,
         plan=d_plan, quote=None, logo_b64_str=logo_b64,
         earn=(earn if use_earnings else None), mh=mh, mtf=mtf,
+        ps=ps, risk_pct=risk_pct,
     )
     st.download_button(
         "📄 Swing Raporu (PDF) indir", data=pdf_bytes,
@@ -3739,6 +3825,12 @@ with tab_single:
                                 f"💰 **Pozisyon Boyutu:** {int(ps_adv['shares'])} adet ≈ ${ps_adv['cost']:,.0f}  |  "
                                 f"Risk: ${ps_adv['risk_amt']:,.0f} (hedef %{risk_pct_per_trade:.2f}){cap_note}"
                             )
+                        elif ps_adv.get("reason") == "risk_exceeds" and account_size > 0:
+                            _pr = ps_adv.get("per_share_risk", float("nan"))
+                            st.warning(
+                                f"💰 **Alınamaz:** 1 adet bile hedef riski aşıyor — adet başına risk "
+                                f"${_pr:,.0f} = hesabın %{_pr/account_size*100:.2f}'i (hedef %{risk_pct_per_trade:.2f})."
+                            )
 
                         st.subheader("🧠 Skor Dağılımı")
                         b = plan.breakdown
@@ -3838,7 +3930,7 @@ with tab_single:
                             st.caption("Yönetim önerileri için fiyatın entry/TP seviyelerine yaklaşmasını bekle.")
 
                         st.subheader("📄 Rapor")
-                        pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None))
+                        pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None), ps=ps_adv, risk_pct=risk_pct_per_trade)
                         st.download_button(
                             label="Raporu PDF'e Çevir (İndir)",
                             data=pdf_bytes,
@@ -4151,7 +4243,7 @@ with tab_portfolio:
 
                 st.markdown("### ⬇️ İndir")
                 title = "MinerWin – Portföy Analizi V7.0"
-                pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64, mh=mh_pf)
+                pdf_bytes = build_portfolio_pdf_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars, logo_b64_str=logo_b64, mh=mh_pf, account_size=account_size)
                 xls_bytes = build_portfolio_excel_bytes(title=title, out=out, kpis=kpis, interval_label=interval_label_pf, bars=bars)
 
                 d1, d2 = st.columns(2)
