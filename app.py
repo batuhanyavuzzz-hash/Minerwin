@@ -1906,7 +1906,7 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
     return story
 
 
-def _status_badge(status_tag: str, st_styles: dict, page_w: float) -> Table:
+def _status_badge(status_tag: str, st_styles: dict, page_w: float, label: str = "DURUM") -> Table:
     tag_lower = status_tag.lower()
     if "alim" in tag_lower or status_tag.startswith("🟢"):
         bg = _C_GREEN
@@ -1928,7 +1928,7 @@ def _status_badge(status_tag: str, st_styles: dict, page_w: float) -> Table:
         fontSize=10, leading=14, textColor=_C_WHITE,
     )
     tbl = Table(
-        [[Paragraph(f"<b>DURUM: {html.escape(status_clean)}</b>", badge_style)]],
+        [[Paragraph(f"<b>{html.escape(label)}: {html.escape(status_clean)}</b>", badge_style)]],
         colWidths=[page_w],
     )
     tbl.setStyle(TableStyle([
@@ -2170,7 +2170,19 @@ def build_pdf_bytes_single(
                 f"Tarih: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     story += _pdf_header_story(logo_b64_str, "MinerWin — Teknik Analiz Raporu", subtitle, sty, page_w)
 
-    story.append(_status_badge(plan.status_tag, sty, page_w))
+    # FIX (V7.0): Manşet, günlük durumu değil SWING KARARINI gösterir —
+    # ekranda çözülen "günlük yeşil ama karar sarı" çelişkisi PDF'te de çözüldü.
+    if mtf and mtf.get("verdict"):
+        story.append(_status_badge(str(mtf["verdict"]), sty, page_w, label="KARAR"))
+        story.append(Spacer(1, 4))
+        # Günlük durum ikincil bilgi olarak küçük satırda
+        story.append(Paragraph(
+            f"Günlük grafik durumu: {html.escape(_strip_emoji(plan.status_tag))}  |  "
+            f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}",
+            sty["small"],
+        ))
+    else:
+        story.append(_status_badge(plan.status_tag, sty, page_w))
     story.append(Spacer(1, 8))
 
     close_val = plan.debug.get("close", float("nan"))
@@ -2323,6 +2335,11 @@ def build_pdf_bytes_single(
             ["Günlük Timing", f"{mtf['d_timing']} / 100"],
             ["Günlük Durum", _strip_emoji(str(mtf["d_status"]))],
             ["Karar", _strip_emoji(str(mtf["verdict"]))],
+            ["Evre", _strip_emoji(_swing_phase(
+                plan.debug.get("close", float("nan")),
+                mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan")),
+                mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan")),
+            )) or "—"],
             ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
             ["Haftalık Alarm Bandı (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
             ["Günlük Teyit Bandı", f"{mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"],
