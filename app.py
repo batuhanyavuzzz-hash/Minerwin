@@ -27,6 +27,11 @@
 #      riski aşıyor — bu hisse mevcut risk kuralınla alınamaz")
 #    - Teyit bandı bekleme durumlarında bağlamlı nota dönüşür (bugünkü değer,
 #      giriş gününde geçerli olmayacak uyarısıyla); sadece 🟢'de metrik kalır
+#  ★ EVRE GÖSTERİMİ (saha geri bildirimi — "bantlar tutmuyor" karışıklığı):
+#    - Günlük grafiğe haftalık ALARM bandı turuncu gölge olarak çizilir
+#      (haftalık grafiğe de günlük bant) — iki bandın konumu tek bakışta
+#    - Karar kartına 📍 Evre satırı: geometri sözle anlatılır ("Uzamış — alarm
+#      %13 aşağıda", "ALARM BÖLGESİNDE — günlük 🟢 teyidi bekle" vb.)
 #  ★ PDF PROFESYONELLEŞTİRME (Seviye 1 — veri bütünlüğü):
 #    - Tek hisse: Pozisyon Boyutu satırı, MTF tablosuna RS Rating,
 #      KPI'lara Dağıtım Günü sayısı
@@ -2388,6 +2393,8 @@ def plot_chart(
     show_candles: bool,
     show_emas: bool,
     show_line: bool,
+    alarm_band: tuple | None = None,
+    alarm_label: str = "ALARM (haftalık)",
 ):
     if not (show_candles or show_emas or show_line):
         show_line = True
@@ -2423,6 +2430,21 @@ def plot_chart(
         annotation_text="ENTRY",
         annotation_position="top left",
     )
+    # NEW (V7.0): Haftalık alarm bandı ikinci gölge olarak çizilir —
+    # iki bandın birbirine göre konumu (evre) tek bakışta görünür.
+    if alarm_band is not None:
+        try:
+            ab_lo, ab_hi = float(alarm_band[0]), float(alarm_band[1])
+            if np.isfinite(ab_lo) and np.isfinite(ab_hi) and ab_hi > ab_lo:
+                fig.add_hrect(
+                    y0=ab_lo, y1=ab_hi,
+                    opacity=0.10, line_width=0,
+                    fillcolor="orange",
+                    annotation_text=alarm_label,
+                    annotation_position="bottom left",
+                )
+        except Exception:
+            pass
     fig.add_hline(y=plan.stop, line_dash="dash", annotation_text="STOP", annotation_position="bottom left")
     fig.add_hline(y=plan.tp1, line_dash="dash", annotation_text="TP1", annotation_position="top left")
     fig.add_hline(y=plan.tp2, line_dash="dash", annotation_text="TP2", annotation_position="top left")
@@ -3246,6 +3268,28 @@ with st.sidebar:
 # =========================================================
 # SWING MODU — NEW V7.0
 # =========================================================
+def _swing_phase(price: float, w_low: float, w_high: float,
+                 d_low: float, d_high: float) -> str:
+    """NEW (V7.0): İki bandın geometrisinden trend evresini türetir.
+    Dört sayının zihinde birleştirilmesi işini kullanıcıdan alır."""
+    vals = [price, w_low, w_high, d_low, d_high]
+    if not all(np.isfinite(v) for v in vals) or w_high <= 0 or d_high <= 0:
+        return ""
+    if price < w_low:
+        drop = (w_low - price) / w_low * 100.0
+        return f"Haftalık bandın %{drop:.1f} ALTINDA — trend hasarlı, alarm konusu değil"
+    if w_low <= price <= w_high:
+        return "🎯 ALARM BÖLGESİNDE — şimdi günlük durumun 🟢'ye dönmesini bekle (teyit)"
+    if d_low <= price <= d_high:
+        gap = (price - w_high) / w_high * 100.0
+        return f"Sığ pullback — fiyat günlük bantta tutundu (derin alarm bölgesi %{gap:.1f} aşağıda)"
+    if price < d_low:
+        gap = (price - w_high) / w_high * 100.0
+        return f"Derin pullback SÜRÜYOR — günlük bant kırıldı, alarm bölgesine %{gap:.1f} kaldı"
+    gap = (price - w_high) / w_high * 100.0
+    return f"Uzamış — alarm bölgesi %{gap:.1f} aşağıda; sabır evresi"
+
+
 def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                       acct_size: float = 0.0, risk_pct: float = 1.0):
     """Kullanıcının iş akışını tek ekranda yürüten sade görünüm:
@@ -3376,6 +3420,15 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
             )
         st.caption(rationale)
 
+    # NEW (V7.0): Evre satırı — iki bandın geometrisinin sözlü hali
+    phase = _swing_phase(
+        price,
+        mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan")),
+        mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan")),
+    )
+    if phase:
+        st.markdown(f"📍 **Evre:** {phase}")
+
     st.divider()
 
     # ---------- 1) HAFTALIK ----------
@@ -3473,10 +3526,22 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
     st.markdown("#### 📈 Grafik")
     sw_tf = st.radio("Grafik zaman dilimi", ["Günlük", "Haftalık"], horizontal=True, key="sw_chart_tf")
     if sw_tf == "Günlük":
-        fig = plot_chart(mtf["_ddf"], t, d_plan, price, show_candles, show_emas, show_line)
+        # NEW (V7.0): Günlük grafikte haftalık ALARM bandı ikinci gölge —
+        # iki bandın konumu (evre) tek bakışta görünür
+        fig = plot_chart(
+            mtf["_ddf"], t, d_plan, price, show_candles, show_emas, show_line,
+            alarm_band=(mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))),
+            alarm_label="ALARM (haftalık)",
+        )
     else:
         w_last = float(mtf["_wdf"].iloc[-1]["close"])
-        fig = plot_chart(mtf["_wdf"], t, w_plan, w_last, show_candles, show_emas, show_line)
+        # Haftalık grafikte ENTRY gölgesi zaten alarm bandıdır; günlük bant
+        # ikinci gölge olarak eklenir (bugünkü değeriyle, kayacağı bilinerek)
+        fig = plot_chart(
+            mtf["_wdf"], t, w_plan, w_last, show_candles, show_emas, show_line,
+            alarm_band=(mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan"))),
+            alarm_label="GÜNLÜK bant (bugünkü)",
+        )
     st.plotly_chart(fig, use_container_width=True)
     st.caption("Tetik anında 'göz muayenesi' için Haftalık'a geç: baz düzgün mü, son haftalık mum nasıl kapanmış?")
 
