@@ -32,6 +32,13 @@
 #      (haftalık grafiğe de günlük bant) — iki bandın konumu tek bakışta
 #    - Karar kartına 📍 Evre satırı: geometri sözle anlatılır ("Uzamış — alarm
 #      %13 aşağıda", "ALARM BÖLGESİNDE — günlük 🟢 teyidi bekle" vb.)
+#  ★ HÜKÜM KARTI + TUTARLILIK (saha geri bildirimi — "çıktılar çelişmesin"):
+#    İlke: BİR HİSSE, BİR KARAR, HER YERDE AYNI SES.
+#    - Swing en üstte net hüküm: KARAR + Neden + Alarm. Alarm dili düzeltildi:
+#      alım seviyesi DEĞİL, yeniden analiz tetiği (filtre giriş ANINDA geçilir)
+#    - Pozisyon fişi hükme tabi: karar 🟢 değilse adet verilmez (ekran + PDF)
+#    - PDF senaryosu hükme hizalı; İşlem Planı "bugünkü referans" etiketli
+#    - Gelişmiş modun en üstünde aynı Swing hükmü — mod farkı ses farkı değil
 #  ★ PDF PROFESYONELLEŞTİRME (Seviye 1 — veri bütünlüğü):
 #    - Tek hisse: Pozisyon Boyutu satırı, MTF tablosuna RS Rating,
 #      KPI'lara Dağıtım Günü sayısı
@@ -2285,7 +2292,12 @@ def build_pdf_bytes_single(
         story.append(earn_warn_tbl)
         story.append(Spacer(1, 6))
 
-    story += _section_header("İşlem Planı", sty, page_w)
+    # V7.0: Hüküm giriş vermiyorsa plan "bugünkü referans"tır — emir değil kayıt
+    _hold = bool(mtf) and mtf.get("verdict_kind") in ("warning", "error")
+    story += _section_header(
+        "İşlem Planı (bugünkü referans — giriş günü yeniden hesaplanır)" if _hold else "İşlem Planı",
+        sty, page_w,
+    )
     rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
     rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
 
@@ -2297,7 +2309,12 @@ def build_pdf_bytes_single(
     ]
     # NEW (V7.0): Pozisyon boyutu — raporun cevaplamadığı son eyleme dönük soru
     if ps is not None:
-        if np.isfinite(ps.get("shares", float("nan"))):
+        if ps.get("suppressed"):
+            plan_left.append([
+                "Pozisyon Boyutu",
+                "Boyutlama yapılmaz — karar giriş vermiyor (giriş günü güncel stop ile hesaplanır)",
+            ])
+        elif np.isfinite(ps.get("shares", float("nan"))):
             _rp = f" (hedef %{risk_pct:.2f})" if np.isfinite(risk_pct) else ""
             plan_left.append([
                 "Pozisyon Boyutu",
@@ -2362,8 +2379,29 @@ def build_pdf_bytes_single(
     ]
     story.append(_score_bar_table(score_items, sty, page_w))
 
-    story += _section_header("Senaryo", sty, page_w)
-    scenario_clean = plan.scenario.replace("**", "")
+    # V7.0: Senaryo metni hükümle çelişemez — karar giriş vermiyorsa günlük
+    # grafiğin "girilebilir" iması yerine hükme hizalı plan yazılır.
+    if _hold:
+        _whi = mtf.get("w_entry_high", float("nan")) if mtf else float("nan")
+        if mtf.get("verdict_kind") == "warning":
+            if np.isfinite(_whi):
+                scenario_src = (
+                    f"Karar İZLE: bugün giriş yok. Alarm {_whi:.2f} — çaldığında bu bir alım emri değil, "
+                    f"yeniden analiz çağrısıdır: hisse o gün hâlâ filtreden geçiyorsa ve günlük teyit gelirse "
+                    f"giriş aranır; pullback yapıyı bozmuşsa aday listeden düşer."
+                )
+            else:
+                scenario_src = "Karar İZLE: bugün giriş yok. Koşullar oluştuğunda analiz yeniden çalıştırılır."
+        else:
+            scenario_src = (
+                "Karar UZAK DUR: hisse stratejinin filtresinden geçmiyor. Alarm/giriş planı yok; "
+                "trend ve göreli güç koşulları düzelirse yeniden değerlendirilir."
+            )
+        story += _section_header("Plan (hükme hizalı)", sty, page_w)
+    else:
+        scenario_src = plan.scenario
+        story += _section_header("Senaryo", sty, page_w)
+    scenario_clean = scenario_src.replace("**", "")
     scen_tbl = Table(
         [[Paragraph(html.escape(scenario_clean), sty["body"])]],
         colWidths=[page_w],
@@ -3406,36 +3444,70 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
             st.error("🔴 Piyasa rejimi zayıf — aşağıdaki karar ne olursa olsun, bu ortamda yeni alım önerilmez.")
         st.divider()
 
-    # ---------- KARAR KARTI ----------
-    hc1, hc2 = st.columns([0.3, 0.7])
+    # ---------- HÜKÜM KARTI (V7.0 — saha geri bildirimi) ----------
+    # En üstte NET HÜKÜM: uygun mu, neden, alarm nereye. Alarm bir ALIM
+    # SEVİYESİ değil, YENİDEN ANALİZ tetiğidir — Minervini filtresi giriş
+    # ANINDA geçilmek zorundadır, bugünden peşin sayılmaz.
+    hc1, hc2 = st.columns([0.28, 0.72])
     hc1.metric(f"{t} — Fiyat", f"{price:.2f}")
-    with hc2:
-        if mtf["verdict_kind"] == "success":
-            st.success(f"### {mtf['verdict']}")
-            rationale = "Haftalık trend sağlam ve fiyat günlük giriş bandında — plan aktif, aşağıdaki seviyelerle çalış."
-        elif mtf["verdict_kind"] == "warning":
-            st.warning(f"### {mtf['verdict']}")
-            # NEW (V7.0): 🟡 mesajları aktif takip planı içerir
-            if mtf.get("w_extended") and mtf.get("daily_green"):
-                _wh = mtf.get("w_entry_high", float("nan"))
-                _wdist = ((price - _wh) / _wh * 100.0) if (np.isfinite(_wh) and _wh > 0) else float("nan")
-                rationale = (
-                    f"Fiyat haftalık bandın %{_wdist:.1f} üstünde. Alarm bandı: "
-                    f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} — bu güçte hisseler "
-                    f"genelde birkaç haftada banda uğrar; alarmın kurulu kalsın, kovalamana gerek yok."
-                )
-            else:
-                rationale = (
-                    f"Haftalık uygun; fiyat günlük giriş bandına {d_plan.dist_to_entry_pct:+.1f}% uzaklıkta — "
-                    f"alarmı kur, bandı bekle."
-                )
-        else:
-            st.error(f"### {mtf['verdict']}")
-            rationale = (
-                f"Haftalık setup {mtf['w_setup']}/100 ve durum '{_strip_emoji(str(mtf['w_status']))}' — "
-                f"büyük trend teyitsizken günlük sinyalin anlamı yok."
+
+    _vk = mtf["verdict_kind"]
+    _rsr = mtf.get("rs_rating", float("nan"))
+    _w_lo = mtf.get("w_entry_low", float("nan"))
+    _w_hi = mtf.get("w_entry_high", float("nan"))
+    _setup_txt = f"haftalık setup {mtf['w_setup']}/100" + (f", RS {_rsr:.0f}" if np.isfinite(_rsr) else "")
+    _in_alarm_zone = (np.isfinite(price) and np.isfinite(_w_lo) and np.isfinite(_w_hi)
+                      and _w_lo <= price <= _w_hi)
+
+    if _vk == "success":
+        neden = f"Filtre ✓ ({_setup_txt}) ve fiyat günlük giriş bandında — teyit tamam."
+        alarm_line = (
+            f"✅ **Giriş penceresi AKTİF** — teyit bandı {mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}, "
+            f"stop {d_plan.stop:.2f}. Alarm gerekmez."
+        )
+    elif _vk == "warning":
+        if mtf.get("w_extended") and mtf.get("daily_green"):
+            _wdist = ((price - _w_hi) / _w_hi * 100.0) if (np.isfinite(_w_hi) and _w_hi > 0) else float("nan")
+            neden = (
+                f"Setup BUGÜN filtreden geçiyor ({_setup_txt}) AMA fiyat haftalık bandın "
+                f"%{_wdist:.1f} üstünde — kovalama bölgesi."
             )
-        st.caption(rationale)
+        elif np.isfinite(_rsr) and _rsr < 60 and mtf.get("daily_green"):
+            neden = f"Zamanlama uygun ama RS {_rsr:.0f} (<60) — lider filtresi sınırda; sadece en güçlü adaylar."
+        else:
+            neden = (
+                f"Filtre ✓ ({_setup_txt}); fiyat günlük giriş bandına "
+                f"{d_plan.dist_to_entry_pct:+.1f}% uzaklıkta — zamanlama bekleniyor."
+            )
+        if _in_alarm_zone:
+            alarm_line = (
+                "🎯 **Alarm bölgesindesin** — şimdi GÜNLÜK teyidin (🟢) gelmesini bekle. "
+                "Teyit gelmeden giriş yok; yapı bozulursa aday düşer."
+            )
+        else:
+            alarm_line = (
+                f"🔔 **Alarm: {_w_hi:.2f}** (haftalık bandın üstü). Çaldığında bu bir ALIM EMRİ DEĞİL, "
+                f"yeniden analiz çağrısıdır — hisse o gün hâlâ filtreden geçiyorsa VE günlük teyit "
+                f"gelirse giriş aranır; pullback yapıyı bozmuşsa aday listeden düşer."
+            )
+    else:
+        if np.isfinite(_rsr) and _rsr < 45:
+            neden = f"RS {_rsr:.0f} — endekse karşı belirgin zayıf; stratejinin lider filtresinden geçmiyor."
+        else:
+            neden = (
+                f"Haftalık trend teyitsiz (setup {mtf['w_setup']}/100, durum "
+                f"'{_strip_emoji(str(mtf['w_status']))}') — filtreden geçmiyor."
+            )
+        alarm_line = (
+            "🚫 Alarm önerilmez — hisse şu an stratejine aday değil. Trend/RS koşulları "
+            "düzelirse analiz alarm seviyesini kendisi gösterir."
+        )
+
+    with hc2:
+        _box = st.success if _vk == "success" else (st.warning if _vk == "warning" else st.error)
+        _box(f"### {mtf['verdict']}")
+        st.markdown(f"**Neden:** {neden}")
+        st.markdown(alarm_line)
 
     # NEW (V7.0): Evre satırı — iki bandın geometrisinin sözlü hali
     phase = _swing_phase(
@@ -3460,8 +3532,8 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
     )
     if mtf["weekly_ok"]:
         st.info(
-            f"🔔 **Alarmını buraya kur:** {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} "
-            f"(haftalık EMA20–EMA50 bandı)"
+            f"🔔 **Alarm bandı (haftalık EMA20–EMA50):** {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} — "
+            f"alarm = yeniden analiz çağrısı, alım emri değil."
         )
         st.caption("Bant her hafta kayar — alarmları hafta kapanışında yenile.")
     else:
@@ -3501,8 +3573,17 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
     if d_plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
         st.caption("ℹ️ TP2, 3.5R zemin garantisiyle tarihsel tavanın üzerine yükseltildi — temkinli değerlendir.")
 
-    # NEW (V7.0): Pozisyon boyutu — soyut riski somut adete çevirir
-    ps = position_size_calc(acct_size, risk_pct, d_plan.entry_mid, d_plan.stop)
+    # NEW (V7.0): Pozisyon boyutu HÜKME TABİDİR — karar giriş vermiyorsa
+    # alışveriş fişi kesilmez; "İZLE" derken "4 adet al" fısıldanmaz.
+    if _vk != "success":
+        ps = {"suppressed": True}
+        if acct_size > 0:
+            st.caption(
+                "💰 Boyutlama yapılmaz — karar giriş vermiyor. "
+                "Giriş günü geldiğinde güncel stop ile otomatik hesaplanır."
+            )
+    else:
+        ps = position_size_calc(acct_size, risk_pct, d_plan.entry_mid, d_plan.stop)
     if np.isfinite(ps.get("shares", np.nan)):
         cap_note = " · ⚠️ hesap sınırına takıldı (gerçekleşen risk hedefin altında)" if ps["capped"] else ""
         st.info(
@@ -3746,6 +3827,16 @@ with tab_single:
                             st.warning(f"history.csv yazılamadı: {e}")
 
                         st.divider()
+                        # V7.0: TEK SES — Swing hükmü Gelişmiş modda da en üsttedir;
+                        # altındaki her şey bu hükmün ham verisi olarak okunur.
+                        if mtf and mtf.get("verdict"):
+                            _vk_adv = mtf.get("verdict_kind")
+                            if _vk_adv == "success":
+                                st.success(f"**SWING KARARI:** {mtf['verdict']}")
+                            elif _vk_adv == "warning":
+                                st.warning(f"**SWING KARARI:** {mtf['verdict']}")
+                            else:
+                                st.error(f"**SWING KARARI:** {mtf['verdict']}")
                         st.subheader("📊 Strateji Özeti")
                         colm1, colm2, colm3 = st.columns(3)
                         with colm1:
@@ -3899,8 +3990,14 @@ with tab_single:
                         })
                         st.table(table)
 
-                        # NEW (V7.0): Pozisyon boyutu (Gelişmiş mod)
-                        ps_adv = position_size_calc(account_size, risk_pct_per_trade, plan.entry_mid, plan.stop)
+                        # NEW (V7.0): Pozisyon boyutu (Gelişmiş mod) — Swing hükmüne tabi
+                        _verdict_green = bool(mtf) and mtf.get("verdict_kind") == "success"
+                        if show_mtf and mtf and not _verdict_green:
+                            ps_adv = {"suppressed": True}
+                            if account_size > 0:
+                                st.caption("💰 Boyutlama yapılmaz — Swing kararı giriş vermiyor (giriş günü hesaplanır).")
+                        else:
+                            ps_adv = position_size_calc(account_size, risk_pct_per_trade, plan.entry_mid, plan.stop)
                         if np.isfinite(ps_adv.get("shares", np.nan)):
                             cap_note = " · ⚠️ hesap sınırına takıldı" if ps_adv["capped"] else ""
                             st.info(
@@ -3934,6 +4031,12 @@ with tab_single:
 
                         st.subheader("🧭 Senaryo")
                         st.write(plan.scenario)
+                        # V7.0 TEK SES: Senaryo günlük grafiğin okumasıdır — hükümle çelişemez
+                        if show_mtf and mtf and not mtf.get("error") and mtf.get("verdict_kind") in ("warning", "error"):
+                            st.caption(
+                                "ℹ️ Not: Bu senaryo GÜNLÜK grafiğin kendi okumasıdır — "
+                                "nihai hüküm yukarıdaki SWING KARARI'dır."
+                            )
 
                         st.subheader("📝 Otomatik Teknik Yorum")
                         st.markdown(plan.narrative)
