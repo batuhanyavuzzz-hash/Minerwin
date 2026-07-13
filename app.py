@@ -1,6 +1,17 @@
 # app.py
 # MinerWin — Tek Hisse + Portföy Analiz (V7.0) — Twelve Data + Finnhub
 #
+# V7.1 Değişiklikleri (V7.0 üzerine — OMURGA REFAKTÖRÜ):
+#  ★ ANAYASA: (1) Haftalık=KAPI, günlük=TETİK — kapı kapalıyken günlük karar
+#    dili hiç konuşmaz (UI+PDF+grafik). (2) Alarm=haftalık bant, her durumda
+#    görünür. (3) Günlüğün tek görevi alarm sonrası teyit. (4) Pozisyon YÖNETİMİ
+#    kapıya tabi değildir. (5) RET≠BEKLEMEDE: "aday değil" / "aday, fiyat
+#    bekleniyor". (6) Program DANIŞMANDIR: emir dili yok, veri saklanmaz.
+#  ★ gate alanı (RET/BEKLEMEDE/ACIK) tüm sunumu yönetir; RS<45=RET,
+#    RS 45-60 artık veto değil bilgi notu. Emir dili tamamen söküldü
+#    (UZAK DUR / kovalamadır / ALINAMAZ / Boyutlama yapılmaz → tarif dili).
+#  ★ Bellek önlemi: tüm cache'lere max_entries sınırı (Cloud çökmelerine karşı).
+#
 # V7.0 Değişiklikleri (V6.3.3 üzerine — ARAYÜZ YENİLEME):
 #  ★ SWING MODU (yeni varsayılan görünüm): Kullanıcının gerçek iş akışını
 #    tek ekranda yürütür — zaman dilimi seçimi YOK, kafa karışıklığı YOK:
@@ -212,7 +223,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V7.0</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V7.1</div>
 """,
     unsafe_allow_html=True,
 )
@@ -443,7 +454,7 @@ def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2
     raise RuntimeError(f"TwelveData rate limit: {_sanitize_err(last_msg)}")
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=64)
 def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
     return _td_get(
         "time_series",
@@ -458,7 +469,7 @@ def td_time_series(symbol: str, interval: str, outputsize: int) -> dict:
     )
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=64)
 def td_quote(symbol: str) -> dict:
     return _td_get(
         "quote",
@@ -507,13 +518,13 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
 # =========================================================
 # GÜNLÜK VERİ / 52W
 # =========================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=32)
 def _fetch_daily_df(symbol: str, outputsize: int = 320) -> pd.DataFrame:
     payload = td_time_series(symbol, "1day", int(outputsize))
     return parse_ohlcv(payload)
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, max_entries=32)
 def _fetch_weekly_df(symbol: str, outputsize: int = 60) -> pd.DataFrame:
     """Weekly veri çeker — weekly trend kontrolü için kullanılır."""
     payload = td_time_series(symbol, "1week", int(outputsize))
@@ -549,7 +560,7 @@ def check_weekly_trend(symbol: str) -> Dict[str, Any]:
 # =========================================================
 # BİLANÇO (EARNINGS) — NEW V6.3
 # =========================================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, max_entries=64)
 def td_earnings(symbol: str) -> dict:
     """Twelve Data /earnings — sembolün geçmiş + yaklaşan bilanço tarihleri.
     Not: Free planda bu endpoint desteklenmeyebilir; çağıran taraf hatayı
@@ -561,7 +572,7 @@ def td_earnings(symbol: str) -> dict:
     )
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, max_entries=64)
 def finnhub_earnings(symbol: str) -> dict:
     """NEW (V6.3.2): Finnhub earnings calendar — Twelve Data /earnings planda
     yoksa yedek kaynak. Bugünden +120 güne kadarki bilanço tarihlerini çeker."""
@@ -782,29 +793,44 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
 
         weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
         daily_green = d_plan.status_tag.startswith("🟢")
-        # NEW (V7.0): Haftalık UZAMIŞ → 🟢 verilmez. Kullanıcının stratejisi
-        # haftalık banda pullback beklemek; uzamıştan devam girişi kovalamadır.
         w_extended = w_plan.status_tag.startswith("⚫")
         rs_weak = np.isfinite(rs_rating) and rs_rating < 60
         rs_very_weak = np.isfinite(rs_rating) and rs_rating < 45
 
+        # ================= OMURGA (V7.1) =================
+        # 1) Haftalık = kapı, günlük = tetik. Kapı kapalıyken günlük karar
+        #    dili HİÇ konuşmaz (UI ve PDF bu 'gate' alanına göre gizler).
+        # 2) Alarm = haftalık bant; her durumda gösterilir.
+        # 5) RET ≠ BEKLEMEDE: retde "aday değil", uzamışta "aday, fiyat bekleniyor".
+        # 6) Program danışmandır: emir dili yok, durum anlatılır.
+        # RS<45 kalite kriteridir (RET); RS 45-60 sadece bilgi notudur.
+        _wlo, _whi = w_plan.entry_low, w_plan.entry_high
+        rs_note = f" · Not: RS {rs_rating:.0f} — endekse görece zayıf" if rs_weak and not rs_very_weak else ""
+
         if rs_very_weak:
-            verdict = f"🔴 UZAK DUR — RS Rating {rs_rating:.0f}: endekse karşı belirgin zayıf, lider değil"
+            gate = "RET"
+            verdict = (f"Aday değil — RS Rating {rs_rating:.0f}: hisse endekse karşı belirgin zayıf. "
+                       f"Kalite kriteri sağlanmıyor.")
             verdict_kind = "error"
         elif not weekly_ok:
-            verdict = "🔴 UZAK DUR — haftalık trend teyitsiz, alarm kurmaya bile değmez"
+            gate = "RET"
+            verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
+                       f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
-        elif daily_green and w_extended:
-            verdict = "🟡 İZLE — günlük timing uygun AMA haftalık UZAMIŞ: devam girişi kovalamadır, haftalık banda pullback bekle"
-            verdict_kind = "warning"
-        elif daily_green and rs_weak:
-            verdict = f"🟡 İZLE — timing uygun ama RS Rating {rs_rating:.0f} (<60): lider adayı değil, seçici ol"
+        elif w_extended:
+            gate = "BEKLEMEDE"
+            verdict = (f"Aday — haftalık yapı kriterlerden geçiyor (setup {w_plan.setup_score}/100). "
+                       f"Fiyat haftalık bandın üstünde; giriş bölgesinde değil. "
+                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
             verdict_kind = "warning"
         elif daily_green:
-            verdict = "🟢 SİNYAL — haftalık trend + günlük timing + göreli güç uyumlu"
+            gate = "ACIK"
+            verdict = (f"Giriş koşulları oluşmuş — haftalık yapı uygun, günlük teyit mevcut.{rs_note}")
             verdict_kind = "success"
         else:
-            verdict = "🟡 İZLE — haftalık uygun, günlük timing bekleniyor (alarm bandını takip et)"
+            gate = "ACIK"
+            verdict = (f"Aday — haftalık uygun; günlük teyit henüz oluşmadı. "
+                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
             verdict_kind = "warning"
 
         out.update({
@@ -813,6 +839,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "d_timing": d_plan.timing_score, "d_status": d_plan.status_tag,
             "d_entry_low": d_plan.entry_low, "d_entry_high": d_plan.entry_high,
             "verdict": verdict, "verdict_kind": verdict_kind,
+            "gate": gate,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
             "rs_rating": rs_rating,
             "w_extended": w_extended,
@@ -1586,7 +1613,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     elif status_tag.startswith(("🟡", "🔵")):
         timing_cmd = "BEKLE / İZLE"
     else:
-        timing_cmd = "UZAK DUR / ŞARTLAR OLUŞSUN"
+        timing_cmd = "GİRİŞ KOŞULLARI OLUŞMADI"
 
     if status_tag.startswith("🟢"):
         scenario = (
@@ -2177,17 +2204,23 @@ def build_pdf_bytes_single(
                 f"Tarih: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     story += _pdf_header_story(logo_b64_str, "MinerWin — Teknik Analiz Raporu", subtitle, sty, page_w)
 
-    # FIX (V7.0): Manşet, günlük durumu değil SWING KARARINI gösterir —
-    # ekranda çözülen "günlük yeşil ama karar sarı" çelişkisi PDF'te de çözüldü.
+    # OMURGA (V7.1): Manşet = tek anlatım. Kapı kapalıyken günlük durum
+    # alt satırda dahi görünmez (günlük karar dili taşır).
+    _gate = mtf.get("gate") if mtf else None
+    _closed = _gate in ("RET", "BEKLEMEDE")
+    # OMURGA #1 (PDF): Kapı kapalıyken rapor HAFTALIK plan üzerinden anlatılır —
+    # günlük timing/skor/plan PDF'te de konuşmaz (Timing 100/100 şizofrenisi biter).
+    if _closed and mtf and mtf.get("_w_plan") is not None:
+        plan = mtf["_w_plan"]
     if mtf and mtf.get("verdict"):
-        story.append(_status_badge(str(mtf["verdict"]), sty, page_w, label="KARAR"))
+        story.append(_status_badge(str(mtf["verdict"]), sty, page_w, label="DURUM"))
         story.append(Spacer(1, 4))
-        # Günlük durum ikincil bilgi olarak küçük satırda
-        story.append(Paragraph(
-            f"Günlük grafik durumu: {html.escape(_strip_emoji(plan.status_tag))}  |  "
-            f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}",
-            sty["small"],
-        ))
+        if _gate == "ACIK":
+            sub_line = (f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}  |  "
+                        f"Günlük: {html.escape(_strip_emoji(plan.status_tag))}")
+        else:
+            sub_line = f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}"
+        story.append(Paragraph(sub_line, sty["small"]))
     else:
         story.append(_status_badge(plan.status_tag, sty, page_w))
     story.append(Spacer(1, 8))
@@ -2207,12 +2240,21 @@ def build_pdf_bytes_single(
     story.append(_kpi_row(row1_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, _C_ACCENT]))
     story.append(Spacer(1, 5))
 
-    row2_items = [
-        ("SETUP SKORU",   f"{plan.setup_score} / 100"),
-        ("TIMING SKORU",  f"{plan.timing_score} / 100"),
-        ("MİNERVİNİ #5",  min5_str),
-    ]
-    story.append(_kpi_row(row2_items, sty, page_w, accent_colors=[_C_ACCENT, _C_ACCENT, min5_clr]))
+    if _closed:
+        row2_items = [
+            ("HAFTALIK SETUP", f"{plan.setup_score} / 100"),
+            ("KAPI", "KAPALI — RET" if _gate == "RET" else "KAPALI — BEKLEMEDE"),
+            ("MİNERVİNİ #5",  min5_str),
+        ]
+        _row2_clr = [_C_ACCENT, (_C_RED if _gate == "RET" else _C_AMBER), min5_clr]
+    else:
+        row2_items = [
+            ("SETUP SKORU",   f"{plan.setup_score} / 100"),
+            ("TIMING SKORU",  f"{plan.timing_score} / 100"),
+            ("MİNERVİNİ #5",  min5_str),
+        ]
+        _row2_clr = [_C_ACCENT, _C_ACCENT, min5_clr]
+    story.append(_kpi_row(row2_items, sty, page_w, accent_colors=_row2_clr))
     story.append(Spacer(1, 5))
 
     # NEW (V6.3.3): Piyasa rejimi + sonraki bilanço KPI satırı
@@ -2294,73 +2336,96 @@ def build_pdf_bytes_single(
 
     # V7.0: Hüküm giriş vermiyorsa plan "bugünkü referans"tır — emir değil kayıt
     _hold = bool(mtf) and mtf.get("verdict_kind") in ("warning", "error")
-    story += _section_header(
-        "İşlem Planı (bugünkü referans — giriş günü yeniden hesaplanır)" if _hold else "İşlem Planı",
-        sty, page_w,
-    )
-    rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
-    rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
+    # OMURGA #1 (PDF): Kapı kapalıyken İşlem Planı basılmaz — günlük giriş/stop/TP
+    # karar dilidir. Yerine yalnız referans seviyeler tablosu gelir.
+    if _closed:
+        story += _section_header("Referans Seviyeler", sty, page_w)
+        _ref_rows = [
+            ["Haftalık Bant — alarm buraya kurulur",
+             f"{mtf.get('w_entry_low', float('nan')):.2f} – {mtf.get('w_entry_high', float('nan')):.2f}"],
+            ["52W Dip",           f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
+            ["52W Zirve Uzaklık", f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
+        ]
+        story.append(_data_table(["Parametre", "Değer"], _ref_rows, sty,
+                                 [page_w*0.40, page_w*0.60]))
+    else:
+        story += _section_header(
+            "İşlem Planı (bugünkü referans — giriş günü yeniden hesaplanır)" if _hold else "İşlem Planı",
+            sty, page_w,
+        )
+        rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
+        rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
 
-    plan_left = [
-        ["Giriş Bölgesi",      f"{plan.entry_low:.2f} — {plan.entry_high:.2f}"],
-        ["Stop",               f"{plan.stop:.2f}"],
-        ["TP1  (R/R)",         f"{plan.tp1:.2f}  ({rr1})"],
-        ["TP2  (R/R)",         f"{plan.tp2:.2f}  ({rr2})"],
-    ]
-    # NEW (V7.0): Pozisyon boyutu — raporun cevaplamadığı son eyleme dönük soru
-    if ps is not None:
-        if ps.get("suppressed"):
-            plan_left.append([
-                "Pozisyon Boyutu",
-                "Boyutlama yapılmaz — karar giriş vermiyor (giriş günü güncel stop ile hesaplanır)",
-            ])
-        elif np.isfinite(ps.get("shares", float("nan"))):
-            _rp = f" (hedef %{risk_pct:.2f})" if np.isfinite(risk_pct) else ""
-            plan_left.append([
-                "Pozisyon Boyutu",
-                f"{int(ps['shares'])} adet ≈ ${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{_rp}",
-            ])
-        elif ps.get("reason") == "risk_exceeds":
-            plan_left.append(["Pozisyon Boyutu", "ALINAMAZ — 1 adet bile hedef riski aşıyor"])
-    plan_right = [
-        ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
-        ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
-        ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
-        ["Pivot Kırılımı",     "Var" if plan.breakout_detected else "Yok"],
-    ]
+        plan_left = [
+            ["Giriş Bölgesi",      f"{plan.entry_low:.2f} — {plan.entry_high:.2f}"],
+            ["Stop",               f"{plan.stop:.2f}"],
+            ["TP1  (R/R)",         f"{plan.tp1:.2f}  ({rr1})"],
+            ["TP2  (R/R)",         f"{plan.tp2:.2f}  ({rr2})"],
+        ]
+        # NEW (V7.0): Pozisyon boyutu — raporun cevaplamadığı son eyleme dönük soru
+        if ps is not None:
+            if ps.get("suppressed"):
+                plan_left.append([
+                    "Pozisyon Boyutu",
+                    "Günlük giriş planı kapalı (haftalık kapı) — giriş günü güncel değerlerle hesaplanır",
+                ])
+            elif np.isfinite(ps.get("shares", float("nan"))):
+                _rp = f" (hedef %{risk_pct:.2f})" if np.isfinite(risk_pct) else ""
+                plan_left.append([
+                    "Pozisyon Boyutu",
+                    f"{int(ps['shares'])} adet ≈ ${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{_rp}",
+                ])
+            elif ps.get("reason") == "risk_exceeds":
+                plan_left.append(["Pozisyon Boyutu",
+                                  "1 adet dahi hedef risk bütçesinin üstünde (adet başına risk hedefi aşıyor)"])
+        plan_right = [
+            ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
+            ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
+            ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
+            ["Pivot Kırılımı",     "Var" if plan.breakout_detected else "Yok"],
+        ]
 
-    half_w = page_w * 0.48
-    gap_w  = page_w * 0.04
-    tbl_left  = _data_table(["Parametre", "Değer"], plan_left,  sty, [half_w*0.48, half_w*0.52])
-    tbl_right = _data_table(["Parametre", "Değer"], plan_right, sty, [half_w*0.48, half_w*0.52])
-    side_by_side = Table([[tbl_left, "", tbl_right]], colWidths=[half_w, gap_w, half_w])
-    side_by_side.setStyle(TableStyle([
-        ("VALIGN",       (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING",  (0,0), (-1,-1), 0),
-        ("RIGHTPADDING", (0,0), (-1,-1), 0),
-        ("TOPPADDING",   (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
-    ]))
-    story.append(side_by_side)
+        half_w = page_w * 0.48
+        gap_w  = page_w * 0.04
+        tbl_left  = _data_table(["Parametre", "Değer"], plan_left,  sty, [half_w*0.48, half_w*0.52])
+        tbl_right = _data_table(["Parametre", "Değer"], plan_right, sty, [half_w*0.48, half_w*0.52])
+        side_by_side = Table([[tbl_left, "", tbl_right]], colWidths=[half_w, gap_w, half_w])
+        side_by_side.setStyle(TableStyle([
+            ("VALIGN",       (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING",  (0,0), (-1,-1), 0),
+            ("RIGHTPADDING", (0,0), (-1,-1), 0),
+            ("TOPPADDING",   (0,0), (-1,-1), 0),
+            ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+        ]))
+        story.append(side_by_side)
 
     # NEW (V6.3.3): MTF Özet tablosu (haftalık + günlük)
     if mtf and not mtf.get("error") and "w_setup" in mtf:
         story += _section_header("MTF Özet (Haftalık + Günlük)", sty, page_w)
+        # OMURGA #1: günlük satırlar (timing, durum, teyit bandı, Evre'nin
+        # günlük referansı) yalnızca kapı AÇIKken tabloya girer.
         mtf_rows = [
             ["Haftalık Setup", f"{mtf['w_setup']} / 100"],
             ["Haftalık Durum", _strip_emoji(str(mtf["w_status"]))],
-            ["Günlük Timing", f"{mtf['d_timing']} / 100"],
-            ["Günlük Durum", _strip_emoji(str(mtf["d_status"]))],
-            ["Karar", _strip_emoji(str(mtf["verdict"]))],
-            ["Evre", _strip_emoji(_swing_phase(
+        ]
+        if not _closed:
+            mtf_rows += [
+                ["Günlük Timing", f"{mtf['d_timing']} / 100"],
+                ["Günlük Durum", _strip_emoji(str(mtf["d_status"]))],
+            ]
+        mtf_rows.append(["Durum", _strip_emoji(str(mtf["verdict"]))])
+        if not _closed:
+            mtf_rows.append(["Evre", _strip_emoji(_swing_phase(
                 plan.debug.get("close", float("nan")),
                 mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan")),
                 mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan")),
-            )) or "—"],
+            )) or "—"])
+        mtf_rows += [
             ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
-            ["Haftalık Alarm Bandı (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
-            ["Günlük Teyit Bandı", f"{mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"],
+            ["Haftalık Bant — alarm (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
         ]
+        if not _closed:
+            mtf_rows.append(["Günlük Teyit Bandı", f"{mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"])
         story.append(_data_table(["Parametre", "Değer"], mtf_rows, sty,
                                  [page_w*0.42, page_w*0.58]))
 
@@ -2386,18 +2451,19 @@ def build_pdf_bytes_single(
         if mtf.get("verdict_kind") == "warning":
             if np.isfinite(_whi):
                 scenario_src = (
-                    f"Karar İZLE: bugün giriş yok. Alarm {_whi:.2f} — çaldığında bu bir alım emri değil, "
-                    f"yeniden analiz çağrısıdır: hisse o gün hâlâ filtreden geçiyorsa ve günlük teyit gelirse "
-                    f"giriş aranır; pullback yapıyı bozmuşsa aday listeden düşer."
+                    f"Fiyat giriş bölgesinde değil; haftalık bant referansı {_whi:.2f}. "
+                    f"Fiyat banda geldiğinde analiz yenilenir: o gün haftalık kriterler korunuyor "
+                    f"ve günlük teyit oluşuyorsa giriş değerlendirilir; pullback yapıyı bozmuşsa "
+                    f"hisse adaylıktan çıkar."
                 )
             else:
-                scenario_src = "Karar İZLE: bugün giriş yok. Koşullar oluştuğunda analiz yeniden çalıştırılır."
+                scenario_src = "Fiyat giriş bölgesinde değil. Koşullar oluştuğunda analiz yenilenir."
         else:
             scenario_src = (
-                "Karar UZAK DUR: hisse stratejinin filtresinden geçmiyor. Alarm/giriş planı yok; "
-                "trend ve göreli güç koşulları düzelirse yeniden değerlendirilir."
+                "Hisse şu an kriterlerden geçmiyor (haftalık trend / göreli güç). "
+                "Haftalık bant raporda referans olarak yer alır; yapı düzeldiğinde yeniden değerlendirilir."
             )
-        story += _section_header("Plan (hükme hizalı)", sty, page_w)
+        story += _section_header("Plan", sty, page_w)
     else:
         scenario_src = plan.scenario
         story += _section_header("Senaryo", sty, page_w)
@@ -2519,7 +2585,7 @@ def plot_chart(
 # =========================================================
 # LİDERLİK MODÜLÜ
 # =========================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=32)
 def _fetch_spy_daily(outputsize: int = 320) -> pd.DataFrame:
     payload = td_time_series("SPY", "1day", int(outputsize))
     return parse_ohlcv(payload)
@@ -3347,11 +3413,14 @@ def _swing_phase(price: float, w_low: float, w_high: float,
 
 def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                       acct_size: float = 0.0, risk_pct: float = 1.0):
-    """Kullanıcının iş akışını tek ekranda yürüten sade görünüm:
-    Piyasa rejimi → Karar → Haftalık (alarm bandı) → Günlük (plan) → Bilanço.
-    Zaman dilimi seçimi yok — haftalık ve günlük otomatik yönetilir."""
+    """OMURGA (V7.1):
+    1) Haftalık = kapı, günlük = tetik — kapı kapalıyken günlük karar dili yok.
+    2) Alarm = haftalık bant; her durumda gösterilir.
+    3) Günlüğün tek görevi: alarm sonrası teyit.
+    5) RET ≠ BEKLEMEDE: farklı anlatım, ikisinde de günlük kapalı.
+    6) Program danışmandır: durum anlatılır, karar kullanıcıya bırakılır."""
     st.subheader("🎯 Swing Analiz")
-    st.caption("Haftalık karar → günlük teyit → bilanço kontrolü — tek akışta, zaman dilimi seçmeden.")
+    st.caption("Haftalık kapı → (geçtiyse) günlük tetik → bilanço notu.")
 
     c_in1, c_in2 = st.columns([0.68, 0.32], vertical_alignment="bottom")
     with c_in1:
@@ -3370,15 +3439,12 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                     mtf = build_mtf_summary(sw_ticker, low_52w, high_52w)
                     if mtf.get("error"):
                         raise RuntimeError(mtf["error"])
-
                     try:
                         mh = market_health_pack(_fetch_spy_daily(320))
                         st.session_state["__mh"] = mh
                     except Exception:
                         mh = {}
-
                     earn = next_earnings_info(sw_ticker) if use_earnings else {}
-
                     price = float(mtf["_ddf"].iloc[-1]["close"])
                     if use_quote:
                         try:
@@ -3387,14 +3453,11 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                                 price = float(q["price"])
                         except Exception:
                             pass
-
                     st.session_state["__sw"] = {
                         "ticker": sw_ticker, "mtf": mtf, "mh": mh,
                         "earn": earn, "price": price,
                         "ts": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M"),
                     }
-
-                    # Swing analizi de geçmişe yazılır (timeframe='swing')
                     d_plan = mtf["_d_plan"]
                     record = {
                         "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -3404,7 +3467,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "setup_score": int(mtf["w_setup"]),
                         "timing_score": int(mtf["d_timing"]),
                         "total_score": int(d_plan.total_score),
-                        "status_tag": mtf["verdict"],
+                        "status_tag": f"[{mtf.get('gate','?')}] {mtf['verdict']}",
                         "minervini5_ok": bool(d_plan.minervini5_ok),
                         "rsi_direction": d_plan.rsi_direction_label,
                         "dist_to_52w_high_pct": round(float(d_plan.dist_to_52w_high_pct), 2) if np.isfinite(d_plan.dist_to_52w_high_pct) else "",
@@ -3428,230 +3491,130 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
 
     sw = st.session_state.get("__sw")
     if not sw:
-        st.info("Yukarıya ticker girip **Analiz Et** ile başla. Program haftalık ve günlük grafiği senin yerine yönetir.")
+        st.info("Ticker girip **Analiz Et** ile başla.")
         return
 
     t = sw["ticker"]
     mtf, mh, earn, price = sw["mtf"], sw["mh"], sw["earn"], sw["price"]
     w_plan, d_plan = mtf["_w_plan"], mtf["_d_plan"]
+    gate = mtf.get("gate", "ACIK")
 
     st.divider()
 
-    # ---------- 0) Piyasa rejimi ----------
+    # ---- 0) Piyasa (bilgi) ----
     if mh:
         render_market_health(mh)
-        if mh.get("swing_ok") is False:
-            st.error("🔴 Piyasa rejimi zayıf — aşağıdaki karar ne olursa olsun, bu ortamda yeni alım önerilmez.")
         st.divider()
 
-    # ---------- HÜKÜM KARTI (V7.0 — saha geri bildirimi) ----------
-    # En üstte NET HÜKÜM: uygun mu, neden, alarm nereye. Alarm bir ALIM
-    # SEVİYESİ değil, YENİDEN ANALİZ tetiğidir — Minervini filtresi giriş
-    # ANINDA geçilmek zorundadır, bugünden peşin sayılmaz.
+    # ---- 1) DURUM — tek anlatım ----
     hc1, hc2 = st.columns([0.28, 0.72])
-    hc1.metric(f"{t} — Fiyat", f"{price:.2f}")
-
-    _vk = mtf["verdict_kind"]
-    _rsr = mtf.get("rs_rating", float("nan"))
-    _w_lo = mtf.get("w_entry_low", float("nan"))
-    _w_hi = mtf.get("w_entry_high", float("nan"))
-    _setup_txt = f"haftalık setup {mtf['w_setup']}/100" + (f", RS {_rsr:.0f}" if np.isfinite(_rsr) else "")
-    _in_alarm_zone = (np.isfinite(price) and np.isfinite(_w_lo) and np.isfinite(_w_hi)
-                      and _w_lo <= price <= _w_hi)
-
-    if _vk == "success":
-        neden = f"Filtre ✓ ({_setup_txt}) ve fiyat günlük giriş bandında — teyit tamam."
-        alarm_line = (
-            f"✅ **Giriş penceresi AKTİF** — teyit bandı {mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}, "
-            f"stop {d_plan.stop:.2f}. Alarm gerekmez."
-        )
-    elif _vk == "warning":
-        if mtf.get("w_extended") and mtf.get("daily_green"):
-            _wdist = ((price - _w_hi) / _w_hi * 100.0) if (np.isfinite(_w_hi) and _w_hi > 0) else float("nan")
-            neden = (
-                f"Setup BUGÜN filtreden geçiyor ({_setup_txt}) AMA fiyat haftalık bandın "
-                f"%{_wdist:.1f} üstünde — kovalama bölgesi."
-            )
-        elif np.isfinite(_rsr) and _rsr < 60 and mtf.get("daily_green"):
-            neden = f"Zamanlama uygun ama RS {_rsr:.0f} (<60) — lider filtresi sınırda; sadece en güçlü adaylar."
-        else:
-            neden = (
-                f"Filtre ✓ ({_setup_txt}); fiyat günlük giriş bandına "
-                f"{d_plan.dist_to_entry_pct:+.1f}% uzaklıkta — zamanlama bekleniyor."
-            )
-        if _in_alarm_zone:
-            alarm_line = (
-                "🎯 **Alarm bölgesindesin** — şimdi GÜNLÜK teyidin (🟢) gelmesini bekle. "
-                "Teyit gelmeden giriş yok; yapı bozulursa aday düşer."
-            )
-        else:
-            alarm_line = (
-                f"🔔 **Alarm: {_w_hi:.2f}** (haftalık bandın üstü). Çaldığında bu bir ALIM EMRİ DEĞİL, "
-                f"yeniden analiz çağrısıdır — hisse o gün hâlâ filtreden geçiyorsa VE günlük teyit "
-                f"gelirse giriş aranır; pullback yapıyı bozmuşsa aday listeden düşer."
-            )
-    else:
-        if np.isfinite(_rsr) and _rsr < 45:
-            neden = f"RS {_rsr:.0f} — endekse karşı belirgin zayıf; stratejinin lider filtresinden geçmiyor."
-        else:
-            neden = (
-                f"Haftalık trend teyitsiz (setup {mtf['w_setup']}/100, durum "
-                f"'{_strip_emoji(str(mtf['w_status']))}') — filtreden geçmiyor."
-            )
-        alarm_line = (
-            "🚫 Alarm önerilmez — hisse şu an stratejine aday değil. Trend/RS koşulları "
-            "düzelirse analiz alarm seviyesini kendisi gösterir."
-        )
-
+    hc1.metric(t, f"{price:.2f}")
     with hc2:
-        _box = st.success if _vk == "success" else (st.warning if _vk == "warning" else st.error)
-        _box(f"### {mtf['verdict']}")
-        st.markdown(f"**Neden:** {neden}")
-        st.markdown(alarm_line)
+        box = st.success if mtf["verdict_kind"] == "success" else (
+            st.warning if mtf["verdict_kind"] == "warning" else st.error)
+        box(f"**DURUM:** {mtf['verdict']}")
+        _wlo, _whi = mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))
+        if np.isfinite(_wlo) and np.isfinite(_whi) and _whi > 0:
+            if price > _whi:
+                st.caption(f"Fiyat haftalık bandın %{(price - _whi) / _whi * 100:.1f} üstünde.")
+            elif price < _wlo:
+                st.caption(f"Fiyat haftalık bandın %{(_wlo - price) / _wlo * 100:.1f} altında.")
+            else:
+                st.caption("Fiyat haftalık bandın içinde.")
 
-    # NEW (V7.0): Evre satırı — iki bandın geometrisinin sözlü hali
-    phase = _swing_phase(
-        price,
-        mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan")),
-        mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan")),
-    )
-    if phase:
-        st.markdown(f"📍 **Evre:** {phase}")
-
-    st.divider()
-
-    # ---------- 1) HAFTALIK ----------
-    st.markdown("#### 1️⃣ Haftalık — Büyük Resim")
+    # ---- 2) HAFTALIK — her zaman (OMURGA #2: alarm haftalığın malı) ----
+    st.markdown("#### Haftalık")
     w1, w2, w3 = st.columns(3)
-    w1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
-    w2.metric("Haftalık Durum", mtf["w_status"])
+    w1.metric("Setup", f"{mtf['w_setup']} / 100")
+    w2.metric("Durum", mtf["w_status"])
     rsr = mtf.get("rs_rating", float("nan"))
-    w3.metric(
-        "RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
-        help="Endekse (SPY) göre 3/6/12 aylık göreli güç. <60: lider değil, 🟢 verilmez. <45: veto.",
+    w3.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
+              help="Endekse göre göreli güç. <45 kalite kriteri dışıdır; 45-60 bilgi notudur.")
+    st.info(
+        f"📐 **Haftalık bant (EMA20–EMA50): {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}** — "
+        f"alarm bu banda kurulur; çaldığında analiz yenilenir."
     )
-    if mtf["weekly_ok"]:
-        st.info(
-            f"🔔 **Alarm bandı (haftalık EMA20–EMA50):** {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f} — "
-            f"alarm = yeniden analiz çağrısı, alım emri değil."
-        )
-        st.caption("Bant her hafta kayar — alarmları hafta kapanışında yenile.")
-    else:
-        st.caption("Haftalık teyitsiz — alarm kurmaya değmez; önce haftalık yapının düzelmesini bekle.")
+    st.caption("Bant her hafta kayar; alarmlar hafta kapanışında yenilenir.")
 
-    # ---------- 2) GÜNLÜK ----------
-    st.markdown("#### 2️⃣ Günlük — Zamanlama & Plan")
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Günlük Timing", f"{mtf['d_timing']} / 100")
-    d2.metric("Günlük Durum", mtf["d_status"])
-    d3.metric("Giriş Bandına Mesafe", f"{d_plan.dist_to_entry_pct:+.1f}%")
-
-    rr1 = f"1:{d_plan.rr_tp1:.2f}" if np.isfinite(d_plan.rr_tp1) else "—"
-    rr2 = f"1:{d_plan.rr_tp2:.2f}" if np.isfinite(d_plan.rr_tp2) else "—"
-    # NEW (V7.0): Teyit bandı sadece 🟢'de eyleme dönük metriktir;
-    # bekleme durumlarında bugünkü değeri gösteren bağlamlı nota dönüşür
-    # (giriş günü geldiğinde bant da inmiş olacak — bugünkü değer taşınamaz).
-    if mtf["verdict_kind"] == "success":
+    # ---- 3) GÜNLÜK — yalnızca kapı AÇIKken (OMURGA #1) ----
+    if gate == "ACIK":
+        st.markdown("#### Günlük")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Timing", f"{mtf['d_timing']} / 100")
+        d2.metric("Durum", mtf["d_status"])
+        d3.metric("Banda Mesafe", f"{d_plan.dist_to_entry_pct:+.1f}%")
+        rr1 = f"1:{d_plan.rr_tp1:.2f}" if np.isfinite(d_plan.rr_tp1) else "—"
+        rr2 = f"1:{d_plan.rr_tp2:.2f}" if np.isfinite(d_plan.rr_tp2) else "—"
         p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Teyit Bandı", f"{mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}")
+        p1.metric("Günlük Bant", f"{mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}")
         p2.metric("Stop", f"{d_plan.stop:.2f}")
         p3.metric("TP1", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
         p4.metric("TP2", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
-    else:
-        p2, p3, p4 = st.columns(3)
-        p2.metric("Stop (bugünkü)", f"{d_plan.stop:.2f}")
-        p3.metric("TP1 (bugünkü)", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
-        p4.metric("TP2 (bugünkü)", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
-        st.caption(
-            f"ℹ️ Günlük teyit bandı bugünkü değeriyle {mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f} — "
-            f"fiyat alarm bandına geldiğinde bu bant da inmiş olacak. "
-            f"Giriş günü analizi yeniden çalıştırıp GÜNCEL bandı ve seviyeleri kullan."
-        )
+        if not mtf.get("daily_green"):
+            st.caption("Seviyeler bugünkü değerlerdir; teyit gününde analiz yenilenip güncellenir.")
+        if d_plan.high_vol_warning:
+            st.caption("Not: ATR% yüksek — stop dinamik tavana dayandı; volatilite ortalamanın üstünde.")
+        if d_plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
+            st.caption("Not: TP2, 3.5R zemini nedeniyle tarihsel tavanın üzerinde.")
 
-    if d_plan.high_vol_warning:
-        st.warning("⚠️ Yüksek volatilite — stop cap devrede, pozisyon boyunu küçült.")
-    if d_plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
-        st.caption("ℹ️ TP2, 3.5R zemin garantisiyle tarihsel tavanın üzerine yükseltildi — temkinli değerlendir.")
-
-    # NEW (V7.0): Pozisyon boyutu HÜKME TABİDİR — karar giriş vermiyorsa
-    # alışveriş fişi kesilmez; "İZLE" derken "4 adet al" fısıldanmaz.
-    if _vk != "success":
-        ps = {"suppressed": True}
-        if acct_size > 0:
-            st.caption(
-                "💰 Boyutlama yapılmaz — karar giriş vermiyor. "
-                "Giriş günü geldiğinde güncel stop ile otomatik hesaplanır."
+        # Pozisyon boyutu — her zaman hesaplanır, bilgi dilinde (OMURGA #6)
+        ps = position_size_calc(acct_size, risk_pct, d_plan.entry_mid, d_plan.stop)
+        if np.isfinite(ps.get("shares", float("nan"))):
+            cap_note = " · maliyet hesap sınırına çekildi" if ps.get("capped") else ""
+            st.info(
+                f"💰 %{risk_pct:.2f} risk kuralına göre: **{int(ps['shares'])} adet** ≈ "
+                f"${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{cap_note}"
+            )
+        elif ps.get("reason") == "risk_exceeds" and acct_size > 0:
+            _pr = ps.get("per_share_risk", float("nan"))
+            st.info(
+                f"💰 Adet başına risk ${_pr:,.0f} = hesabın %{_pr / acct_size * 100:.2f}'i — "
+                f"%{risk_pct:.2f} kuralının üstünde; 1 adet dahi kuralı aşar. Karar senin."
             )
     else:
-        ps = position_size_calc(acct_size, risk_pct, d_plan.entry_mid, d_plan.stop)
-    if np.isfinite(ps.get("shares", np.nan)):
-        cap_note = " · ⚠️ hesap sınırına takıldı (gerçekleşen risk hedefin altında)" if ps["capped"] else ""
-        st.info(
-            f"💰 **Pozisyon Boyutu:** {int(ps['shares'])} adet ≈ ${ps['cost']:,.0f}  |  "
-            f"Riske edilen: ${ps['risk_amt']:,.0f} (hedef: hesabın %{risk_pct:.2f}'i){cap_note}  \n"
-            f"Referans: giriş = band ortası {d_plan.entry_mid:.2f}, stop = {d_plan.stop:.2f}. "
-            f"Gerçek giriş fiyatınla yeniden hesapla."
+        ps = None
+        st.caption(
+            "Günlük katman kapalı — haftalık kapı geçilmeden günlük tetik anlatılmaz. "
+            "Alarm gününde yenilenen analizde açılır."
         )
-    elif ps.get("reason") == "risk_exceeds" and acct_size > 0:
-        # NEW (V7.0): Değerli bilgiyi gizleme — 1 adet bile kurala sığmıyor
-        _pr = ps.get("per_share_risk", float("nan"))
-        _pr_pct = (_pr / acct_size * 100.0) if (np.isfinite(_pr) and acct_size > 0) else float("nan")
-        st.warning(
-            f"💰 **Bu hisse mevcut risk kuralınla ALINAMAZ:** 1 adet bile hedef riski aşıyor — "
-            f"adet başına risk ${_pr:,.0f} = hesabın %{_pr_pct:.2f}'i (hedefin: %{risk_pct:.2f}). "
-            f"Fiyat banda çekilip stop yaklaşırsa yeniden hesapla; ya da bu hisseyi izleme listende tut."
-        )
-    elif acct_size > 0:
-        st.caption("Pozisyon boyutu hesaplanamadı (giriş/stop geçersiz).")
 
-    # ---------- 3) BİLANÇO ----------
-    st.markdown("#### 3️⃣ Bilanço Kontrolü")
+    # ---- 4) BİLANÇO (bilgi notu) ----
     if earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
-        st.error(
-            f"📅 **Yaklaşan bilanço: {earn['date']} ({earn['days']} gün sonra)** — "
-            f"gece gap'i stop tanımaz. Girişi buna göre planla veya bilanço sonrasını bekle."
-        )
+        st.warning(f"📅 Bilanço: {earn['date']} ({earn['days']} gün) — gece gap'i stop tanımaz.")
     elif earn.get("date"):
-        st.success(f"✅ Bilanço engeli yok — sonraki: {earn['date']} ({earn['days']} gün sonra, kaynak: {earn.get('source', '?')})")
+        st.caption(f"📅 Sonraki bilanço: {earn['date']} ({earn['days']} gün, {earn.get('source', '?')}).")
     elif use_earnings and earn.get("error"):
         st.caption(f"ℹ️ Bilanço verisi alınamadı: {earn['error']}")
-    else:
-        st.caption("Bilanço kontrolü kapalı (sidebar'dan açılabilir).")
 
     st.divider()
 
-    # ---------- GRAFİK ----------
+    # ---- 5) GRAFİK — kapı kapalıyken sadece haftalık ----
     st.markdown("#### 📈 Grafik")
-    sw_tf = st.radio("Grafik zaman dilimi", ["Günlük", "Haftalık"], horizontal=True, key="sw_chart_tf")
-    if sw_tf == "Günlük":
-        # NEW (V7.0): Günlük grafikte haftalık ALARM bandı ikinci gölge —
-        # iki bandın konumu (evre) tek bakışta görünür
-        fig = plot_chart(
-            mtf["_ddf"], t, d_plan, price, show_candles, show_emas, show_line,
-            alarm_band=(mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))),
-            alarm_label="ALARM (haftalık)",
-        )
+    if gate == "ACIK":
+        sw_tf = st.radio("Grafik", ["Günlük", "Haftalık"], horizontal=True,
+                         key="sw_chart_tf", label_visibility="collapsed")
+        if sw_tf == "Günlük":
+            fig = plot_chart(mtf["_ddf"], t, d_plan, price, show_candles, show_emas, show_line,
+                             alarm_band=(mtf["w_entry_low"], mtf["w_entry_high"]),
+                             alarm_label="Haftalık bant")
+        else:
+            w_last = float(mtf["_wdf"].iloc[-1]["close"])
+            fig = plot_chart(mtf["_wdf"], t, w_plan, w_last, show_candles, show_emas, show_line)
     else:
         w_last = float(mtf["_wdf"].iloc[-1]["close"])
-        # Haftalık grafikte ENTRY gölgesi zaten alarm bandıdır; günlük bant
-        # ikinci gölge olarak eklenir (bugünkü değeriyle, kayacağı bilinerek)
-        fig = plot_chart(
-            mtf["_wdf"], t, w_plan, w_last, show_candles, show_emas, show_line,
-            alarm_band=(mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan"))),
-            alarm_label="GÜNLÜK bant (bugünkü)",
-        )
+        fig = plot_chart(mtf["_wdf"], t, w_plan, w_last, show_candles, show_emas, show_line)
+        st.caption("Kapı kapalıyken günlük grafik gösterilmez (günlük seviyeler karar dili taşır).")
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Tetik anında 'göz muayenesi' için Haftalık'a geç: baz düzgün mü, son haftalık mum nasıl kapanmış?")
 
-    # ---------- PDF ----------
+    # ---- 6) PDF ----
     pdf_bytes = build_pdf_bytes_single(
-        ticker=t, interval_label="Günlük (1day) [Swing]", bars=bars_n,
+        ticker=t, interval_label="Swing (Haftalık kapı + Günlük tetik)", bars=bars_n,
         plan=d_plan, quote=None, logo_b64_str=logo_b64,
         earn=(earn if use_earnings else None), mh=mh, mtf=mtf,
         ps=ps, risk_pct=risk_pct,
     )
     st.download_button(
-        "📄 Swing Raporu (PDF) indir", data=pdf_bytes,
+        "📄 Swing Raporu (PDF)", data=pdf_bytes,
         file_name=f"{t}_swing_rapor.pdf", mime="application/pdf",
         use_container_width=True, key="sw_pdf",
     )
@@ -3990,14 +3953,12 @@ with tab_single:
                         })
                         st.table(table)
 
-                        # NEW (V7.0): Pozisyon boyutu (Gelişmiş mod) — Swing hükmüne tabi
-                        _verdict_green = bool(mtf) and mtf.get("verdict_kind") == "success"
-                        if show_mtf and mtf and not _verdict_green:
-                            ps_adv = {"suppressed": True}
-                            if account_size > 0:
-                                st.caption("💰 Boyutlama yapılmaz — Swing kararı giriş vermiyor (giriş günü hesaplanır).")
-                        else:
-                            ps_adv = position_size_calc(account_size, risk_pct_per_trade, plan.entry_mid, plan.stop)
+                        # OMURGA (V7.1): Pozisyon her zaman hesaplanır — kapı kapalıysa
+                        # gizlenmez, bilgi notuyla sunulur (madde 6: veri saklanmaz).
+                        ps_adv = position_size_calc(account_size, risk_pct_per_trade, plan.entry_mid, plan.stop)
+                        _gate_adv = mtf.get("gate") if (show_mtf and mtf and not mtf.get("error")) else None
+                        if _gate_adv and _gate_adv != "ACIK":
+                            st.caption("ℹ️ Swing kapısı kapalı — aşağıdaki hesap bilgi amaçlıdır; giriş günü güncel değerlerle yenilenir.")
                         if np.isfinite(ps_adv.get("shares", np.nan)):
                             cap_note = " · ⚠️ hesap sınırına takıldı" if ps_adv["capped"] else ""
                             st.info(
