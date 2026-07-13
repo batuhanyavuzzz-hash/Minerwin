@@ -12,7 +12,7 @@ reportlab==4.2.2
 openpyxl==3.1.5
 
 # Segfault şüphelileri — bilinçli olarak eski/uyumlu sürüme sabitlendi:
-pyarrow==17.0.0
+pyarrow==18.1.0
 urllib3==2.2.3
 charset-normalizer==3.3.2
 chardet==5.2.0
