@@ -1,3 +1,8 @@
+# MinerWin — sabitlenmiş bağımlılıklar (V7.1)
+# Amaç: Streamlit Cloud her kurulumda "en yeni" paketleri çekip
+# Python 3.13 ile ABI çakışması (Segmentation fault) yaşamasın.
+# Sürümler birbirleriyle uyumlu, saha görmüş kombinasyondur.
+
 streamlit==1.41.1
 pandas==2.2.3
 numpy==2.1.3
@@ -5,3 +10,9 @@ plotly==5.24.1
 requests==2.32.3
 reportlab==4.2.2
 openpyxl==3.1.5
+
+# Segfault şüphelileri — bilinçli olarak eski/uyumlu sürüme sabitlendi:
+pyarrow==17.0.0
+urllib3==2.2.3
+charset-normalizer==3.3.2
+chardet==5.2.0
