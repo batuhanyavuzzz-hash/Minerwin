@@ -1,6 +1,14 @@
 # app.py
 # MinerWin — Tek Hisse + Portföy Analiz (V7.0) — Twelve Data + Finnhub
 #
+# V7.2 Değişiklikleri (V7.1 üzerine — KALICI HISTORY):
+#  ★ GitHub Gist senkronu: history.csv artık Cloud'un geçici diskinde değil,
+#    kullanıcının GitHub hesabındaki gizli bir Gist'te yaşar.
+#    - Açılışta Gist'ten çekilir, yerel kayıtlarla birleştirilir (hiçbir şey ezilmez)
+#    - Her analizde hem yerel dosyaya hem Gist'e yazılır (hata analizi bloklamaz)
+#    - GITHUB_TOKEN yoksa eski düzen (yerel + indir/yükle) aynen çalışır
+#  ★ Sanitizer github_pat_ token'larını da maskeler.
+#
 # V7.1 Değişiklikleri (V7.0 üzerine — OMURGA REFAKTÖRÜ):
 #  ★ ANAYASA: (1) Haftalık=KAPI, günlük=TETİK — kapı kapalıyken günlük karar
 #    dili hiç konuşmaz (UI+PDF+grafik). (2) Alarm=haftalık bant, her durumda
@@ -223,7 +231,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V7.1</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V7.2</div>
 """,
     unsafe_allow_html=True,
 )
@@ -244,6 +252,14 @@ BASE_URL = "https://api.twelvedata.com"
 FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
 if isinstance(FINNHUB_API_KEY, str):
     FINNHUB_API_KEY = FINNHUB_API_KEY.strip().strip('"').strip("'")
+
+# NEW (V7.2): GitHub Gist — history için kalıcı bulut depolama (opsiyonel).
+# Token yoksa uygulama eski düzende (yerel dosya + indir/yükle) çalışır.
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+if isinstance(GITHUB_TOKEN, str):
+    GITHUB_TOKEN = GITHUB_TOKEN.strip().strip('"').strip("'")
+GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
+GIST_FILENAME = "history.csv"
 HISTORY_FILE = "history.csv"
 PORTFOLIO_FILE = "portfolio.csv"
 
@@ -408,8 +424,12 @@ def rsi_slope(rsi_series: pd.Series, lookback: int = RSI_MOMENTUM_LOOKBACK) -> f
 _APIKEY_RE = _re.compile(r"(apikey|token)=[A-Za-z0-9]+")
 
 
+_GHPAT_RE = _re.compile(r"github_pat_[A-Za-z0-9_]+")
+
+
 def _sanitize_err(msg) -> str:
-    return _APIKEY_RE.sub(r"\1=***", str(msg))
+    s = _APIKEY_RE.sub(r"\1=***", str(msg))
+    return _GHPAT_RE.sub("github_pat_***", s)
 
 
 def _td_get(endpoint: str, params: dict, timeout: int = 25, max_retries: int = 2) -> dict:
@@ -920,6 +940,8 @@ def save_to_history(row: dict):
             writer = csv.DictWriter(f, fieldnames=list(row.keys()))
             writer.writeheader()
             writer.writerow(row)
+    # NEW (V7.2): yerel yazımdan sonra Gist'e it — kalıcı bulut kopyası
+    _gist_push_history()
 
 
 def read_history_df() -> pd.DataFrame:
@@ -968,6 +990,115 @@ def portfolio_csv_bytes() -> bytes:
         return b""
     with open(PORTFOLIO_FILE, "rb") as f:
         return f.read()
+
+
+# =========================================================
+# GIST SENKRON — NEW V7.2 (kalıcı history)
+# =========================================================
+def _gh_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _gist_find() -> str:
+    """MinerWin gist'inin id'sini bulur; yoksa boş string döner."""
+    r = requests.get("https://api.github.com/gists",
+                     headers=_gh_headers(), params={"per_page": 100}, timeout=15)
+    r.raise_for_status()
+    for g in r.json():
+        if g.get("description") == GIST_DESC and GIST_FILENAME in (g.get("files") or {}):
+            return str(g["id"])
+    return ""
+
+
+def _gist_create(content: str) -> str:
+    r = requests.post("https://api.github.com/gists", headers=_gh_headers(),
+                      json={"description": GIST_DESC, "public": False,
+                            "files": {GIST_FILENAME: {"content": content or "timestamp,ticker\n"}}},
+                      timeout=15)
+    r.raise_for_status()
+    return str(r.json()["id"])
+
+
+def _gist_read(gid: str) -> str:
+    r = requests.get(f"https://api.github.com/gists/{gid}", headers=_gh_headers(), timeout=15)
+    r.raise_for_status()
+    f = (r.json().get("files") or {}).get(GIST_FILENAME) or {}
+    if f.get("truncated") and f.get("raw_url"):
+        rr = requests.get(f["raw_url"], headers=_gh_headers(), timeout=20)
+        rr.raise_for_status()
+        return rr.text
+    return f.get("content", "") or ""
+
+
+def _gist_write(gid: str, content: str):
+    r = requests.patch(f"https://api.github.com/gists/{gid}", headers=_gh_headers(),
+                       json={"files": {GIST_FILENAME: {"content": content}}}, timeout=20)
+    r.raise_for_status()
+
+
+def _merge_history(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
+    """İki history çerçevesini birleştirir: hiçbir kayıt ezilmez, mükerrerler
+    (aynı timestamp+ticker) ayıklanır, tarihe göre sıralanır."""
+    frames = [d for d in (df_a, df_b) if d is not None and not d.empty]
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    subset = [c for c in ("timestamp", "ticker") if c in merged.columns]
+    if subset:
+        merged = merged.drop_duplicates(subset=subset, keep="first")
+        if "timestamp" in merged.columns:
+            merged = merged.sort_values("timestamp")
+    return merged.reset_index(drop=True)
+
+
+@st.cache_resource(show_spinner=False)
+def _gist_boot() -> dict:
+    """Süreç başına BİR KEZ çalışır: Gist'i bulur/oluşturur, uzak kayıtları
+    yerelle birleştirip diske yazar. Yereldeki fazla kayıt varsa Gist'e iter.
+    Başarısızlık uygulamayı asla durdurmaz — durum sözlükle raporlanır."""
+    out = {"gid": "", "status": "kapalı (GITHUB_TOKEN tanımlı değil)"}
+    if not GITHUB_TOKEN:
+        return out
+    try:
+        local_df = read_history_df()
+        gid = _gist_find()
+        if not gid:
+            content = local_df.to_csv(index=False) if not local_df.empty else "timestamp,ticker\n"
+            gid = _gist_create(content)
+            out.update(gid=gid, status=f"aktif — yeni gist oluşturuldu ({len(local_df)} kayıt taşındı)")
+            return out
+        remote_txt = _gist_read(gid)
+        try:
+            remote_df = pd.read_csv(io.StringIO(remote_txt)) if remote_txt.strip() else pd.DataFrame()
+        except Exception:
+            remote_df = pd.DataFrame()
+        merged = _merge_history(local_df, remote_df)
+        if not merged.empty:
+            merged.to_csv(HISTORY_FILE, index=False)
+        if len(merged) > len(remote_df):
+            _gist_write(gid, merged.to_csv(index=False))
+        out.update(gid=gid, status=f"aktif — {len(merged)} kayıt senkronda")
+        return out
+    except Exception as e:
+        out["status"] = f"hata: {_sanitize_err(e)}"
+        return out
+
+
+def _gist_push_history():
+    """Yerel history'nin tamamını Gist'e iter. Sessizce başarısız olabilir —
+    analiz akışını asla bloklamaz; bir sonraki kayıtta/açılışta arayı kapatır."""
+    try:
+        boot = _gist_boot()
+        if boot.get("gid"):
+            df_all = read_history_df()
+            if not df_all.empty:
+                _gist_write(boot["gid"], df_all.to_csv(index=False))
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -3399,6 +3530,11 @@ with st.sidebar:
             disabled=(not bool(hist_bytes)),
         )
 
+    # NEW (V7.2): Gist boot — süreçte ilk kez burada tetiklenir (cache_resource
+    # sayesinde sonraki rerun'larda maliyetsiz). Durum kullanıcıya gösterilir.
+    _gb = _gist_boot()
+    st.caption(f"☁️ Kalıcı yedek (GitHub Gist): {_gb.get('status', '—')}")
+
     with st.expander("📚 Geçmiş (history.csv)"):
         hist_df = read_history_df()
         if hist_df.empty:
@@ -3429,6 +3565,7 @@ with st.sidebar:
                     merged = merged.drop_duplicates(subset=["timestamp", "ticker"], keep="first")
                     merged = merged.sort_values("timestamp").reset_index(drop=True)
                     merged.to_csv(HISTORY_FILE, index=False)
+                    _gist_push_history()  # NEW (V7.2): geri yüklenen birikim buluta da gitsin
                     st.session_state["__hist_restored_sig"] = _sig
                     st.success(
                         f"✅ Geri yüklendi: dosyadan {len(df_up)} satır alındı, "
