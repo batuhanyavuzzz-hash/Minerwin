@@ -699,17 +699,32 @@ def market_health_pack(spy_df: pd.DataFrame) -> Dict[str, Any]:
         # NEW (V7.0): Dağıtım günü sayımı (son 25 seans) — erken uyarı.
         # Dağıtım günü: fiyat ≥%0.2 düşer + hacim önceki günden yüksektir
         # (kurumsal satış izi). EMA'lar gecikmeli; bu sayaç tepeyi erken yakalar.
+        # FIX (V7.1): (a) Önceki gün hacmi 0/boşsa gün sayılmaz — veri boşluğu
+        # sayacı şişirip yüksek değerde "yapıştırabiliyordu". (b) Sayılan günler
+        # tarih tarih dökülür (dist_detail) — sayaç artık denetlenebilir.
         dist_days = 0
+        dist_detail = []
         try:
             if "volume" in d.columns and len(d) >= 30:
                 vv = d["volume"].astype(float).fillna(0.0)
                 cc = d["close"].astype(float)
                 down = cc < cc.shift(1) * 0.998
-                vol_up = vv > vv.shift(1)
-                dist_days = int((down & vol_up).tail(25).sum())
+                vol_up = (vv > vv.shift(1)) & (vv.shift(1) > 0) & (vv > 0)
+                mask = (down & vol_up).tail(25)
+                dist_days = int(mask.sum())
+                for i in mask[mask].index:
+                    if i - 1 in cc.index and cc.loc[i - 1] > 0:
+                        dist_detail.append({
+                            "Tarih": str(d.loc[i, "time"].date()) if "time" in d.columns else str(i),
+                            "Değişim %": round(float(cc.loc[i] / cc.loc[i - 1] - 1) * 100.0, 2),
+                            "Hacim ×önceki": round(float(vv.loc[i] / vv.loc[i - 1]), 2) if vv.loc[i - 1] > 0 else float("nan"),
+                        })
         except Exception:
             dist_days = 0
+            dist_detail = []
         out["dist_days"] = dist_days
+        out["dist_detail"] = dist_detail
+        out["dist_last"] = dist_detail[-1]["Tarih"] if dist_detail else "—"
 
         if close > e50 and e50 > e200 and np.isfinite(s200) and s200 > 0:
             out["regime"] = "🟢 RİSK AÇIK"
@@ -753,6 +768,12 @@ def render_market_health(mh: Dict[str, Any]):
         help="Fiyat ≥%0.2 düşüp hacmin arttığı günler. ≥6 kurumsal satış uyarısıdır ve rejimi düşürür.",
     )
     st.caption(mh.get("detail", ""))
+    # FIX (V7.1): Sayaç denetlenebilir — hangi günleri saydığı tarih tarih görünür.
+    # "Sayı hep aynı mı takılı, canlı mı?" sorusunun cevabı: son tarih ilerliyorsa canlı.
+    if mh.get("dist_detail"):
+        with st.expander(f"📋 Dağıtım günleri dökümü ({mh.get('dist_days', 0)} gün — son: {mh.get('dist_last', '—')})"):
+            st.dataframe(pd.DataFrame(mh["dist_detail"]), hide_index=True, use_container_width=True)
+            st.caption("Kontrol: TradingView'da SPY günlük grafikte bu tarihlerin kırmızı + yüksek hacimli olduğunu doğrulayabilirsin.")
 
 
 # =========================================================
