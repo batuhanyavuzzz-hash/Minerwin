@@ -3385,6 +3385,38 @@ with st.sidebar:
         else:
             st.dataframe(hist_df.tail(200), use_container_width=True, hide_index=True)
 
+    # NEW (V7.1): history.csv GERİ YÜKLEME — Cloud diski sıfırlanınca
+    # bilgisayarındaki yedeği geri basmak için. İndirme rutininin eşi:
+    # "indir" = yedek al, burası = yedekten dön. Mükerrer satırlar ayıklanır,
+    # sunucudaki mevcut yeni kayıtlarla birleştirilir (hiçbir şey ezilmez).
+    up_hist = st.file_uploader(
+        "🔄 history.csv geri yükle (yedekten)",
+        type=["csv"],
+        key="hist_restore",
+        help="Daha önce indirdiğin history.csv yedeğini seç — mevcut kayıtlarla birleştirilir.",
+    )
+    if up_hist is not None:
+        _sig = f"{up_hist.name}:{up_hist.size}"
+        if st.session_state.get("__hist_restored_sig") != _sig:
+            try:
+                df_up = pd.read_csv(up_hist)
+                if "timestamp" not in df_up.columns or "ticker" not in df_up.columns:
+                    st.error("Bu dosya MinerWin history.csv'sine benzemiyor (timestamp/ticker kolonları yok).")
+                else:
+                    df_cur = read_history_df()
+                    merged = pd.concat([df_cur, df_up], ignore_index=True) if not df_cur.empty else df_up.copy()
+                    merged = merged.drop_duplicates(subset=["timestamp", "ticker"], keep="first")
+                    merged = merged.sort_values("timestamp").reset_index(drop=True)
+                    merged.to_csv(HISTORY_FILE, index=False)
+                    st.session_state["__hist_restored_sig"] = _sig
+                    st.success(
+                        f"✅ Geri yüklendi: dosyadan {len(df_up)} satır alındı, "
+                        f"birleşik toplam {len(merged)} satır (mükerrerler ayıklandı)."
+                    )
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Geri yükleme başarısız: {_sanitize_err(e)}")
+
 
 # =========================================================
 # SWING MODU — NEW V7.0
@@ -3458,6 +3490,9 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "earn": earn, "price": price,
                         "ts": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M"),
                     }
+                    # Eski PDF'ler session'da birikmesin (bellek hijyeni)
+                    for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("__sw_pdf::")]:
+                        st.session_state.pop(_k, None)
                     d_plan = mtf["_d_plan"]
                     record = {
                         "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -3606,18 +3641,21 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         st.caption("Kapı kapalıyken günlük grafik gösterilmez (günlük seviyeler karar dili taşır).")
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---- 6) PDF ----
-    pdf_bytes = build_pdf_bytes_single(
-        ticker=t, interval_label="Swing (Haftalık kapı + Günlük tetik)", bars=bars_n,
-        plan=d_plan, quote=None, logo_b64_str=logo_b64,
-        earn=(earn if use_earnings else None), mh=mh, mtf=mtf,
-        ps=ps, risk_pct=risk_pct,
-    )
-    st.download_button(
-        "📄 Swing Raporu (PDF)", data=pdf_bytes,
-        file_name=f"{t}_swing_rapor.pdf", mime="application/pdf",
-        use_container_width=True, key="sw_pdf",
-    )
+    # ---- 6) PDF — istek üzerine üretilir (her rerun'da değil; bellek/CPU tasarrufu) ----
+    _pdf_key = f"__sw_pdf::{t}::{sw.get('ts', '')}"
+    if st.button("📄 Swing Raporu Hazırla (PDF)", use_container_width=True, key="sw_pdf_make"):
+        st.session_state[_pdf_key] = build_pdf_bytes_single(
+            ticker=t, interval_label="Swing (Haftalık kapı + Günlük tetik)", bars=bars_n,
+            plan=d_plan, quote=None, logo_b64_str=logo_b64,
+            earn=(earn if use_earnings else None), mh=mh, mtf=mtf,
+            ps=ps, risk_pct=risk_pct,
+        )
+    if st.session_state.get(_pdf_key):
+        st.download_button(
+            "⬇️ PDF İndir", data=st.session_state[_pdf_key],
+            file_name=f"{t}_swing_rapor.pdf", mime="application/pdf",
+            use_container_width=True, key="sw_pdf",
+        )
 
 
 # =========================================================
