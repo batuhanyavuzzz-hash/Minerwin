@@ -258,6 +258,11 @@ if isinstance(FINNHUB_API_KEY, str):
 GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
 if isinstance(GITHUB_TOKEN, str):
     GITHUB_TOKEN = GITHUB_TOKEN.strip().strip('"').strip("'")
+# NEW (V7.2): Kural seti sürümü — history kayıtlarına yazılır. Filtre
+# eşiklerinden biri (RS, setup, uzamış %8, dağıtım ≥6...) değiştirildiğinde
+# BU SAYI ELLE ARTIRILIR ki karne "hangi kural dönemine ait karar" bilsin.
+RULE_VER = "v1"
+
 GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
 GIST_FILENAME = "history.csv"
 HISTORY_FILE = "history.csv"
@@ -3653,6 +3658,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "ticker": sw_ticker,
                         "timeframe": "swing",
                         "price": round(price, 4),
+                        "rule_ver": RULE_VER,
                         "gate": mtf.get("gate", ""),
                         "rs_rating": round(float(mtf["rs_rating"]), 1) if np.isfinite(mtf.get("rs_rating", float("nan"))) else "",
                         "regime": _strip_emoji(str(mh.get("regime", ""))) if mh else "",
@@ -3958,6 +3964,7 @@ with tab_single:
 
                         # FIX (V6.2.1): timestamp Türkiye saatiyle
                         record = {
+                            "rule_ver": RULE_VER,
                             "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                             "ticker": ticker,
                             "timeframe": interval,
