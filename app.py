@@ -917,29 +917,25 @@ def get_daily_52w_levels(symbol: str, interval: str, current_df: pd.DataFrame) -
 # =========================================================
 def save_to_history(row: dict):
     """
-    FIX (V6.2.1): Mevcut history.csv'nin header'ına hizalanarak yazar.
-    Eski sürümden kalan dosyaya yeni alanlı satır eklenince oluşan
-    ValueError / kolon kayması sorunu giderildi.
+    FIX (V6.2.1→V7.2): Şema evrimi güvenli hale getirildi. Eski yöntem yeni
+    alanları ATLIYORDU (mevcut header'a hizala); yeni yöntem BİRLEŞİK şema
+    kullanır: eski kolonlar korunur, yeni kolonlar eklenir, eski satırlarda
+    yeni alanlar boş kalır. CSV asla bozulmaz.
     """
-    file_exists = os.path.isfile(HISTORY_FILE)
-    if file_exists:
+    new_df = pd.DataFrame([row])
+    if os.path.isfile(HISTORY_FILE):
         try:
-            with open(HISTORY_FILE, newline="", encoding="utf-8") as f:
-                existing_fields = next(csv.reader(f))
-        except (StopIteration, OSError):
-            existing_fields = list(row.keys())
-        if not existing_fields:
-            existing_fields = list(row.keys())
-        # Eksik alanlar boş bırakılır, dosyada olmayan yeni alanlar atlanır
-        aligned = {k: row.get(k, "") for k in existing_fields}
-        with open(HISTORY_FILE, mode="a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=existing_fields, extrasaction="ignore")
-            writer.writerow(aligned)
+            old_df = pd.read_csv(HISTORY_FILE)
+            all_cols = list(dict.fromkeys(list(old_df.columns) + list(new_df.columns)))
+            merged = pd.concat(
+                [old_df.reindex(columns=all_cols), new_df.reindex(columns=all_cols)],
+                ignore_index=True,
+            )
+        except Exception:
+            merged = new_df
     else:
-        with open(HISTORY_FILE, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-            writer.writeheader()
-            writer.writerow(row)
+        merged = new_df
+    merged.to_csv(HISTORY_FILE, index=False)
     # NEW (V7.2): yerel yazımdan sonra Gist'e it — kalıcı bulut kopyası
     _gist_push_history()
 
@@ -3657,6 +3653,10 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "ticker": sw_ticker,
                         "timeframe": "swing",
                         "price": round(price, 4),
+                        "gate": mtf.get("gate", ""),
+                        "rs_rating": round(float(mtf["rs_rating"]), 1) if np.isfinite(mtf.get("rs_rating", float("nan"))) else "",
+                        "regime": _strip_emoji(str(mh.get("regime", ""))) if mh else "",
+                        "dist_days": mh.get("dist_days", "") if mh else "",
                         "setup_score": int(mtf["w_setup"]),
                         "timing_score": int(mtf["d_timing"]),
                         "total_score": int(d_plan.total_score),
