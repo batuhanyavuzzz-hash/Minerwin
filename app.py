@@ -885,8 +885,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
                 _apc = float(d_plan.debug.get("atr_pct", float("nan")))
                 _amul = (_gap / _apc) if (np.isfinite(_apc) and _apc > 0) else float("nan")
                 _sev = f" (≈{_amul:.1f}×ATR)" if np.isfinite(_amul) else ""
-                verdict = (f"Aday — haftalık uygun; ANCAK düşüş sert olmuş: günlük yapı fiyatın "
-                           f"%{_gap:.1f}{_sev} üstünde kırık, teyit süreci uzayabilir. "
+                verdict = (f"Aday — haftalık uygun; günlük yapı fiyatın "
+                           f"%{_gap:.1f}{_sev} üstünde — teyit için günlük onarım gerekli. "
                            f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
             else:
                 verdict = (f"Aday — haftalık uygun; günlük teyit henüz oluşmadı. "
@@ -3625,9 +3625,9 @@ def _swing_phase(price: float, w_low: float, w_high: float,
             atr_mult = (gap / atr_pct) if (np.isfinite(atr_pct) and atr_pct > 0) else float("nan")
             atr_txt = f" (≈{atr_mult:.1f}×ATR)" if np.isfinite(atr_mult) else ""
             return (
-                f"🎯 ALARM BÖLGESİNDE — ama düşüş sert olmuş: günlük yapı fiyatın "
-                f"%{gap:.1f}{atr_txt} üstünde kırık. Teyit süreci uzayabilir; günlük taban "
-                f"oluşumu izlenmeli. Referans: ≈3×ATR üzeri kopmalar genelde haftalar süren onarım ister."
+                f"🎯 ALARM BÖLGESİNDE — günlük yapı fiyatın %{gap:.1f}{atr_txt} üstünde; "
+                f"teyit için günlük taban oluşumu izlenmeli. "
+                f"Okuma: ≈3×ATR altı kopma hissenin kendi dilinde ılımlıdır; üstü genelde haftalar süren onarım ister."
             )
         return "🎯 ALARM BÖLGESİNDE — şimdi günlük teyidin oluşmasını bekle"
     if d_low <= price <= d_high:
