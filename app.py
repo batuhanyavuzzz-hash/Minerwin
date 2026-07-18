@@ -2070,15 +2070,20 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
     if logo_b64:
         try:
             logo_bytes = base64.b64decode(logo_b64)
-            logo_buf   = io.BytesIO(logo_bytes)
-            # Logo banner yüksekliğine orantılı — genişlik/yükseklik oranı korunur
-            logo_img   = RLImage(logo_buf, width=2.8*cm, height=0.95*cm)
+            # FIX (V7.2): Eski kod sabit 2.8×0.95cm kutuya basıyordu — kare logo
+            # yatay eziliyordu. Artık gerçek en/boy oranı korunur.
+            from reportlab.lib.utils import ImageReader
+            _iw, _ih = ImageReader(io.BytesIO(logo_bytes)).getSize()
+            _lh = 1.05 * cm
+            _lw = (_lh * (_iw / _ih)) if _ih else 2.8 * cm
+            logo_img   = RLImage(io.BytesIO(logo_bytes), width=_lw, height=_lh)
             logo_img.hAlign = "LEFT"
+            _col1 = _lw + 0.5 * cm
             banner_data = [
                 [logo_img, Paragraph(title, title_style)],
                 ["",       Paragraph(subtitle, sub_style)],
             ]
-            banner_tbl = Table(banner_data, colWidths=[3.2*cm, page_w - 3.2*cm])
+            banner_tbl = Table(banner_data, colWidths=[_col1, page_w - _col1])
         except Exception:
             banner_data = [
                 [Paragraph(title, title_style)],
