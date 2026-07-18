@@ -2093,9 +2093,18 @@ def _pdf_header_story(logo_b64: str, title: str, subtitle: str, st_styles: dict,
     return story
 
 
-def _status_badge(status_tag: str, st_styles: dict, page_w: float, label: str = "DURUM") -> Table:
+def _status_badge(status_tag: str, st_styles: dict, page_w: float, label: str = "DURUM",
+                  kind: str = "") -> Table:
+    # FIX (V7.2): Renk önceliği verdict_kind'dedir — danışman-dili (emojisiz)
+    # cümlelerde nötr/olumlu durumlar varsayılan kırmızıya düşmesin.
     tag_lower = status_tag.lower()
-    if "alim" in tag_lower or status_tag.startswith("🟢"):
+    if kind == "success":
+        bg = _C_GREEN
+    elif kind == "warning":
+        bg = _C_AMBER
+    elif kind == "error":
+        bg = _C_RED
+    elif "alim" in tag_lower or status_tag.startswith("🟢"):
         bg = _C_GREEN
     elif "pullback" in tag_lower or status_tag.startswith("🟡"):
         bg = _C_AMBER
@@ -2366,7 +2375,8 @@ def build_pdf_bytes_single(
     if _closed and mtf and mtf.get("_w_plan") is not None:
         plan = mtf["_w_plan"]
     if mtf and mtf.get("verdict"):
-        story.append(_status_badge(str(mtf["verdict"]), sty, page_w, label="DURUM"))
+        story.append(_status_badge(str(mtf["verdict"]), sty, page_w, label="DURUM",
+                                   kind=str(mtf.get("verdict_kind", ""))))
         story.append(Spacer(1, 4))
         if _gate == "ACIK":
             sub_line = (f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}  |  "
@@ -2402,8 +2412,8 @@ def build_pdf_bytes_single(
         _row2_clr = [_C_ACCENT, (_C_RED if _gate == "RET" else _C_AMBER), min5_clr]
     else:
         row2_items = [
-            ("SETUP SKORU",   f"{plan.setup_score} / 100"),
-            ("TIMING SKORU",  f"{plan.timing_score} / 100"),
+            ("SETUP (GÜNLÜK)",   f"{plan.setup_score} / 100"),
+            ("TIMING (GÜNLÜK)",  f"{plan.timing_score} / 100"),
             ("MİNERVİNİ #5",  min5_str),
         ]
         _row2_clr = [_C_ACCENT, _C_ACCENT, min5_clr]
@@ -2524,9 +2534,10 @@ def build_pdf_bytes_single(
                 ])
             elif np.isfinite(ps.get("shares", float("nan"))):
                 _rp = f" (hedef %{risk_pct:.2f})" if np.isfinite(risk_pct) else ""
+                _teyit_note = " — teyit sonrası güncel değerlerle yenile" if _hold else ""
                 plan_left.append([
                     "Pozisyon Boyutu",
-                    f"{int(ps['shares'])} adet ≈ ${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{_rp}",
+                    f"{int(ps['shares'])} adet ≈ ${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{_rp}{_teyit_note}",
                 ])
             elif ps.get("reason") == "risk_exceeds":
                 plan_left.append(["Pozisyon Boyutu",
@@ -3591,7 +3602,7 @@ def _swing_phase(price: float, w_low: float, w_high: float,
         drop = (w_low - price) / w_low * 100.0
         return f"Haftalık bandın %{drop:.1f} ALTINDA — trend hasarlı, alarm konusu değil"
     if w_low <= price <= w_high:
-        return "🎯 ALARM BÖLGESİNDE — şimdi günlük durumun 🟢'ye dönmesini bekle (teyit)"
+        return "🎯 ALARM BÖLGESİNDE — şimdi günlük teyidin oluşmasını bekle"
     if d_low <= price <= d_high:
         gap = (price - w_high) / w_high * 100.0
         return f"Sığ pullback — fiyat günlük bantta tutundu (derin alarm bölgesi %{gap:.1f} aşağıda)"
