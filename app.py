@@ -875,8 +875,22 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict_kind = "success"
         else:
             gate = "ACIK"
-            verdict = (f"Aday — haftalık uygun; günlük teyit henüz oluşmadı. "
-                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
+            # NEW (V7.2): Fiyat banda SERT düşüşle geldiyse (günlük yapı fiyatın
+            # üstünde kırık) hüküm bunu adıyla söyler — koşul yapısal-ikili,
+            # şiddet sürekli sayı; yeni eşik icat edilmedi.
+            _cls = float(d_plan.debug.get("close", float("nan")))
+            _dlo = float(d_plan.entry_low) if np.isfinite(d_plan.entry_low) else float("nan")
+            if np.isfinite(_cls) and np.isfinite(_dlo) and _dlo > _cls > 0:
+                _gap = (_dlo - _cls) / _cls * 100.0
+                _apc = float(d_plan.debug.get("atr_pct", float("nan")))
+                _amul = (_gap / _apc) if (np.isfinite(_apc) and _apc > 0) else float("nan")
+                _sev = f" (≈{_amul:.1f}×ATR)" if np.isfinite(_amul) else ""
+                verdict = (f"Aday — haftalık uygun; ANCAK düşüş sert olmuş: günlük yapı fiyatın "
+                           f"%{_gap:.1f}{_sev} üstünde kırık, teyit süreci uzayabilir. "
+                           f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
+            else:
+                verdict = (f"Aday — haftalık uygun; günlük teyit henüz oluşmadı. "
+                           f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
             verdict_kind = "warning"
 
         out.update({
@@ -2583,6 +2597,7 @@ def build_pdf_bytes_single(
                 plan.debug.get("close", float("nan")),
                 mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan")),
                 mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan")),
+                atr_pct=float(plan.debug.get("atr_pct", float("nan"))),
             )) or "—"])
         mtf_rows += [
             ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
@@ -3592,7 +3607,7 @@ with st.sidebar:
 # SWING MODU — NEW V7.0
 # =========================================================
 def _swing_phase(price: float, w_low: float, w_high: float,
-                 d_low: float, d_high: float) -> str:
+                 d_low: float, d_high: float, atr_pct: float = float("nan")) -> str:
     """NEW (V7.0): İki bandın geometrisinden trend evresini türetir.
     Dört sayının zihinde birleştirilmesi işini kullanıcıdan alır."""
     vals = [price, w_low, w_high, d_low, d_high]
@@ -3602,6 +3617,18 @@ def _swing_phase(price: float, w_low: float, w_high: float,
         drop = (w_low - price) / w_low * 100.0
         return f"Haftalık bandın %{drop:.1f} ALTINDA — trend hasarlı, alarm konusu değil"
     if w_low <= price <= w_high:
+        # NEW (V7.2): Bant içindeyken günlük yapı fiyatın ÜSTÜNDE kırıksa
+        # (sert düşüşle geliş), tarif bunu adıyla söyler. Koşul yapısal-ikilidir
+        # (eşik icat edilmedi); şiddet sürekli sayıyla verilir (% + ATR-normalize).
+        if np.isfinite(d_low) and d_low > price:
+            gap = (d_low - price) / price * 100.0
+            atr_mult = (gap / atr_pct) if (np.isfinite(atr_pct) and atr_pct > 0) else float("nan")
+            atr_txt = f" (≈{atr_mult:.1f}×ATR)" if np.isfinite(atr_mult) else ""
+            return (
+                f"🎯 ALARM BÖLGESİNDE — ama düşüş sert olmuş: günlük yapı fiyatın "
+                f"%{gap:.1f}{atr_txt} üstünde kırık. Teyit süreci uzayabilir; günlük taban "
+                f"oluşumu izlenmeli. Referans: ≈3×ATR üzeri kopmalar genelde haftalar süren onarım ister."
+            )
         return "🎯 ALARM BÖLGESİNDE — şimdi günlük teyidin oluşmasını bekle"
     if d_low <= price <= d_high:
         gap = (price - w_high) / w_high * 100.0
