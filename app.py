@@ -2363,9 +2363,22 @@ def build_pdf_bytes_single(
     mtf: dict | None = None,
     ps: dict | None = None,
     risk_pct: float = float("nan"),
+    mtf_authority: bool = True,
 ):
+    # FIX (V7.2): mtf_authority — Swing raporunda mtf hükmü raporu YÖNETİR
+    # (manşet, kapı kartı, plan takası). Gelişmiş modda mtf sadece BİLGİdir:
+    # rapor kendi zaman diliminin kimliğini korur; swing bağlamı tek satır nota iner.
+    # Eski davranış: gelişmiş 1day raporu swing raporunun kopyasına dönüşüyordu.
     fn, fn_bold = _setup_pdf_fonts()
     sty = _pdf_styles(fn, fn_bold)
+
+    # FIX (V7.2 tamamlama): mtf_authority=False (Gelişmiş Mod) → mtf hüküm
+    # veremez: manşet/kapı/plan-takası çalışmaz, rapor kendi zaman diliminin
+    # kimliğini korur. Swing bağlamı rapora tek bilgi bloğu olarak eklenir.
+    _mtf_info_only = None
+    if not mtf_authority and mtf:
+        _mtf_info_only = mtf
+        mtf = None
 
     buf = io.BytesIO()
     page_w = A4[0] - 3.2*cm
@@ -2583,6 +2596,14 @@ def build_pdf_bytes_single(
         story.append(side_by_side)
 
     # NEW (V6.3.3): MTF Özet tablosu (haftalık + günlük)
+    if _mtf_info_only and not _mtf_info_only.get("error"):
+        _gi = _mtf_info_only
+        _info_txt = (f"Swing bağlamı (bilgi — bu raporu yönetmez): kapı {_gi.get('gate','—')}"
+                     + (f", RS {_gi.get('rs_rating'):.0f}" if _gi.get("rs_rating") is not None and str(_gi.get("rs_rating")) not in ("nan","") else "")
+                     + f". Swing hükmü için Swing raporu esastır.")
+        story.append(Spacer(1, 0.15*cm))
+        story.append(Paragraph(html.escape(_info_txt), sty["small"]))
+
     if mtf and not mtf.get("error") and "w_setup" in mtf:
         story += _section_header("MTF Özet (Haftalık + Günlük)", sty, page_w)
         # OMURGA #1: günlük satırlar (timing, durum, teyit bandı, Evre'nin
@@ -4323,7 +4344,7 @@ with tab_single:
                             st.caption("Yönetim önerileri için fiyatın entry/TP seviyelerine yaklaşmasını bekle.")
 
                         st.subheader("📄 Rapor")
-                        pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None), ps=ps_adv, risk_pct=risk_pct_per_trade)
+                        pdf_bytes = build_pdf_bytes_single(ticker=ticker, interval_label=interval_label, bars=bars, plan=plan, quote=(q if show_quote else None), logo_b64_str=logo_b64, earn=(earn if check_earnings else None), mh=mh, mtf=(mtf if show_mtf else None), ps=ps_adv, risk_pct=risk_pct_per_trade, mtf_authority=False)
                         st.download_button(
                             label="Raporu PDF'e Çevir (İndir)",
                             data=pdf_bytes,
