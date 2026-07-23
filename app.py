@@ -2680,6 +2680,14 @@ def build_pdf_bytes_single(
         ("Kırılım (bonus)",    b.breakout_bonus,      8),
     ]
     story.append(_score_bar_table(score_items, sty, page_w))
+    # FIX (V7.2): Üç sayı üç cetvelde yaşıyor — okuyucuya söylenmeli, yoksa
+    # "tablo 70 ediyor, toplam neden 54?" diye rapor güvensiz görünüyor.
+    _raw_sum = sum(int(v) for _, v, _ in score_items)
+    story.append(Spacer(1, 0.08 * cm))
+    story.append(Paragraph(html.escape(
+        f"Cetvel notu: tablo HAM puandır (bu hisse: {_raw_sum}/130). "
+        f"TOPLAM SKOR = ham/130×100; SETUP = ilk dört bileşen/85×100. "
+        f"Üç sayı aynı hesabın farklı ölçekleridir."), sty["small"]))
 
     # V7.0: Senaryo metni hükümle çelişemez — karar giriş vermiyorsa günlük
     # grafiğin "girilebilir" iması yerine hükme hizalı plan yazılır.
@@ -4311,6 +4319,7 @@ with tab_single:
                             )
 
                         st.subheader("🧠 Skor Dağılımı")
+                        st.caption("Cetvel notu: tablo ham puandır (maks 130). TOPLAM = ham/130×100 · SETUP = ilk 4 bileşen/85×100.")
                         b = plan.breakdown
                         bdf = pd.DataFrame({
                             "Bileşen": [
