@@ -842,6 +842,20 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         except Exception:
             pass
 
+        # NEW (V7.2): GÖLGE TEYİT (v2-test) — HÜKÜMSÜZ. "Parasız almış gibi"
+        # kayıt: aday tanım kimlere ✓ derse CP-3'te akıbetleri yargılanır.
+        # Tanım: kapanış üst üste 2 gün günlük EMA20 üstünde + RSI yönü yukarı.
+        teyit_v2 = ""
+        try:
+            if ddf is not None and len(ddf) >= 3 and "ema20" in ddf.columns:
+                _c = ddf["close"].astype(float)
+                _e = ddf["ema20"].astype(float)
+                _two_up = bool(_c.iloc[-1] > _e.iloc[-1] and _c.iloc[-2] > _e.iloc[-2])
+                _rsi_up = str(d_plan.rsi_direction_label).startswith("Yükseliyor")
+                teyit_v2 = bool(_two_up and _rsi_up)
+        except Exception:
+            teyit_v2 = ""
+
         weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
         daily_green = d_plan.status_tag.startswith("🟢")
         w_extended = w_plan.status_tag.startswith("⚫")
@@ -907,6 +921,13 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "gate": gate,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
             "rs_rating": rs_rating,
+            "teyit_v2": teyit_v2,
+            "rs_edge_w": (
+                sum(rs_edges.get(k, float("nan")) * w for k, w in
+                    [("edge_3m", 0.30), ("edge_6m", 0.35), ("edge_12m", 0.35)])
+                if all(np.isfinite(rs_edges.get(k, float("nan"))) for k in ("edge_3m", "edge_6m", "edge_12m"))
+                else float("nan")
+            ),
             "rs_edge_3m": rs_edges.get("edge_3m", float("nan")),
             "rs_edge_6m": rs_edges.get("edge_6m", float("nan")),
             "rs_edge_12m": rs_edges.get("edge_12m", float("nan")),
@@ -2635,6 +2656,9 @@ def build_pdf_bytes_single(
             )) or "—"])
         mtf_rows += [
             ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
+            ["RS Ham Güç (SPY farkı, gölge ölçüm)",
+             f"{mtf.get('rs_edge_w', float('nan')):+.1f} — bilgi; kararlara etki etmez"
+             if np.isfinite(mtf.get("rs_edge_w", float("nan"))) else "—"],
             ["Haftalık Bant — alarm (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
         ]
         if not _closed:
@@ -3735,6 +3759,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "gate": mtf.get("gate", ""),
                         "earnings_days": (earn.get("days", "") if (earn and not earn.get("error")) else ""),
                         "rs_rating": round(float(mtf["rs_rating"]), 1) if np.isfinite(mtf.get("rs_rating", float("nan"))) else "",
+                        "teyit_v2": mtf.get("teyit_v2", ""),
                         "rs_edge_3m": round(float(mtf["rs_edge_3m"]), 2) if np.isfinite(mtf.get("rs_edge_3m", float("nan"))) else "",
                         "rs_edge_6m": round(float(mtf["rs_edge_6m"]), 2) if np.isfinite(mtf.get("rs_edge_6m", float("nan"))) else "",
                         "rs_edge_12m": round(float(mtf["rs_edge_12m"]), 2) if np.isfinite(mtf.get("rs_edge_12m", float("nan"))) else "",
@@ -3809,6 +3834,13 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         box = st.success if mtf["verdict_kind"] == "success" else (
             st.warning if mtf["verdict_kind"] == "warning" else st.error)
         box(f"**DURUM:** {mtf['verdict']}")
+        # NEW (V7.2): Gölge teyit satırı — bilgi, hüküm DEĞİL (karar kullanıcının)
+        _tv2 = mtf.get("teyit_v2", "")
+        if _tv2 != "":
+            st.caption(
+                ("🧪 Aday teyit (v2-test): **✓ SAĞLANDI**" if _tv2 else "🧪 Aday teyit (v2-test): ✗ yok")
+                + " — kapanış 2 gündür EMA20 üstü + RSI yönü yukarı. Hükümsüz test verisidir; CP-3'te karneyle yargılanacak."
+            )
         _wlo, _whi = mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))
         if np.isfinite(_wlo) and np.isfinite(_whi) and _whi > 0:
             if price > _whi:
@@ -3826,6 +3858,12 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
     rsr = mtf.get("rs_rating", float("nan"))
     w3.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
               help="Endekse göre göreli güç. <45 kalite kriteri dışıdır; 45-60 bilgi notudur.")
+    # NEW (V7.2): Gölge ölçüm — kelepçesiz ham güç, bilgi amaçlı. RS cetveli
+    # 20-80'e sıkışıktır (liderler 80'de yığılır); ham güç liderleri ayrıştırır.
+    # KARARLARA ETKİ ETMEZ; CP-3 cetvel reformunun canlı karşılaştırma verisidir.
+    _rew = mtf.get("rs_edge_w", float("nan"))
+    if np.isfinite(_rew):
+        w3.caption(f"Ham güç (SPY farkı): **{_rew:+.1f}** · gölge ölçüm, karara etki etmez")
     st.info(
         f"📐 **Haftalık bant (EMA20–EMA50): {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}** — "
         f"alarm bu banda kurulur; çaldığında analiz yenilenir."
