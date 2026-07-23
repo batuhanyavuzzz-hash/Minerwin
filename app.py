@@ -3717,6 +3717,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                     for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("__sw_pdf::")]:
                         st.session_state.pop(_k, None)
                     d_plan = mtf["_d_plan"]
+                    w_plan = mtf["_w_plan"]  # FIX (V7.2): kayıt seviyeleri için
                     record = {
                         "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                         "ticker": sw_ticker,
@@ -3736,13 +3737,33 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "rsi_direction": d_plan.rsi_direction_label,
                         "dist_to_52w_high_pct": round(float(d_plan.dist_to_52w_high_pct), 2) if np.isfinite(d_plan.dist_to_52w_high_pct) else "",
                         "high_vol_warning": d_plan.high_vol_warning,
-                        "entry_low": round(float(mtf["w_entry_low"]), 4),
-                        "entry_high": round(float(mtf["w_entry_high"]), 4),
-                        "stop": round(float(d_plan.stop), 4),
-                        "tp1": round(float(d_plan.tp1), 4),
-                        "tp2": round(float(d_plan.tp2), 4),
-                        "rr_tp1": round(float(d_plan.rr_tp1), 4) if np.isfinite(d_plan.rr_tp1) else "",
-                        "rr_tp2": round(float(d_plan.rr_tp2), 4) if np.isfinite(d_plan.rr_tp2) else "",
+                        # FIX (V7.2): Seviyeler TEK plandan yazılır — eski hali
+                        # entry'yi haftalıktan, stop/tp'yi günlükten karıştırıyordu
+                        # (85 kayıtta stop > bant üstü saçmalığı). Kapı AÇIK'sa
+                        # günlük plan (işlem seviyeleri), değilse haftalık plan
+                        # (referans/alarm seviyeleri) esastır; kaynak damgalanır.
+                        "levels_src": ("D" if mtf.get("gate") == "ACIK" else "W"),
+                        **(
+                            {
+                                "entry_low": round(float(d_plan.entry_low), 4),
+                                "entry_high": round(float(d_plan.entry_high), 4),
+                                "stop": round(float(d_plan.stop), 4),
+                                "tp1": round(float(d_plan.tp1), 4),
+                                "tp2": round(float(d_plan.tp2), 4),
+                                "rr_tp1": round(float(d_plan.rr_tp1), 4) if np.isfinite(d_plan.rr_tp1) else "",
+                                "rr_tp2": round(float(d_plan.rr_tp2), 4) if np.isfinite(d_plan.rr_tp2) else "",
+                            }
+                            if mtf.get("gate") == "ACIK" else
+                            {
+                                "entry_low": round(float(w_plan.entry_low), 4),
+                                "entry_high": round(float(w_plan.entry_high), 4),
+                                "stop": round(float(w_plan.stop), 4),
+                                "tp1": round(float(w_plan.tp1), 4),
+                                "tp2": round(float(w_plan.tp2), 4),
+                                "rr_tp1": round(float(w_plan.rr_tp1), 4) if np.isfinite(w_plan.rr_tp1) else "",
+                                "rr_tp2": round(float(w_plan.rr_tp2), 4) if np.isfinite(w_plan.rr_tp2) else "",
+                            }
+                        ),
                         "capacity": d_plan.capacity_level,
                     }
                     try:
