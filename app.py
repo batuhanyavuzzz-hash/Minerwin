@@ -830,10 +830,15 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         # Minervini prensibi: endekse karşı zayıf hisse lider değildir —
         # teknik görünüm ne olursa olsun aday bile olamaz.
         rs_rating = float("nan")
+        rs_edges = {}
         try:
             spy_df = _fetch_spy_daily(320)
             rs = analyze_relative_strength(ddf, spy_df)
             rs_rating = float(rs.get("rs_rating", float("nan")))
+            # NEW (V7.2): GÖLGE ÖLÇÜM — ham SPY farkları (kelepçesiz) kayda
+            # akar; hükme DOKUNMAZ. CP-3'te alternatif RS cetvelleri bu ham
+            # veriyle simüle edilecek (retro API maliyeti olmadan).
+            rs_edges = {k: rs.get(k, float("nan")) for k in ("edge_3m", "edge_6m", "edge_12m")}
         except Exception:
             pass
 
@@ -902,6 +907,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "gate": gate,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
             "rs_rating": rs_rating,
+            "rs_edge_3m": rs_edges.get("edge_3m", float("nan")),
+            "rs_edge_6m": rs_edges.get("edge_6m", float("nan")),
+            "rs_edge_12m": rs_edges.get("edge_12m", float("nan")),
             "w_extended": w_extended,
             # NEW (V7.0): Swing Modu bu nesnelerden grafik ve plan çizer
             "_w_plan": w_plan, "_d_plan": d_plan,
@@ -3727,6 +3735,9 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "gate": mtf.get("gate", ""),
                         "earnings_days": (earn.get("days", "") if (earn and not earn.get("error")) else ""),
                         "rs_rating": round(float(mtf["rs_rating"]), 1) if np.isfinite(mtf.get("rs_rating", float("nan"))) else "",
+                        "rs_edge_3m": round(float(mtf["rs_edge_3m"]), 2) if np.isfinite(mtf.get("rs_edge_3m", float("nan"))) else "",
+                        "rs_edge_6m": round(float(mtf["rs_edge_6m"]), 2) if np.isfinite(mtf.get("rs_edge_6m", float("nan"))) else "",
+                        "rs_edge_12m": round(float(mtf["rs_edge_12m"]), 2) if np.isfinite(mtf.get("rs_edge_12m", float("nan"))) else "",
                         "regime": _strip_emoji(str(mh.get("regime", ""))) if mh else "",
                         "dist_days": mh.get("dist_days", "") if mh else "",
                         "setup_score": int(mtf["w_setup"]),
