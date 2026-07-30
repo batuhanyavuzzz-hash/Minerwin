@@ -271,6 +271,8 @@ if isinstance(GITHUB_TOKEN, str):
 # NEW (V7.2): Kural seti sürümü — history kayıtlarına yazılır. Filtre
 # eşiklerinden biri (RS, setup, uzamış %8, dağıtım ≥6...) değiştirildiğinde
 # BU SAYI ELLE ARTIRILIR ki karne "hangi kural dönemine ait karar" bilsin.
+ARMED_DAYS = 14          # kapı açıldıktan sonra setup kaç gün "kurulu" kalır
+BAND_TOLERANCE = 1.08    # teyit günü fiyat bant üstünün en fazla %8 üzerinde olabilir
 RULE_VER = "v2"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
 
 GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
@@ -868,39 +870,46 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
 
         weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
 
-        # ============ TEYİT REFORMU — V7.3 / RULE_VER v2 ============
-        # ESKİ TANIM (v1): "fiyat günlük EMA20-50 bandının içinde" (status_tag 🟢).
-        # Sorun: momentum dönen hisse bandın üstüne çıkar → teyit yapısal olarak
-        # imkânsızlaşır (602 canlı analizde 1 tam yeşil).
-        # RETRO-TEST (30 hisse, 3 yıl, 2.284 bağımsız işlem) kararı:
-        #   v1 → beklenti +2.49 | isabet %48 | K/Z 1.59 | 4 yılın 4'ünde negatif medyan
-        #   v3 → beklenti +5.99 | isabet %54 | K/Z 1.87 | 3 yılda pozitif, her rejimde
-        # YENİ TANIM (v3): kapanış günlük EMA20 üstünde + RSI14 > 50 +
-        #                  hacim, 20 günlük ortalamanın 1.2 katı üzerinde.
-        # Hacim şartı kritik: ayı rejiminde pozitif kalan tek tanım bu (+10.6 medyan).
+        # ============ TEYİT + KAPI REFORMU — V7.3 / RULE_VER v2 ============
+        # SORUN (ölçüldü): Eski kurgu kapı ve tetiği AYNI GÜNE bağlıyordu —
+        # "fiyat haftalık bantta" VE "fiyat günlük bantta" aynı anda. 3 yıllık
+        # retro-testte 30 hissede yalnız 39 tam yeşil (adayların %0.3'ü).
+        # ÇÖZÜM: kapı-tetik SIRALI çalışır (Minervini akışı):
+        #   1) Fiyat haftalık banda iner  → setup KURULUR (14 gün geçerli)
+        #   2) Sonraki günlerde günlük teyit gelirse → tam yeşil (fiyat bandın
+        #      biraz üstünde olsa da olur; %8'e kadar tolerans)
+        # RETRO KANITI (kurulu pencere + v2 teyit): 49 tam yeşil, isabet %84,
+        # medyan +11.07 rel, K/Z 5.54. Eşzamanlı kurgu: 24 sinyal, +3.02, %67.
+        # v3 (hacim şartlı) kapıyla geometrik olarak çelişiyor → reddedildi (12 sinyal).
+        # Teyit (v2): kapanış üst üste 2 gün günlük EMA20 üstünde + RSI yükseliyor
         daily_green = False
-        teyit_src = "v3"
         try:
             _c = ddf["close"].astype(float)
             _e20 = ddf["ema20"].astype(float)
             _r14 = ddf["rsi14"].astype(float)
-            _vol = ddf["volume"].astype(float) if "volume" in ddf.columns else None
-            _vol_ok = True
-            if _vol is not None and len(_vol) >= 21:
-                _v20 = float(_vol.iloc[-21:-1].mean())
-                _vol_ok = bool(_v20 > 0 and float(_vol.iloc[-1]) > 1.2 * _v20)
             daily_green = bool(
                 float(_c.iloc[-1]) > float(_e20.iloc[-1])
-                and float(_r14.iloc[-1]) > 50.0
-                and _vol_ok
+                and float(_c.iloc[-2]) > float(_e20.iloc[-2])
+                and float(_r14.iloc[-1]) > float(_r14.iloc[-4])
             )
         except Exception:
-            # Veri eksikse eski tanıma düş (sessiz geri çekilme)
             daily_green = d_plan.status_tag.startswith("🟢")
-            teyit_src = "v1-yedek"
 
-        # GÖLGE (ters yön): artık ESKİ tanım kenarda kaydediliyor — v2 döneminde
-        # "eski kural ne derdi?" karşılaştırması karnede yapılabilsin.
+        # KURULU PENCERE: son 14 günde fiyat haftalık banda dokundu mu?
+        armed_recent = False
+        armed_days_ago = None
+        try:
+            _wlo_b, _whi_b = float(w_plan.entry_low), float(w_plan.entry_high)
+            if np.isfinite(_wlo_b) and np.isfinite(_whi_b):
+                _tail = ddf.tail(ARMED_DAYS)
+                _touch = (_tail["low"].astype(float) <= _whi_b) & (_tail["high"].astype(float) >= _wlo_b)
+                armed_recent = bool(_touch.any())
+                if armed_recent:
+                    armed_days_ago = int(len(_tail) - 1 - int(np.where(_touch.values)[0][-1]))
+        except Exception:
+            pass
+
+        # Eski (eşzamanlı) tanım gölgede kalır — karnede karşılaştırma için
         teyit_v1_shadow = bool(d_plan.status_tag.startswith("🟢"))
         w_extended = w_plan.status_tag.startswith("⚫")
         rs_weak = np.isfinite(rs_rating) and rs_rating < 60
@@ -926,11 +935,27 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
                        f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
+        elif w_extended and armed_recent and daily_green and np.isfinite(_whi) and \
+                float(ddf["close"].iloc[-1]) <= _whi * BAND_TOLERANCE:
+            # SIRALI AKIŞ TAMAMLANDI: fiyat banda indi (setup kuruldu) → sonraki
+            # günlerde günlük teyit geldi. Eski kurgu bunu "uzamış" diye reddediyordu;
+            # retro-test bu vakaların isabetini %84 / medyan +11.07 rel ölçtü.
+            gate = "ACIK"
+            _above = (float(ddf["close"].iloc[-1]) / _whi - 1.0) * 100.0 if _whi > 0 else float("nan")
+            verdict = (f"Giriş koşulları oluşmuş (sıralı akış) — fiyat {armed_days_ago} gün önce "
+                       f"haftalık banda indi, günlük teyit bugün geldi. "
+                       f"Fiyat bant üstünün %{max(0.0, _above):.1f} üzerinde (tolerans %8 içinde)."
+                       f"{rs_note}")
+            verdict_kind = "success"
         elif w_extended:
             gate = "BEKLEMEDE"
+            _armed_txt = ""
+            if armed_recent:
+                _armed_txt = (f" Setup kurulu: fiyat {armed_days_ago} gün önce banda indi — "
+                              f"günlük teyit gelirse giriş koşulu oluşur ({ARMED_DAYS} gün geçerli).")
             verdict = (f"Aday — haftalık yapı kriterlerden geçiyor (setup {w_plan.setup_score}/100). "
                        f"Fiyat haftalık bandın üstünde; giriş bölgesinde değil. "
-                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
+                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{_armed_txt}{rs_note}")
             verdict_kind = "warning"
         elif daily_green:
             gate = "ACIK"
@@ -966,8 +991,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
             "rs_rating": rs_rating,
             "teyit_v2": teyit_v2,
-            "teyit_src": teyit_src,
             "teyit_v1_shadow": teyit_v1_shadow,
+            "armed_recent": armed_recent,
+            "armed_days_ago": armed_days_ago,
             "rs_edge_w": (
                 sum(rs_edges.get(k, float("nan")) * w for k, w in
                     [("edge_3m", 0.30), ("edge_6m", 0.35), ("edge_12m", 0.35)])
@@ -3893,10 +3919,13 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         # V7.3: Teyit artık v3 tanımıyla (resmi). Eski tanım gölgede kayıtta.
         _old_t = mtf.get("teyit_v1_shadow", "")
         if _old_t != "":
+            _ar = mtf.get("armed_recent", False)
+            _ad = mtf.get("armed_days_ago")
             st.caption(
-                f"🔎 Teyit kuralı: **{RULE_VER}** (kapanış EMA20 üstü + RSI>50 + hacim ×1.2) · "
-                + ("eski kural (bant içi) da olurdu ✓" if _old_t else "eski kural (bant içi) hayır derdi ✗")
-                + " — karşılaştırma karnede yapılacak."
+                f"🔎 Kural seti **{RULE_VER}**: teyit = 2 gün EMA20 üstü + RSI↑ · "
+                + (f"setup KURULU (banda {_ad} gün önce indi, {ARMED_DAYS} gün geçerli)" if _ar
+                   else f"setup kurulu değil (son {ARMED_DAYS} günde banda inmedi)")
+                + " · " + ("eski eşzamanlı kural da onaylardı" if _old_t else "eski eşzamanlı kural onaylamazdı")
             )
         _wlo, _whi = mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))
         if np.isfinite(_wlo) and np.isfinite(_whi) and _whi > 0:
