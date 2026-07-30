@@ -3983,7 +3983,126 @@ st.divider()
 # =========================================================
 # ANA SEKMELER
 # =========================================================
-tab_single, tab_portfolio = st.tabs(["📈 Tek Hisse Analiz", "🧳 Portföy Analiz"])
+# =========================================================
+# RETRO-TEST — NEW (V7.2): kural ADAYLARINI geçmişe karşı sınar.
+# Kural katmanına DOKUNMAZ; salt-okuma analiz aracıdır (serbest şerit).
+# Look-ahead yok: i. günün kararı yalnızca ≤ i verisiyle verilir.
+# EMA/RSI nedensel serilerdir; haftalık kapı bir hafta GERİDEN okunur
+# (o haftanın kapanışı o gün henüz bilinmiyordu).
+# =========================================================
+RETRO_FWD_DAYS = 20
+
+
+def _retro_signal_series(d: pd.DataFrame) -> Dict[str, pd.Series]:
+    """Aday teyit tanımları — hepsi aynı seride, vektörel, nedensel."""
+    c, e20, e50 = d["close"], d["ema20"], d["ema50"]
+    r = d["rsi14"]
+    v = d["volume"].astype(float) if "volume" in d.columns else pd.Series(0.0, index=d.index)
+    lo = pd.concat([e20, e50], axis=1).min(axis=1)
+    hi = pd.concat([e20, e50], axis=1).max(axis=1)
+    vol20 = v.shift(1).rolling(20).mean()
+    return {
+        "v1 · bant içi (MEVCUT)":      (c >= lo) & (c <= hi),
+        "v2 · EMA20 2 gün + RSI↑":     (c > e20) & (c.shift(1) > e20.shift(1)) & (r > r.shift(3)),
+        "v3 · EMA20 + RSI>50 + hacim": (c > e20) & (r > 50) & (v > 1.2 * vol20),
+        "v4 · EMA20 geri alım günü":   (c > e20) & (c.shift(1) <= e20.shift(1)) & (r > r.shift(3)),
+        "v5 · gevşek: EMA20 + RSI↑":   (c > e20) & (r > r.shift(1)),
+    }
+
+
+def _retro_gate_mask(d: pd.DataFrame, w: pd.DataFrame) -> pd.Series:
+    """Haftalık kalite kapısı (YAKLAŞIK): EMA dizilimi pozitif + fiyat EMA50w
+    üstünde. Bir hafta geriden okunur; günlük tarihlere ffill ile eşlenir."""
+    try:
+        wg = ((w["close"] > w["ema50"]) & (w["ema20"] > w["ema50"])).shift(1).fillna(False)
+        ws = pd.Series(wg.values, index=pd.to_datetime(w["time"]))
+        ws = ws[~ws.index.duplicated(keep="last")].sort_index()
+        mapped = ws.reindex(pd.to_datetime(d["time"]), method="ffill")
+        return pd.Series(mapped.fillna(False).values, index=d.index).astype(bool)
+    except Exception:
+        return pd.Series(True, index=d.index)
+
+
+@st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
+def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS) -> Dict[str, Any]:
+    """Aday tanımları geçmiş veride koşturur. API maliyeti: hisse başına 2 çağrı
+    (günlük + haftalık) + 1 kez SPY. Simülasyonun kendisi bedava (yerel hesap)."""
+    out = {"rows": [], "errors": [], "pool": {}, "span": ""}
+    try:
+        spy = _fetch_spy_daily(320)
+        spy_c = pd.Series(spy["close"].astype(float).values, index=pd.to_datetime(spy["time"]))
+        spy_c = spy_c[~spy_c.index.duplicated(keep="last")].sort_index()
+    except Exception as e:
+        out["errors"].append(f"SPY: {_sanitize_err(e)}")
+        return out
+
+    pool = {}   # tanım -> set(sinyal tarihleri)
+    all_dates = set()
+
+    for sym in tickers:
+        sym = str(sym).strip().upper()
+        if not sym:
+            continue
+        try:
+            d = _add_indicators(_fetch_daily_df(sym, 320))
+            w = _add_indicators(_fetch_weekly_df(sym, 260))
+            if d is None or len(d) < 80:
+                out["errors"].append(f"{sym}: yetersiz veri")
+                continue
+            d = d.reset_index(drop=True)
+            dt = pd.to_datetime(d["time"])
+            c = d["close"].astype(float)
+            spy_al = spy_c.reindex(dt, method="ffill")
+            gate = _retro_gate_mask(d, w)
+            sigs = _retro_signal_series(d)
+            all_dates.update(dt.dt.date.tolist()[30:len(d) - fwd])
+
+            for name, s in sigs.items():
+                pool.setdefault(name, set())
+                idx = [i for i in range(30, len(d) - fwd) if bool(s.iloc[i]) and bool(gate.iloc[i])]
+                for i in idx:
+                    p0, p1 = float(c.iloc[i]), float(c.iloc[i + fwd])
+                    if not (p0 > 0 and p1 > 0):
+                        continue
+                    s0, s1 = float(spy_al.iloc[i]), float(spy_al.iloc[i + fwd])
+                    spy_ret = (s1 / s0 - 1) * 100.0 if (s0 > 0 and s1 > 0) else 0.0
+                    win_h = d["high"].astype(float).iloc[i + 1:i + fwd + 1]
+                    win_l = d["low"].astype(float).iloc[i + 1:i + fwd + 1]
+                    out["rows"].append({
+                        "def": name, "ticker": sym,
+                        "tarih": str(dt.iloc[i].date()),
+                        "getiri%": round((p1 / p0 - 1) * 100.0, 2),
+                        "rel%": round((p1 / p0 - 1) * 100.0 - spy_ret, 2),
+                        "MFE%": round((float(win_h.max()) / p0 - 1) * 100.0, 2),
+                        "MAE%": round((float(win_l.min()) / p0 - 1) * 100.0, 2),
+                    })
+                    pool[name].add(dt.iloc[i].date())
+        except Exception as e:
+            out["errors"].append(f"{sym}: {_sanitize_err(e)}")
+
+    # Havuz metrikleri: "herhangi bir hissede sinyal var mı" — kuraklık testi
+    days = sorted(all_dates)
+    out["span"] = f"{days[0]} → {days[-1]}" if days else ""
+    for name, ds in pool.items():
+        gaps, last = [], None
+        for day in days:
+            if day in ds:
+                if last is not None:
+                    gaps.append((day - last).days)
+                last = day
+        months = sorted({(day.year, day.month) for day in days})
+        cov = len({(day.year, day.month) for day in ds})
+        out["pool"][name] = {
+            "sinyal_gunu": len(ds),
+            "en_uzun_kuraklik_gun": max(gaps) if gaps else None,
+            "ay_kapsama": f"{cov}/{len(months)}",
+        }
+    return out
+
+
+tab_single, tab_portfolio, tab_retro = st.tabs(
+    ["📈 Tek Hisse Analiz", "🧳 Portföy Analiz", "🧪 Retro-Test"]
+)
 
 
 # =========================================================
@@ -4786,3 +4905,77 @@ with tab_portfolio:
                             f"📅 Yaklaşan bilanço ({EARNINGS_WARN_DAYS} gün içinde): "
                             f"**{', '.join(earn_warn_tickers)}** — gece gap riski, stop koruma sağlamaz!"
                         )
+
+
+# =========================================================
+# SEKME 3: RETRO-TEST (NEW V7.2)
+# Kural adaylarını geçmişe karşı sınar. Hiçbir kararı DEĞİŞTİRMEZ.
+# =========================================================
+with tab_retro:
+    st.subheader("🧪 Retro-Test — teyit tanımı adayları")
+    st.caption(
+        "Aday tanımlar geçmiş veride gün gün koşturulur (look-ahead yok). "
+        "Amaç: hangi tanım hem kazananları yakalıyor hem tuzaklara kanmıyor hem de "
+        "kıtlık dönemlerinde bile sinyal üretiyor. Bu sekme hiçbir kuralı değiştirmez."
+    )
+    _def_list = ",".join([
+        "AEIS", "SNDK", "BE", "BEP", "CLSK", "INTC", "NBIS", "BG", "AMZN", "PLD",
+        "WDC", "MRVL", "CRDO", "MU", "AVGO", "TSLA", "IREN", "ONDS", "DELL", "CRWV",
+    ])
+    rt_syms = st.text_area("Denek hisseler (virgülle)", value=_def_list, height=80, key="rt_syms")
+    c1, c2 = st.columns([1, 3])
+    rt_fwd = c1.number_input("İleri pencere (gün)", 5, 60, RETRO_FWD_DAYS, 5, key="rt_fwd")
+    run_rt = c2.button("▶️ Retro-Testi Çalıştır", type="primary", key="rt_run")
+    st.caption(
+        f"API maliyeti ≈ hisse×2 + 1 çağrı. {len([s for s in rt_syms.split(',') if s.strip()])} hisse "
+        f"→ ~{2*len([s for s in rt_syms.split(',') if s.strip()])+1} çağrı; dakikalık limit nedeniyle "
+        "birkaç dakika sürebilir (sonuç 1 saat cache'lenir)."
+    )
+
+    if run_rt:
+        _tick = tuple(sorted({s.strip().upper() for s in rt_syms.split(",") if s.strip()}))
+        with st.spinner(f"{len(_tick)} hisse geçmişe karşı sınanıyor…"):
+            st.session_state["__rt_res"] = run_retro_test(_tick, int(rt_fwd))
+
+    _res = st.session_state.get("__rt_res")
+    if _res:
+        if _res.get("errors"):
+            st.warning("Veri alınamayanlar: " + " · ".join(_res["errors"][:8]))
+        rows = pd.DataFrame(_res.get("rows", []))
+        if rows.empty:
+            st.info("Hiçbir tanım sinyal üretmedi — pencereyi veya denek listesini genişlet.")
+        else:
+            st.caption(f"Test aralığı: {_res.get('span','—')} · {rows['ticker'].nunique()} hisse")
+            summ = rows.groupby("def").agg(
+                sinyal=("rel%", "size"),
+                medyan_rel=("rel%", "median"),
+                isabet_yuzde=("rel%", lambda s: round(100 * (s > 0).mean(), 0)),
+                medyan_MFE=("MFE%", "median"),
+                medyan_MAE=("MAE%", "median"),
+                en_kotu=("rel%", "min"),
+            ).round(2)
+            pool = pd.DataFrame(_res.get("pool", {})).T
+            tbl = summ.join(pool, how="left")
+            st.markdown("**Tanım karnesi** — `medyan_rel` = SPY'a görece 20g getiri medyanı")
+            st.dataframe(tbl, use_container_width=True)
+            st.caption(
+                "Okuma: `medyan_rel` ve `isabet_yuzde` kaliteyi; `en_uzun_kuraklik_gun` ve "
+                "`ay_kapsama` kıtlık dayanıklılığını; `medyan_MAE` ise girişten sonraki "
+                "en kötü sarkmayı (stop dayanıklılığı) gösterir."
+            )
+
+            _sel = st.selectbox("Tanım detayı", sorted(rows["def"].unique()), key="rt_sel")
+            sub = rows[rows["def"] == _sel]
+            per_t = sub.groupby("ticker").agg(
+                sinyal=("rel%", "size"), medyan_rel=("rel%", "median"),
+                en_iyi=("rel%", "max"), en_kotu=("rel%", "min"),
+            ).round(2).sort_values("medyan_rel", ascending=False)
+            st.markdown("**Hisse bazında** — tuzak kontrolü (BEP / AEIS / SNDK satırlarına bak)")
+            st.dataframe(per_t, use_container_width=True)
+            with st.expander("Tüm sinyal kayıtları (tarih tarih)"):
+                st.dataframe(sub.sort_values("tarih", ascending=False), use_container_width=True, hide_index=True)
+            st.download_button(
+                "📥 Retro-test sonuçlarını indir (CSV)",
+                data=rows.to_csv(index=False).encode("utf-8-sig"),
+                file_name="minerwin_retrotest.csv", mime="text/csv", key="rt_dl",
+            )
