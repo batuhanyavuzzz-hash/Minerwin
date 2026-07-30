@@ -1,6 +1,16 @@
 # app.py
 # MinerWin — Tek Hisse + Portföy Analiz (V7.0) — Twelve Data + Finnhub
 #
+# V7.3 Değişiklikleri (TEYİT REFORMU — RULE_VER v2):
+#  ★ Günlük teyit tanımı değişti: "fiyat bant içinde" (v1) → "kapanış EMA20
+#    üstü + RSI14>50 + hacim ×1.2" (v3). Gerekçe: 30 hisse / 3 yıl / 2.284
+#    bağımsız işlemlik retro-test — v1 dört yılın dördünde negatif medyan,
+#    beklenti +2.49; v3 beklenti +5.99, isabet %54, K/Z 1.87, her rejimde pozitif.
+#  ★ Eski tanım artık GÖLGE olarak kaydedilir (teyit_v1_eski) — karnede
+#    "eski kural ne derdi?" karşılaştırması yapılabilsin.
+#  ★ Kapı / RS vetosu / setup eşiği DEĞİŞMEDİ: retro-test edge'in seçim
+#    katmanında olduğunu gösterdi (nötr hisselerde tüm tanımlar negatif).
+#
 # V7.2 Değişiklikleri (V7.1 üzerine — KALICI HISTORY):
 #  ★ GitHub Gist senkronu: history.csv artık Cloud'un geçici diskinde değil,
 #    kullanıcının GitHub hesabındaki gizli bir Gist'te yaşar.
@@ -231,7 +241,7 @@ st.markdown(
     {"<img class='logo' src='data:image/png;base64," + logo_b64 + "' />" if logo_b64 else ""}
     <div class="header-title">MinerWin</div>
 </div>
-<div class="sub-title">Minervini-Based Technical Trading Engine — V7.2</div>
+<div class="sub-title">Minervini-Based Technical Trading Engine — V7.3</div>
 """,
     unsafe_allow_html=True,
 )
@@ -261,7 +271,7 @@ if isinstance(GITHUB_TOKEN, str):
 # NEW (V7.2): Kural seti sürümü — history kayıtlarına yazılır. Filtre
 # eşiklerinden biri (RS, setup, uzamış %8, dağıtım ≥6...) değiştirildiğinde
 # BU SAYI ELLE ARTIRILIR ki karne "hangi kural dönemine ait karar" bilsin.
-RULE_VER = "v1"
+RULE_VER = "v2"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
 
 GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
 GIST_FILENAME = "history.csv"
@@ -857,7 +867,41 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             teyit_v2 = ""
 
         weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
-        daily_green = d_plan.status_tag.startswith("🟢")
+
+        # ============ TEYİT REFORMU — V7.3 / RULE_VER v2 ============
+        # ESKİ TANIM (v1): "fiyat günlük EMA20-50 bandının içinde" (status_tag 🟢).
+        # Sorun: momentum dönen hisse bandın üstüne çıkar → teyit yapısal olarak
+        # imkânsızlaşır (602 canlı analizde 1 tam yeşil).
+        # RETRO-TEST (30 hisse, 3 yıl, 2.284 bağımsız işlem) kararı:
+        #   v1 → beklenti +2.49 | isabet %48 | K/Z 1.59 | 4 yılın 4'ünde negatif medyan
+        #   v3 → beklenti +5.99 | isabet %54 | K/Z 1.87 | 3 yılda pozitif, her rejimde
+        # YENİ TANIM (v3): kapanış günlük EMA20 üstünde + RSI14 > 50 +
+        #                  hacim, 20 günlük ortalamanın 1.2 katı üzerinde.
+        # Hacim şartı kritik: ayı rejiminde pozitif kalan tek tanım bu (+10.6 medyan).
+        daily_green = False
+        teyit_src = "v3"
+        try:
+            _c = ddf["close"].astype(float)
+            _e20 = ddf["ema20"].astype(float)
+            _r14 = ddf["rsi14"].astype(float)
+            _vol = ddf["volume"].astype(float) if "volume" in ddf.columns else None
+            _vol_ok = True
+            if _vol is not None and len(_vol) >= 21:
+                _v20 = float(_vol.iloc[-21:-1].mean())
+                _vol_ok = bool(_v20 > 0 and float(_vol.iloc[-1]) > 1.2 * _v20)
+            daily_green = bool(
+                float(_c.iloc[-1]) > float(_e20.iloc[-1])
+                and float(_r14.iloc[-1]) > 50.0
+                and _vol_ok
+            )
+        except Exception:
+            # Veri eksikse eski tanıma düş (sessiz geri çekilme)
+            daily_green = d_plan.status_tag.startswith("🟢")
+            teyit_src = "v1-yedek"
+
+        # GÖLGE (ters yön): artık ESKİ tanım kenarda kaydediliyor — v2 döneminde
+        # "eski kural ne derdi?" karşılaştırması karnede yapılabilsin.
+        teyit_v1_shadow = bool(d_plan.status_tag.startswith("🟢"))
         w_extended = w_plan.status_tag.startswith("⚫")
         rs_weak = np.isfinite(rs_rating) and rs_rating < 60
         rs_very_weak = np.isfinite(rs_rating) and rs_rating < 45
@@ -922,6 +966,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "weekly_ok": weekly_ok, "daily_green": daily_green,
             "rs_rating": rs_rating,
             "teyit_v2": teyit_v2,
+            "teyit_src": teyit_src,
+            "teyit_v1_shadow": teyit_v1_shadow,
             "rs_edge_w": (
                 sum(rs_edges.get(k, float("nan")) * w for k, w in
                     [("edge_3m", 0.30), ("edge_6m", 0.35), ("edge_12m", 0.35)])
@@ -3768,6 +3814,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "earnings_days": (earn.get("days", "") if (earn and not earn.get("error")) else ""),
                         "rs_rating": round(float(mtf["rs_rating"]), 1) if np.isfinite(mtf.get("rs_rating", float("nan"))) else "",
                         "teyit_v2": mtf.get("teyit_v2", ""),
+                        "teyit_v1_eski": mtf.get("teyit_v1_shadow", ""),
                         "rs_edge_3m": round(float(mtf["rs_edge_3m"]), 2) if np.isfinite(mtf.get("rs_edge_3m", float("nan"))) else "",
                         "rs_edge_6m": round(float(mtf["rs_edge_6m"]), 2) if np.isfinite(mtf.get("rs_edge_6m", float("nan"))) else "",
                         "rs_edge_12m": round(float(mtf["rs_edge_12m"]), 2) if np.isfinite(mtf.get("rs_edge_12m", float("nan"))) else "",
@@ -3843,11 +3890,13 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
             st.warning if mtf["verdict_kind"] == "warning" else st.error)
         box(f"**DURUM:** {mtf['verdict']}")
         # NEW (V7.2): Gölge teyit satırı — bilgi, hüküm DEĞİL (karar kullanıcının)
-        _tv2 = mtf.get("teyit_v2", "")
-        if _tv2 != "":
+        # V7.3: Teyit artık v3 tanımıyla (resmi). Eski tanım gölgede kayıtta.
+        _old_t = mtf.get("teyit_v1_shadow", "")
+        if _old_t != "":
             st.caption(
-                ("🧪 Aday teyit (v2-test): **✓ SAĞLANDI**" if _tv2 else "🧪 Aday teyit (v2-test): ✗ yok")
-                + " — kapanış 2 gündür EMA20 üstü + RSI yönü yukarı. Hükümsüz test verisidir; CP-3'te karneyle yargılanacak."
+                f"🔎 Teyit kuralı: **{RULE_VER}** (kapanış EMA20 üstü + RSI>50 + hacim ×1.2) · "
+                + ("eski kural (bant içi) da olurdu ✓" if _old_t else "eski kural (bant içi) hayır derdi ✗")
+                + " — karşılaştırma karnede yapılacak."
             )
         _wlo, _whi = mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))
         if np.isfinite(_wlo) and np.isfinite(_whi) and _whi > 0:
@@ -4020,6 +4069,52 @@ def _retro_signal_series(d: pd.DataFrame) -> Dict[str, pd.Series]:
     }
 
 
+def _retro_rs_series(d: pd.DataFrame, spy_al: pd.Series) -> pd.Series:
+    """RS Rating'in canlı formülünün vektörel hali (aynı pencereler/ağırlıklar):
+    50 + Σ clamp(edge,±30)×w  (+8 RS çizgisi 60g zirvesindeyse). Nedenseldir."""
+    c = d["close"].astype(float).reset_index(drop=True)
+    s = pd.Series(spy_al.values, dtype=float).reset_index(drop=True)
+    def edge(n):
+        return ((c / c.shift(n) - 1) * 100.0) - ((s / s.shift(n) - 1) * 100.0)
+    e3, e6, e12 = edge(63), edge(126), edge(252)
+    ratio = c / s.replace(0, np.nan)
+    new_high = ratio >= ratio.rolling(60).max()
+    rs = (50.0
+          + e3.clip(-30, 30) * 0.30
+          + e6.clip(-30, 30) * 0.35
+          + e12.clip(-30, 30) * 0.35
+          + new_high.fillna(False).astype(float) * 8.0)
+    return rs.clip(0, 100)
+
+
+def _retro_real_gate(d: pd.DataFrame, w: pd.DataFrame, i: int, rs_val: float) -> Dict[str, Any]:
+    """GERÇEK kapı: canlı sistemin kurallarıyla (setup>=60, RS<45 vetosu, uzamış
+    kontrolü, fiyat haftalık bantta mı) — o güne kadarki veriyle."""
+    try:
+        lo52, hi52 = compute_52w_levels(d.iloc[:i + 1], 260)
+        cutoff = pd.to_datetime(d["time"].iloc[i]) - pd.Timedelta(days=7)
+        wslice = w[pd.to_datetime(w["time"]) <= cutoff]
+        if len(wslice) < 60:
+            return {"kapi": "", "setup_w": np.nan}
+        wp = build_trade_plan(wslice, low_52w=lo52, high_52w=hi52)
+        price = float(d["close"].iloc[i])
+        weekly_ok = (wp.setup_score >= 60) and (not wp.status_tag.startswith(("🔴", "🟣")))
+        extended = wp.status_tag.startswith("⚫")
+        in_band = bool(np.isfinite(wp.entry_low) and np.isfinite(wp.entry_high)
+                       and wp.entry_low <= price <= wp.entry_high)
+        if np.isfinite(rs_val) and rs_val < 45:
+            g = "RET"
+        elif not weekly_ok:
+            g = "RET"
+        elif extended or not in_band:
+            g = "BEKLEMEDE"
+        else:
+            g = "ACIK"
+        return {"kapi": g, "setup_w": int(wp.setup_score)}
+    except Exception:
+        return {"kapi": "", "setup_w": np.nan}
+
+
 def _retro_gate_mask(d: pd.DataFrame, w: pd.DataFrame) -> pd.Series:
     """Haftalık kalite kapısı (YAKLAŞIK): EMA dizilimi pozitif + fiyat EMA50w
     üstünde. Bir hafta geriden okunur; günlük tarihlere ffill ile eşlenir."""
@@ -4074,7 +4169,16 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             reg_al = spy_reg.reindex(dt, method="ffill")
             gate = _retro_gate_mask(d, w)
             sigs = _retro_signal_series(d)
+            rs_ser = _retro_rs_series(d, spy_al)
             all_dates.update(dt.dt.date.tolist()[30:len(d) - fwd])
+
+            # GERÇEK KAPI: aday günlerin birleşimi için BİR KEZ hesaplanır (pahalı iş)
+            cand = set()
+            for s in sigs.values():
+                cand.update(i for i in range(30, len(d) - fwd) if bool(s.iloc[i]))
+            real = {}
+            for i in sorted(cand):
+                real[i] = _retro_real_gate(d, w, i, float(rs_ser.iloc[i]))
 
             for name, s in sigs.items():
                 pool.setdefault(name, set())
@@ -4091,6 +4195,9 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                         "def": name, "ticker": sym,
                         "grup": ("NÖTR" if sym in _RETRO_NEUTRAL
                                  else "ZAYIF" if sym in _RETRO_WEAK else "SEÇİLMİŞ"),
+                        "kapi_gercek": real.get(i, {}).get("kapi", ""),
+                        "setup_w": real.get(i, {}).get("setup_w", np.nan),
+                        "rs": round(float(rs_ser.iloc[i]), 1) if np.isfinite(rs_ser.iloc[i]) else np.nan,
                         "tarih": str(dt.iloc[i].date()),
                         "getiri%": round((p1 / p0 - 1) * 100.0, 2),
                         "rel%": round((p1 / p0 - 1) * 100.0 - spy_ret, 2),
@@ -5017,6 +5124,36 @@ with tab_retro:
             st.info("Hiçbir tanım sinyal üretmedi — pencereyi veya denek listesini genişlet.")
         else:
             st.caption(f"Test aralığı: {_res.get('span','—')} · {rows['ticker'].nunique()} hisse")
+
+            # ★ GERÇEK KAPI ile TAM YEŞİL karnesi — canlı sistemin gerçek çıktısı
+            if "kapi_gercek" in rows.columns:
+                tam = rows[rows["kapi_gercek"] == "ACIK"]
+                st.markdown("### ★ TAM YEŞİL karnesi (gerçek kapı: setup≥60 + RS≥45 + fiyat bantta)")
+                if tam.empty:
+                    st.error("Gerçek kapı hiçbir tanımda tam yeşil üretmedi — kapı katmanı çok dar.")
+                else:
+                    def _agg(g):
+                        s = g["rel%"]; w_, l_ = s[s > 0], s[s <= 0]
+                        return pd.Series({
+                            "tam_yesil": len(s),
+                            "medyan_rel": round(s.median(), 2),
+                            "ortalama_rel": round(s.mean(), 2),
+                            "isabet%": round(100 * (s > 0).mean()),
+                            "ort_kazanç": round(w_.mean(), 2) if len(w_) else np.nan,
+                            "ort_kayıp": round(l_.mean(), 2) if len(l_) else np.nan,
+                            "K/Z": round(abs(w_.mean() / l_.mean()), 2) if len(w_) and len(l_) else np.nan,
+                        })
+                    st.dataframe(tam.groupby("def").apply(_agg), use_container_width=True)
+                    st.caption(
+                        f"Toplam {len(tam)} tam yeşil / {len(rows)} aday sinyal — "
+                        f"gerçek kapı adayların %{100*len(tam)/len(rows):.0f}'ini geçiriyor. "
+                        "Bu tablo canlı sistemin GERÇEK karnesidir; aşağıdaki tablolar "
+                        "kapı filtresiz (yalnız teyit katmanının) ölçümüdür."
+                    )
+                    st.markdown("**Tam yeşillerin rejim kırılımı**")
+                    st.dataframe(tam.pivot_table(index="def", columns="rejim", values="rel%",
+                                                 aggfunc=["size", "median"]).round(2),
+                                 use_container_width=True)
             summ = rows.groupby("def").agg(
                 sinyal=("rel%", "size"),
                 medyan_rel=("rel%", "median"),
