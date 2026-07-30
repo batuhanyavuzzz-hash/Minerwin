@@ -3991,6 +3991,9 @@ st.divider()
 # (o haftanın kapanışı o gün henüz bilinmiyordu).
 # =========================================================
 RETRO_FWD_DAYS = 20
+# FIX: Twelve Data free planı ~8 çağrı/dakika. Hisse başına 2 çağrı yapıyoruz,
+# bu yüzden hisseler arasında bekleme şart (yoksa HTTP 429). 16sn ≈ 7.5 çağrı/dk.
+RETRO_PACE_SEC = 16.0
 
 
 def _retro_signal_series(d: pd.DataFrame) -> Dict[str, pd.Series]:
@@ -4024,35 +4027,44 @@ def _retro_gate_mask(d: pd.DataFrame, w: pd.DataFrame) -> pd.Series:
 
 
 @st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
-def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS) -> Dict[str, Any]:
+def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) -> Dict[str, Any]:
     """Aday tanımları geçmiş veride koşturur. API maliyeti: hisse başına 2 çağrı
     (günlük + haftalık) + 1 kez SPY. Simülasyonun kendisi bedava (yerel hesap)."""
     out = {"rows": [], "errors": [], "pool": {}, "span": ""}
     try:
-        spy = _fetch_spy_daily(320)
+        spy = _add_indicators(_fetch_spy_daily(320))
         spy_c = pd.Series(spy["close"].astype(float).values, index=pd.to_datetime(spy["time"]))
         spy_c = spy_c[~spy_c.index.duplicated(keep="last")].sort_index()
+        # NEW: REJİM SERİSİ (nedensel) — aynı tanım boğa/ayı/geçiş dönemlerinde
+        # ayrı ayrı yargılanır. Tek dönemin fotoğrafına bakıp karar vermeyelim.
+        _sc, _e50, _e200 = spy["close"].astype(float), spy["ema50"], spy["ema200"]
+        _reg = pd.Series("GEÇİŞ", index=spy.index, dtype=object)
+        _reg[(_sc > _e50) & (_e50 > _e200)] = "BOĞA"
+        _reg[(_sc < _e200)] = "AYI"
+        spy_reg = pd.Series(_reg.values, index=pd.to_datetime(spy["time"]))
+        spy_reg = spy_reg[~spy_reg.index.duplicated(keep="last")].sort_index()
     except Exception as e:
         out["errors"].append(f"SPY: {_sanitize_err(e)}")
         return out
 
     pool = {}   # tanım -> set(sinyal tarihleri)
     all_dates = set()
+    failed = []
+    queue = [str(s).strip().upper() for s in tickers if str(s).strip()]
+    total = len(queue)
 
-    for sym in tickers:
-        sym = str(sym).strip().upper()
-        if not sym:
-            continue
+    def _one(sym, pace):
         try:
             d = _add_indicators(_fetch_daily_df(sym, 320))
             w = _add_indicators(_fetch_weekly_df(sym, 260))
             if d is None or len(d) < 80:
                 out["errors"].append(f"{sym}: yetersiz veri")
-                continue
+                return True
             d = d.reset_index(drop=True)
             dt = pd.to_datetime(d["time"])
             c = d["close"].astype(float)
             spy_al = spy_c.reindex(dt, method="ffill")
+            reg_al = spy_reg.reindex(dt, method="ffill")
             gate = _retro_gate_mask(d, w)
             sigs = _retro_signal_series(d)
             all_dates.update(dt.dt.date.tolist()[30:len(d) - fwd])
@@ -4075,14 +4087,45 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS) -> Dict[str, Any]:
                         "rel%": round((p1 / p0 - 1) * 100.0 - spy_ret, 2),
                         "MFE%": round((float(win_h.max()) / p0 - 1) * 100.0, 2),
                         "MAE%": round((float(win_l.min()) / p0 - 1) * 100.0, 2),
+                        "rejim": str(reg_al.iloc[i]),
                     })
                     pool[name].add(dt.iloc[i].date())
+            return True
         except Exception as e:
-            out["errors"].append(f"{sym}: {_sanitize_err(e)}")
+            msg = _sanitize_err(e)
+            if "429" in msg or "rate limit" in msg.lower():
+                return False          # kotaya takıldı → ikinci turda tekrar denenecek
+            out["errors"].append(f"{sym}: {msg}")
+            return True
+
+    for k, sym in enumerate(queue):
+        if not _one(sym, RETRO_PACE_SEC):
+            failed.append(sym)
+        if k < total - 1:
+            time.sleep(RETRO_PACE_SEC)
+
+    # İKİNCİ TUR: kotaya takılanlar, daha uzun beklemeyle tekrar denenir
+    if failed:
+        time.sleep(65.0)
+        still = []
+        for k, sym in enumerate(failed):
+            if not _one(sym, RETRO_PACE_SEC):
+                still.append(sym)
+            if k < len(failed) - 1:
+                time.sleep(RETRO_PACE_SEC + 4.0)
+        if still:
+            out["errors"].append(
+                "Kota nedeniyle alınamayanlar (birkaç dk sonra tekrar çalıştır): " + ", ".join(still)
+            )
 
     # Havuz metrikleri: "herhangi bir hissede sinyal var mı" — kuraklık testi
     days = sorted(all_dates)
     out["span"] = f"{days[0]} → {days[-1]}" if days else ""
+    try:
+        _rd = spy_reg[spy_reg.index.map(lambda x: x.date()).isin(set(days))]
+        out["rejim_gunleri"] = _rd.value_counts().to_dict()
+    except Exception:
+        out["rejim_gunleri"] = {}
     for name, ds in pool.items():
         gaps, last = [], None
         for day in days:
@@ -4926,16 +4969,21 @@ with tab_retro:
     c1, c2 = st.columns([1, 3])
     rt_fwd = c1.number_input("İleri pencere (gün)", 5, 60, RETRO_FWD_DAYS, 5, key="rt_fwd")
     run_rt = c2.button("▶️ Retro-Testi Çalıştır", type="primary", key="rt_run")
+    _n_syms = len([s for s in rt_syms.split(",") if s.strip()])
     st.caption(
-        f"API maliyeti ≈ hisse×2 + 1 çağrı. {len([s for s in rt_syms.split(',') if s.strip()])} hisse "
-        f"→ ~{2*len([s for s in rt_syms.split(',') if s.strip()])+1} çağrı; dakikalık limit nedeniyle "
-        "birkaç dakika sürebilir (sonuç 1 saat cache'lenir)."
+        f"API: hisse×2 + 1 çağrı (~{2*_n_syms+1}). Dakikalık kota (8 çağrı/dk) nedeniyle "
+        f"hisseler arası {int(RETRO_PACE_SEC)} sn beklenir → tahmini süre "
+        f"**~{max(1, round(_n_syms*RETRO_PACE_SEC/60))} dk**. Kotaya takılanlar otomatik ikinci turda "
+        "tekrar denenir. Sonuç 1 saat cache'lenir; butona tekrar basmak yeniden çalıştırır."
     )
 
     if run_rt:
         _tick = tuple(sorted({s.strip().upper() for s in rt_syms.split(",") if s.strip()}))
-        with st.spinner(f"{len(_tick)} hisse geçmişe karşı sınanıyor…"):
-            st.session_state["__rt_res"] = run_retro_test(_tick, int(rt_fwd))
+        st.session_state["__rt_nonce"] = int(st.session_state.get("__rt_nonce", 0)) + 1
+        with st.spinner(f"{len(_tick)} hisse geçmişe karşı sınanıyor… (~{max(1, round(len(_tick)*RETRO_PACE_SEC/60))} dk, sekmeyi kapatma)"):
+            st.session_state["__rt_res"] = run_retro_test(
+                _tick, int(rt_fwd), nonce=int(st.session_state["__rt_nonce"])
+            )
 
     _res = st.session_state.get("__rt_res")
     if _res:
@@ -4963,6 +5011,17 @@ with tab_retro:
                 "`ay_kapsama` kıtlık dayanıklılığını; `medyan_MAE` ise girişten sonraki "
                 "en kötü sarkmayı (stop dayanıklılığı) gösterir."
             )
+
+            if "rejim" in rows.columns:
+                st.markdown("**Rejim kırılımı** — aynı tanım boğa/ayı/geçiş dönemlerinde ayrı yargılanır")
+                piv = rows.pivot_table(index="def", columns="rejim", values="rel%",
+                                       aggfunc=["size", "median"]).round(2)
+                st.dataframe(piv, use_container_width=True)
+                st.caption(
+                    "Okuma: ayı rejiminde bol sinyal + negatif medyan = tanım kötü ortamı ayırt edemiyor. "
+                    "İdeali: boğada üretken, ayıda temkinli ama tamamen kör değil. "
+                    f"Test aralığındaki rejim günleri: {_res.get('rejim_gunleri', {})}"
+                )
 
             _sel = st.selectbox("Tanım detayı", sorted(rows["def"].unique()), key="rt_sel")
             sub = rows[rows["def"] == _sel]
