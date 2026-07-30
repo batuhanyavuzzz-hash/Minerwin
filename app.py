@@ -3994,6 +3994,12 @@ RETRO_FWD_DAYS = 20
 # FIX: Twelve Data free planı ~8 çağrı/dakika. Hisse başına 2 çağrı yapıyoruz,
 # bu yüzden hisseler arasında bekleme şart (yoksa HTTP 429). 16sn ≈ 7.5 çağrı/dk.
 RETRO_PACE_SEC = 16.0
+# Testi dürüstleştirme: 1 yıl neredeyse tamamen boğaydı (rejim kırılımı 89% BOĞA).
+# 3 yıllık pencere 2024-2025 düzeltmelerini de kapsar → ayı rejimi gerçekten sınanır.
+# API maliyeti AYNI: tek çağrı, sadece daha fazla bar.
+_RETRO_NEUTRAL = {"KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "T", "GIS", "SO"}
+RETRO_DAILY_BARS = 780
+RETRO_WEEKLY_BARS = 200
 
 
 def _retro_signal_series(d: pd.DataFrame) -> Dict[str, pd.Series]:
@@ -4032,7 +4038,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
     (günlük + haftalık) + 1 kez SPY. Simülasyonun kendisi bedava (yerel hesap)."""
     out = {"rows": [], "errors": [], "pool": {}, "span": ""}
     try:
-        spy = _add_indicators(_fetch_spy_daily(320))
+        spy = _add_indicators(_fetch_spy_daily(RETRO_DAILY_BARS))
         spy_c = pd.Series(spy["close"].astype(float).values, index=pd.to_datetime(spy["time"]))
         spy_c = spy_c[~spy_c.index.duplicated(keep="last")].sort_index()
         # NEW: REJİM SERİSİ (nedensel) — aynı tanım boğa/ayı/geçiş dönemlerinde
@@ -4055,8 +4061,8 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
 
     def _one(sym, pace):
         try:
-            d = _add_indicators(_fetch_daily_df(sym, 320))
-            w = _add_indicators(_fetch_weekly_df(sym, 260))
+            d = _add_indicators(_fetch_daily_df(sym, RETRO_DAILY_BARS))
+            w = _add_indicators(_fetch_weekly_df(sym, RETRO_WEEKLY_BARS))
             if d is None or len(d) < 80:
                 out["errors"].append(f"{sym}: yetersiz veri")
                 return True
@@ -4082,6 +4088,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                     win_l = d["low"].astype(float).iloc[i + 1:i + fwd + 1]
                     out["rows"].append({
                         "def": name, "ticker": sym,
+                        "grup": ("NÖTR" if sym in _RETRO_NEUTRAL else "SEÇİLMİŞ"),
                         "tarih": str(dt.iloc[i].date()),
                         "getiri%": round((p1 / p0 - 1) * 100.0, 2),
                         "rel%": round((p1 / p0 - 1) * 100.0 - spy_ret, 2),
@@ -4962,8 +4969,11 @@ with tab_retro:
         "kıtlık dönemlerinde bile sinyal üretiyor. Bu sekme hiçbir kuralı değiştirmez."
     )
     _def_list = ",".join([
+        # Vaka + itiraz grubu (bizim seçtiklerimiz)
         "AEIS", "SNDK", "BE", "BEP", "CLSK", "INTC", "NBIS", "BG", "AMZN", "PLD",
         "WDC", "MRVL", "CRDO", "MU", "AVGO", "TSLA", "IREN", "ONDS", "DELL", "CRWV",
+        # NÖTR KONTROL GRUBU: seçim yanlılığını kırmak için sıradan/farklı sektör
+        "KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "T", "GIS", "SO",
     ])
     rt_syms = st.text_area("Denek hisseler (virgülle)", value=_def_list, height=80, key="rt_syms")
     c1, c2 = st.columns([1, 3])
@@ -4971,6 +4981,7 @@ with tab_retro:
     run_rt = c2.button("▶️ Retro-Testi Çalıştır", type="primary", key="rt_run")
     _n_syms = len([s for s in rt_syms.split(",") if s.strip()])
     st.caption(
+        f"Pencere: ~3 yıl ({RETRO_DAILY_BARS} günlük bar) — ayı dönemleri dahil. "
         f"API: hisse×2 + 1 çağrı (~{2*_n_syms+1}). Dakikalık kota (8 çağrı/dk) nedeniyle "
         f"hisseler arası {int(RETRO_PACE_SEC)} sn beklenir → tahmini süre "
         f"**~{max(1, round(_n_syms*RETRO_PACE_SEC/60))} dk**. Kotaya takılanlar otomatik ikinci turda "
@@ -5021,6 +5032,17 @@ with tab_retro:
                     "Okuma: ayı rejiminde bol sinyal + negatif medyan = tanım kötü ortamı ayırt edemiyor. "
                     "İdeali: boğada üretken, ayıda temkinli ama tamamen kör değil. "
                     f"Test aralığındaki rejim günleri: {_res.get('rejim_gunleri', {})}"
+                )
+
+            if "grup" in rows.columns and rows["grup"].nunique() > 1:
+                st.markdown("**Seçim yanlılığı kontrolü** — bizim seçtiklerimiz vs nötr hisseler")
+                gpiv = rows.pivot_table(index="def", columns="grup", values="rel%",
+                                        aggfunc=["size", "median"]).round(2)
+                st.dataframe(gpiv, use_container_width=True)
+                st.caption(
+                    "Okuma: bir tanım yalnızca SEÇİLMİŞ grupta iyi, NÖTR grupta kötüyse — "
+                    "kazandığı bizim hisse seçimimizden gelmiş demektir, tanımın marifeti değil. "
+                    "İki grupta da pozitifse tanım gerçekten çalışıyor."
                 )
 
             _sel = st.selectbox("Tanım detayı", sorted(rows["def"].unique()), key="rt_sel")
