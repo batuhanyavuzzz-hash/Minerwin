@@ -3997,7 +3997,8 @@ RETRO_PACE_SEC = 16.0
 # Testi dürüstleştirme: 1 yıl neredeyse tamamen boğaydı (rejim kırılımı 89% BOĞA).
 # 3 yıllık pencere 2024-2025 düzeltmelerini de kapsar → ayı rejimi gerçekten sınanır.
 # API maliyeti AYNI: tek çağrı, sadece daha fazla bar.
-_RETRO_NEUTRAL = {"KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "T", "GIS", "SO"}
+_RETRO_NEUTRAL = {"KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "SO"}
+_RETRO_WEAK = {"EOSE", "HIMS", "AAL", "CELH", "AFRM", "BEP", "BE"}
 RETRO_DAILY_BARS = 780
 RETRO_WEEKLY_BARS = 200
 
@@ -4088,7 +4089,8 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                     win_l = d["low"].astype(float).iloc[i + 1:i + fwd + 1]
                     out["rows"].append({
                         "def": name, "ticker": sym,
-                        "grup": ("NÖTR" if sym in _RETRO_NEUTRAL else "SEÇİLMİŞ"),
+                        "grup": ("NÖTR" if sym in _RETRO_NEUTRAL
+                                 else "ZAYIF" if sym in _RETRO_WEAK else "SEÇİLMİŞ"),
                         "tarih": str(dt.iloc[i].date()),
                         "getiri%": round((p1 / p0 - 1) * 100.0, 2),
                         "rel%": round((p1 / p0 - 1) * 100.0 - spy_ret, 2),
@@ -4968,12 +4970,22 @@ with tab_retro:
         "Amaç: hangi tanım hem kazananları yakalıyor hem tuzaklara kanmıyor hem de "
         "kıtlık dönemlerinde bile sinyal üretiyor. Bu sekme hiçbir kuralı değiştirmez."
     )
+    # Denek evreni — history'den seçildi, DENGELİ olacak şekilde:
+    # kazananlar + kaybedenler + tuzaklar + kenar vakaları + nötr kontrol.
+    # Tek yönlü liste (hepsi güçlü isim) tanımı haksız yere kazandırır.
     _def_list = ",".join([
-        # Vaka + itiraz grubu (bizim seçtiklerimiz)
-        "AEIS", "SNDK", "BE", "BEP", "CLSK", "INTC", "NBIS", "BG", "AMZN", "PLD",
-        "WDC", "MRVL", "CRDO", "MU", "AVGO", "TSLA", "IREN", "ONDS", "DELL", "CRWV",
-        # NÖTR KONTROL GRUBU: seçim yanlılığını kırmak için sıradan/farklı sektör
-        "KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "T", "GIS", "SO",
+        # Vaka/tuzak (5) — tanım bunlara KANMAMALI
+        "AEIS", "BEP", "BE", "SNDK", "CLSK",
+        # Lider/teyit bekleyen (6) — tanım bunları YAKALAMALI
+        "INTC", "NBIS", "MRVL", "WDC", "CRDO", "MU",
+        # Kıl payı kulübü (3) — eşik kenarı
+        "AVGO", "TSLA", "IREN",
+        # Kaçak adayları (3) — elenip yürüyenler
+        "ONDS", "DELL", "CRWV",
+        # Zayıf/kurtarılanlar (5) — tanım bunlarda ateş ederse KÖTÜ
+        "EOSE", "HIMS", "AAL", "CELH", "AFRM",
+        # Nötr kontrol (8) — seçim yanlılığı kırıcı, farklı sektörler
+        "KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "SO",
     ])
     rt_syms = st.text_area("Denek hisseler (virgülle)", value=_def_list, height=80, key="rt_syms")
     c1, c2 = st.columns([1, 3])
