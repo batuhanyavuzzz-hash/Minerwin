@@ -4160,7 +4160,8 @@ def _retro_gate_mask(d: pd.DataFrame, w: pd.DataFrame) -> pd.Series:
 def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 4,
                        risk_pct: float = 1.0, tp1_pay: float = 0.5,
                        iz_suren: bool = True, komisyon_bp: float = 5.0,
-                       ayida_alma: bool = False) -> Dict[str, Any]:
+                       ayida_alma: bool = False, stop_carpan: float = 1.0,
+                       max_gun: int = 60) -> Dict[str, Any]:
     """3 yıllık GERÇEK kullanım simülasyonu: sinyaller sırayla gelir, sermaye
     riske göre bölünür, çıkışlar programın kendi kurallarıyla yapılır.
     - Giriş: sinyal günü kapanışı (kayma yok, komisyon var)
@@ -4193,6 +4194,10 @@ def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 
         # --- açık pozisyonları bir gün ilerlet ---
         for p in list(acik):
             k = gnum - p["baslangic"] - 1
+            if k >= max_gun and p in acik:      # süre doldu → kapat
+                nakit += p["adet"] * p["son_fiyat"] * (1 - komisyon)
+                p["cikis"] = p["son_fiyat"]; p["sebep"] = "süre"
+                kapanan.append(p); acik.remove(p); continue
             if k < 0 or k >= len(p["yol_h"]):
                 if k >= len(p["yol_h"]):     # yol bitti → kapat
                     nakit += p["adet"] * p["son_fiyat"] * (1 - komisyon)
@@ -4235,6 +4240,10 @@ def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 
                 continue
             giris, stop = r["giris"], r["stop"]
             if not (giris > stop > 0):
+                continue
+            # Stop genişliği ayarı: mesafe × çarpan (risk boyutlandırması da buna göre)
+            stop = giris - (giris - stop) * float(stop_carpan)
+            if stop <= 0:
                 continue
             ozkaynak = nakit + sum(_pozisyon_degeri(p, gnum) for p in acik)
             risk_tutar = ozkaynak * (risk_pct / 100.0)
@@ -5488,13 +5497,18 @@ with tab_retro:
                 _mp = cB.number_input("Maks. pozisyon", 1, 10, 4, 1, key="sim_mp")
                 _rp = cC.number_input("İşlem başı risk %", 0.25, 5.0, 1.0, 0.25, key="sim_rp")
                 _tp1p = cD.number_input("TP1'de satılan %", 0, 100, 50, 10, key="sim_tp1") / 100.0
-                c1, c2 = st.columns(2)
-                _iz = c1.checkbox("İz süren stop (TP1 sonrası %8)", True, key="sim_iz")
-                _ayi = c2.checkbox("Ayı rejiminde yeni alım yapma", False, key="sim_ayi")
+                c1, c2, c3, c4 = st.columns(4)
+                _iz = c1.checkbox("İz süren stop", True, key="sim_iz")
+                _ayi = c2.checkbox("Ayıda alma", False, key="sim_ayi")
+                _sc = c3.number_input("Stop genişliği ×", 0.5, 3.0, 1.0, 0.25, key="sim_sc",
+                                      help="1.0 = programın hesapladığı stop. 1.5 = %50 daha geniş "
+                                           "(gürültüde stop yeme azalır, tek kayıp büyür).")
+                _mg = c4.number_input("Maks. tutma (gün)", 10, 60, 60, 5, key="sim_mg")
 
                 _sr = simulate_portfolio(_sim, sermaye=float(_cap), max_poz=int(_mp),
                                          risk_pct=float(_rp), tp1_pay=float(_tp1p),
-                                         iz_suren=bool(_iz), ayida_alma=bool(_ayi))
+                                         iz_suren=bool(_iz), ayida_alma=bool(_ayi),
+                                         stop_carpan=float(_sc), max_gun=int(_mg))
                 if _sr:
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Son sermaye", f"{_sr['son']:,.0f} $", f"%{_sr['getiri_pct']:.1f}")
