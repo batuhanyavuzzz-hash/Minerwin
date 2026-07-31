@@ -4201,13 +4201,53 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             rs_ser = _retro_rs_series(d, spy_al)
             all_dates.update(dt.dt.date.tolist()[30:len(d) - fwd])
 
-            # GERÇEK KAPI: aday günlerin birleşimi için BİR KEZ hesaplanır (pahalı iş)
-            cand = set()
-            for s in sigs.values():
-                cand.update(i for i in range(30, len(d) - fwd) if bool(s.iloc[i]))
+            # ---- HAFTALIK PLAN SERİSİ: her tamamlanmış hafta için bir kez ----
+            wt = pd.to_datetime(w["time"])
+            wplan_setup, wplan_lo, wplan_hi, wplan_ext = {}, {}, {}, {}
+            for k in range(60, len(w)):
+                try:
+                    _lo52, _hi52 = compute_52w_levels(w.iloc[:k + 1], 52)
+                    _wp = build_trade_plan(w.iloc[:k + 1], low_52w=_lo52, high_52w=_hi52)
+                    wplan_setup[k] = int(_wp.setup_score)
+                    wplan_lo[k] = float(_wp.entry_low)
+                    wplan_hi[k] = float(_wp.entry_high)
+                    wplan_ext[k] = bool(_wp.status_tag.startswith("⚫"))
+                except Exception:
+                    pass
+            # Günlük tarihleri TAMAMLANMIŞ haftaya eşle (look-ahead yok)
+            kidx = np.searchsorted(wt.values, (dt - pd.Timedelta(days=7)).values, side="right") - 1
+            setup_arr = np.array([wplan_setup.get(int(k), np.nan) for k in kidx], dtype=float)
+            lo_arr = np.array([wplan_lo.get(int(k), np.nan) for k in kidx], dtype=float)
+            hi_arr = np.array([wplan_hi.get(int(k), np.nan) for k in kidx], dtype=float)
+            ext_arr = np.array([wplan_ext.get(int(k), False) for k in kidx], dtype=bool)
+
+            # ---- v6: DEPLOY EDİLEN CANLI KURAL ----
+            # setup≥60 + RS≥45 + [fiyat bantta VEYA (son 14 günde banda indi VE
+            # fiyat bant üstünün %8'i içinde)] + v2 teyit
+            lows, highs, closes = (d["low"].astype(float).values, d["high"].astype(float).values,
+                                   d["close"].astype(float).values)
+            touch = (lows <= hi_arr) & (highs >= lo_arr)
+            armed = pd.Series(touch).rolling(14, min_periods=1).max().astype(bool).values
+            in_band = (closes >= lo_arr) & (closes <= hi_arr)
+            near_ok = closes <= hi_arr * 1.08
+            v2sig = sigs["v2 · EMA20 2 gün + RSI↑"].values
+            v6 = ((setup_arr >= 60) & (rs_ser.values >= 45) & v2sig
+                  & (in_band | (armed & near_ok & ext_arr)) & np.isfinite(lo_arr))
+            sigs = dict(sigs)
+            sigs["v6 · CANLI KURAL (kurulu pencere)"] = pd.Series(v6, index=d.index)
+
+            # Gerçek kapı etiketi (her gün için, ucuz)
             real = {}
-            for i in sorted(cand):
-                real[i] = _retro_real_gate(d, w, i, float(rs_ser.iloc[i]))
+            for i in range(30, len(d) - fwd):
+                if not np.isfinite(setup_arr[i]):
+                    real[i] = {"kapi": "", "setup_w": np.nan}; continue
+                if rs_ser.iloc[i] < 45 or setup_arr[i] < 60:
+                    g = "RET"
+                elif in_band[i] or (armed[i] and near_ok[i] and ext_arr[i]):
+                    g = "ACIK"
+                else:
+                    g = "BEKLEMEDE"
+                real[i] = {"kapi": g, "setup_w": int(setup_arr[i])}
 
             for name, s in sigs.items():
                 pool.setdefault(name, set())
@@ -5122,8 +5162,38 @@ with tab_retro:
         "EOSE", "HIMS", "AAL", "CELH", "AFRM",
         # Nötr kontrol (8) — seçim yanlılığı kırıcı, farklı sektörler
         "KO", "PG", "JNJ", "VZ", "CVX", "UPS", "MCD", "SO",
+        # GENİŞ EVREN (30) — sektör dağılımı: banka, enerji, sanayi, sağlık,
+        # perakende, yazılım, yarı iletken, savunma, lojistik, tüketici
+        "JPM", "BAC", "XOM", "WMT", "HD", "NKE", "DIS", "PFE", "MRK", "ABBV",
+        "CAT", "DE", "LMT", "UNP", "FDX", "LOW", "SBUX", "TGT", "COST", "ORCL",
+        "CRM", "ADBE", "QCOM", "TXN", "AMAT", "LRCX", "PANW", "NOW", "SHOP", "UBER",
     ])
-    rt_syms = st.text_area("Denek hisseler (virgülle)", value=_def_list, height=80, key="rt_syms")
+    _EVREN_GENIS = ",".join([
+        # Teknoloji/yarı iletken
+        "AAPL","MSFT","GOOGL","AMZN","META","NVDA","AVGO","AMD","MU","INTC","QCOM","TXN","AMAT","LRCX","KLAC","ADI","MRVL","CRDO","ANET","SMCI",
+        # Yazılım/internet
+        "CRM","ORCL","ADBE","NOW","PANW","SNOW","DDOG","NET","SHOP","UBER","ABNB","PLTR","TEAM","MDB","ZS",
+        # Finans
+        "JPM","BAC","GS","MS","WFC","C","SCHW","BLK","AXP","V","MA","PYPL","COF","CB","PGR",
+        # Sağlık
+        "LLY","UNH","JNJ","ABBV","MRK","PFE","TMO","ABT","DHR","AMGN","ISRG","VRTX","REGN","BSX","MDT",
+        # Sanayi/savunma
+        "CAT","DE","RTX","LMT","GE","HON","UNP","UPS","FDX","BA","ETN","PH","EMR","CSX","NSC",
+        # Enerji/emtia
+        "XOM","CVX","COP","SLB","EOG","OXY","PSX","MPC","FCX","NEM","LIN","APD","NUE","STLD","VLO",
+        # Tüketici/perakende
+        "WMT","COST","HD","LOW","TGT","NKE","SBUX","MCD","PG","KO","PEP","MDLZ","CL","KMB","DIS",
+        # Altyapı/enerji üretimi/telekom/REIT
+        "NEE","DUK","SO","D","EXC","AEP","T","VZ","TMUS","PLD","AMT","EQIX","SPG","O","CCI",
+    ])
+    _liste_sec = st.radio("Denek evreni", ["Çekirdek (30)", "Geniş (~120)", "Elle gir"],
+                          horizontal=True, key="rt_evren")
+    _val = _def_list if _liste_sec.startswith("Çekirdek") else (_EVREN_GENIS if _liste_sec.startswith("Geniş") else "")
+    rt_syms = st.text_area("Denek hisseler (virgülle)", value=_val, height=80, key=f"rt_syms_{_liste_sec}")
+    rt_birik = st.checkbox("Sonuçları öncekilerle BİRİKTİR (parça parça çalıştırmak için)",
+                           value=True, key="rt_birik",
+                           help="Geniş evreni 30'arlı parçalar halinde çalıştırıp sonuçları toplayabilirsin; "
+                                "her tur öncekinin üstüne eklenir.")
     c1, c2 = st.columns([1, 3])
     rt_fwd = c1.number_input("İleri pencere (gün)", 5, 60, RETRO_FWD_DAYS, 5, key="rt_fwd")
     run_rt = c2.button("▶️ Retro-Testi Çalıştır", type="primary", key="rt_run")
@@ -5140,9 +5210,17 @@ with tab_retro:
         _tick = tuple(sorted({s.strip().upper() for s in rt_syms.split(",") if s.strip()}))
         st.session_state["__rt_nonce"] = int(st.session_state.get("__rt_nonce", 0)) + 1
         with st.spinner(f"{len(_tick)} hisse geçmişe karşı sınanıyor… (~{max(1, round(len(_tick)*RETRO_PACE_SEC/60))} dk, sekmeyi kapatma)"):
-            st.session_state["__rt_res"] = run_retro_test(
-                _tick, int(rt_fwd), nonce=int(st.session_state["__rt_nonce"])
-            )
+            _yeni = run_retro_test(_tick, int(rt_fwd), nonce=int(st.session_state["__rt_nonce"]))
+            _onceki = st.session_state.get("__rt_res")
+            if rt_birik and _onceki and _onceki.get("rows"):
+                _eski_t = {(r["def"], r["ticker"], r["tarih"]) for r in _onceki["rows"]}
+                _birlesik = list(_onceki["rows"]) + [
+                    r for r in _yeni.get("rows", [])
+                    if (r["def"], r["ticker"], r["tarih"]) not in _eski_t
+                ]
+                _yeni = dict(_yeni); _yeni["rows"] = _birlesik
+                _yeni["errors"] = (_onceki.get("errors", []) + _yeni.get("errors", []))[-10:]
+            st.session_state["__rt_res"] = _yeni
 
     _res = st.session_state.get("__rt_res")
     if _res:
@@ -5152,7 +5230,21 @@ with tab_retro:
         if rows.empty:
             st.info("Hiçbir tanım sinyal üretmedi — pencereyi veya denek listesini genişlet.")
         else:
-            st.caption(f"Test aralığı: {_res.get('span','—')} · {rows['ticker'].nunique()} hisse")
+            _r6 = rows[rows["def"].str.startswith("v6")].copy()
+            _bagimsiz = 0
+            if len(_r6):
+                _r6["_t"] = pd.to_datetime(_r6["tarih"])
+                for _tk, _g in _r6.sort_values("_t").groupby("ticker"):
+                    _last = None
+                    for _t in _g["_t"]:
+                        if _last is None or (_t - _last).days >= 28:
+                            _bagimsiz += 1; _last = _t
+            st.caption(
+                f"Test aralığı: {_res.get('span','—')} · {rows['ticker'].nunique()} hisse · "
+                f"canlı kuralın **{_bagimsiz} bağımsız işlemi** "
+                + ("✅ istatistik için yeterli" if _bagimsiz >= 100 else
+                   f"⚠️ az — güvenilir ayar için ~100 gerekiyor (evreni büyüt veya biriktir)")
+            )
 
             # ★ GERÇEK KAPI ile TAM YEŞİL karnesi — canlı sistemin gerçek çıktısı
             if "kapi_gercek" in rows.columns:
