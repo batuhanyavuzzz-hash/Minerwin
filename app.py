@@ -1105,42 +1105,21 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict_kind = "success"
         elif w_extended:
             gate = "BEKLEMEDE"
-            _kalan = max(0, ARMED_DAYS - int(armed_days_ago or 0)) if armed_recent else 0
             _px_now = float(ddf["close"].iloc[-1])
             _uzak = (_px_now / _whi - 1.0) * 100.0 if np.isfinite(_whi) and _whi > 0 else float("nan")
-
-            # 1) Durum tespiti
-            if armed_recent:
-                _s1 = (f"Kurulum hazır — fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
-                       f"({_wlo:.2f}–{_whi:.2f}) değdi")
-                if np.isfinite(_uzak) and _uzak > 0:
-                    _s1 += f", şu an bandın %{_uzak:.1f} üstünde"
-                _s1 += "."
+            # SADE HÜKÜM: durum + konum + tek eksik. Detaylar tablolarda durur.
+            if np.isfinite(_uzak) and _uzak > 0.1:
+                _konum = f"Fiyat bandın ({_wlo:.2f}–{_whi:.2f}) %{_uzak:.1f} üstünde."
             else:
-                _s1 = (f"Fiyat alarm bandının ({_wlo:.2f}–{_whi:.2f}) "
-                       f"%{max(0.0, _uzak):.1f} üstünde — giriş bölgesinde değil.")
-
-            # 2) Giriş için ne gerekiyor
+                _konum = f"Fiyat alarm bandında ({_wlo:.2f}–{_whi:.2f})."
             if _chase.get("sebep"):
-                _s2 = f" Giriş için engel: {_chase['sebep']}."
+                _eksik = " Giriş için fazla uzak — kovalama sınırı aşılıyor."
             elif teyit_eksik:
-                _s2 = f" Giriş için gereken: {teyit_eksik}."
-            elif armed_recent:
-                _s2 = " Giriş koşulları oluşmak üzere."
+                _eksik = " Giriş için günlük teyit bekleniyor."
             else:
-                _s2 = " Fiyat banda geldiğinde analiz yenilenir."
-
-            # 3) Süre (yalnız kurulum varsa)
-            _s3 = f" Kurulum {_kalan} gün daha geçerli." if (armed_recent and _kalan > 0) else ""
-
-            # 4) VCP bilgisi (varsa)
-            _s4 = ""
-            if mv_base and np.isfinite(mv_pivot):
-                _s4 = (f" VCP: {mv_dalga} daralma dalgası, pivot {mv_pivot:.2f}, "
-                       f"taban dibi {mv_dip:.2f}.")
-
+                _eksik = " Giriş koşulları oluşmak üzere."
             verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100). "
-                       + _s1 + _s2 + _s3 + _s4 + rs_note)
+                       + _konum + _eksik + rs_note)
             verdict_kind = "warning"
         elif daily_green:
             gate = "ACIK"
