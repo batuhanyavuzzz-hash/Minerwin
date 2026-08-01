@@ -4081,6 +4081,42 @@ RETRO_DAILY_BARS = 780
 RETRO_WEEKLY_BARS = 200
 
 
+def _retro_base_pivot(d: pd.DataFrame, base_len: int = 25) -> Dict[str, pd.Series]:
+    """MINERVINI TARZI GİRİŞ: taban (konsolidasyon) + pivot kırılımı.
+
+    Mevcut girişimiz (haftalık banda geri çekilme) stop için yapısal destek
+    sunmuyordu — işlemlerin %56'sı -%4'e dokunuyordu. Taban girişinde stop
+    YAPISAL: tabanın dibi. Bileşenler:
+      · pivot     = son base_len günün en yükseği (bugün hariç)
+      · taban dibi= son base_len günün en düşüğü (bugün hariç)
+      · derinlik  = (pivot-dip)/pivot  → %5-%35 arası (çok sığ/çok derin eleme)
+      · daralma   = son 10 günün ATR%'si, önceki 15 günün ATR%'sinden küçük (VCP)
+      · hacim kuruması = son 10 gün ortalama hacim < taban ortalaması
+      · kırılım   = kapanış pivotun üstünde (dün altındaydı) + hacim > 1.4× ort50
+    Hepsi nedenseldir (bugünün verisi geleceğe bakmaz).
+    """
+    h, l, c = d["high"].astype(float), d["low"].astype(float), d["close"].astype(float)
+    v = d["volume"].astype(float) if "volume" in d.columns else pd.Series(1.0, index=d.index)
+
+    pivot = h.shift(1).rolling(base_len).max()
+    dip = l.shift(1).rolling(base_len).min()
+    derinlik = (pivot - dip) / pivot.replace(0, np.nan)
+
+    tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+    atrp = (tr / c.replace(0, np.nan)) * 100.0
+    daralma = atrp.rolling(10).mean() < atrp.shift(10).rolling(15).mean()
+
+    vol_kuru = v.shift(1).rolling(10).mean() < v.shift(1).rolling(base_len).mean()
+    vol50 = v.shift(1).rolling(50).mean()
+    hacim_patlama = v > 1.4 * vol50
+
+    kirilim = (c > pivot) & (c.shift(1) <= pivot.shift(1))
+
+    sinyal = (kirilim & hacim_patlama & daralma & vol_kuru
+              & derinlik.between(0.05, 0.35)).fillna(False)
+    return {"sinyal": sinyal, "pivot": pivot, "dip": dip}
+
+
 def _retro_signal_series(d: pd.DataFrame) -> Dict[str, pd.Series]:
     """Aday teyit tanımları — hepsi aynı seride, vektörel, nedensel."""
     c, e20, e50 = d["close"], d["ema20"], d["ema50"]
@@ -4364,32 +4400,50 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             sigs = dict(sigs)
             sigs["v6 · CANLI KURAL (kurulu pencere)"] = pd.Series(v6, index=d.index)
 
+            # ---- v7: TABAN + PİVOT KIRILIMI (Minervini girişi) ----
+            # Aynı kalite kapısı (setup≥60 + RS≥45), farklı ALIM NOKTASI.
+            bp = _retro_base_pivot(d)
+            v7 = (bp["sinyal"].values & (setup_arr >= 60) & (rs_ser.values >= 45))
+            sigs["v7 · TABAN + PİVOT KIRILIMI"] = pd.Series(v7, index=d.index)
+
             # ---- PORTFÖY SİMÜLASYONU İÇİN: giriş planı + ileri fiyat yolu ----
             # Gerçek kullanıcı simülasyonu (stop/TP/iz süren) ancak fiyat yoluyla
             # yapılabilir; özet metrikler (MFE/MAE) yetmez.
             SIM_MAX_HOLD = 60
-            for i in np.where(v6)[0]:
-                i = int(i)
-                if i < 30 or i >= len(d) - 5:
-                    continue
-                try:
-                    _lo52s, _hi52s = compute_52w_levels(d.iloc[:i + 1], 260)
-                    dp = build_trade_plan(d.iloc[:i + 1], low_52w=_lo52s, high_52w=_hi52s)
-                    j2 = min(len(d), i + 1 + SIM_MAX_HOLD)
-                    out["sim"].append({
-                        "ticker": sym,
-                        "tarih": str(dt.iloc[i].date()),
-                        "giris": float(d["close"].iloc[i]),
-                        "stop": float(dp.stop),
-                        "tp1": float(dp.tp1),
-                        "tp2": float(dp.tp2),
-                        "rejim": str(reg_al.iloc[i]),
-                        "yol_h": [float(x) for x in d["high"].iloc[i + 1:j2]],
-                        "yol_l": [float(x) for x in d["low"].iloc[i + 1:j2]],
-                        "yol_c": [float(x) for x in d["close"].iloc[i + 1:j2]],
-                    })
-                except Exception:
-                    continue
+            for _kural, _mask in (("v6 · mevcut giriş", v6), ("v7 · taban+pivot", v7)):
+                for i in np.where(_mask)[0]:
+                    i = int(i)
+                    if i < 60 or i >= len(d) - 5:
+                        continue
+                    try:
+                        giris = float(d["close"].iloc[i])
+                        if _kural.startswith("v7"):
+                            # YAPISAL STOP: tabanın dibinin %1 altı; hedefler R katı
+                            stop = float(bp["dip"].iloc[i]) * 0.99
+                            if not (giris > stop > 0):
+                                continue
+                            _R = giris - stop
+                            if _R / giris > 0.15:      # taban çok derinse atla
+                                continue
+                            tp1, tp2 = giris + 2.0 * _R, giris + 4.0 * _R
+                        else:
+                            _lo52s, _hi52s = compute_52w_levels(d.iloc[:i + 1], 260)
+                            dp = build_trade_plan(d.iloc[:i + 1], low_52w=_lo52s, high_52w=_hi52s)
+                            stop, tp1, tp2 = float(dp.stop), float(dp.tp1), float(dp.tp2)
+                        j2 = min(len(d), i + 1 + SIM_MAX_HOLD)
+                        out["sim"].append({
+                            "kural": _kural,
+                            "ticker": sym,
+                            "tarih": str(dt.iloc[i].date()),
+                            "giris": giris,
+                            "stop": stop, "tp1": tp1, "tp2": tp2,
+                            "rejim": str(reg_al.iloc[i]),
+                            "yol_h": [float(x) for x in d["high"].iloc[i + 1:j2]],
+                            "yol_l": [float(x) for x in d["low"].iloc[i + 1:j2]],
+                            "yol_c": [float(x) for x in d["close"].iloc[i + 1:j2]],
+                        })
+                    except Exception:
+                        continue
 
             # Gerçek kapı etiketi (her gün için, ucuz)
             real = {}
@@ -5492,6 +5546,11 @@ with tab_retro:
             if not _sim:
                 st.info("Simülasyon verisi yok — retro-testi yeniden çalıştır (v6 sinyalleri gerekiyor).")
             else:
+                _kurallar = sorted({r.get("kural", "v6 · mevcut giriş") for r in _sim})
+                _kural_sec = st.radio("Simüle edilecek GİRİŞ kuralı", _kurallar,
+                                      horizontal=True, key="sim_kural")
+                _sim = [r for r in _sim if r.get("kural", "v6 · mevcut giriş") == _kural_sec]
+                st.caption(f"{len(_sim)} sinyal · v7'de stop TABAN DİBİ (yapısal), hedefler 2R/4R")
                 cA, cB, cC, cD = st.columns(4)
                 _cap = cA.number_input("Sermaye ($)", 1000, 1000000, 10000, 1000, key="sim_cap")
                 _mp = cB.number_input("Maks. pozisyon", 1, 10, 4, 1, key="sim_mp")
