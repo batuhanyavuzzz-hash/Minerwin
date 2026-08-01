@@ -558,7 +558,7 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
 # =========================================================
 # GÜNLÜK VERİ / 52W
 # =========================================================
-@st.cache_data(ttl=300, max_entries=32)
+@st.cache_data(ttl=7200, max_entries=64)
 def _fetch_daily_df(symbol: str, outputsize: int = 320) -> pd.DataFrame:
     payload = td_time_series(symbol, "1day", int(outputsize))
     return parse_ohlcv(payload)
@@ -948,17 +948,20 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         mv_dip = float("nan")
         mv_stop = mv_tp1 = mv_tp2 = float("nan")
         mv_dist = float("nan")  # pivota uzaklık %
+        mv_dalga = 0
+        mv_son_daralma = float("nan")
         try:
-            _bp = _retro_base_pivot(ddf)
-            mv_break = bool(_bp["sinyal"].iloc[-1])
-            mv_pivot = float(_bp["pivot"].iloc[-1])
-            mv_dip = float(_bp["dip"].iloc[-1])
+            _vc = detect_vcp(ddf)
+            mv_break = bool(_vc.get("kirilim"))
+            mv_pivot = float(_vc.get("pivot", float("nan")))
+            mv_dip = float(_vc.get("dip", float("nan")))
+            mv_dalga = int(_vc.get("dalga", 0))
+            mv_son_daralma = float(_vc.get("son_daralma", float("nan")))
             _px = float(ddf["close"].iloc[-1])
             _der = (mv_pivot - mv_dip) / mv_pivot if mv_pivot > 0 else float("nan")
             # Taban darlığı şartı: dip girişten %MAX_BASE_RISK'ten uzaksa geçersiz
             _risk_ok = bool(np.isfinite(mv_dip) and _px > 0 and (_px - mv_dip * 0.99) / _px <= MAX_BASE_RISK)
-            mv_base = bool(np.isfinite(_der) and 0.05 <= _der <= 0.35 and _risk_ok
-                           and bool(_bp["daralma"].iloc[-1]) and bool(_bp["vol_kuru"].iloc[-1]))
+            mv_base = bool(_vc.get("var") and _risk_ok)
             if np.isfinite(mv_pivot) and mv_pivot > 0:
                 mv_dist = (mv_pivot / _px - 1.0) * 100.0
             if np.isfinite(mv_dip) and mv_dip > 0:
@@ -1021,7 +1024,13 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             if armed_recent:
                 _armed_txt = (f" Setup kurulu: fiyat {armed_days_ago} gün önce banda indi — "
                               f"günlük teyit gelirse giriş koşulu oluşur ({ARMED_DAYS} gün geçerli).")
-            _pv_txt = (f" · VCP pivotu: {mv_pivot:.2f}" if np.isfinite(mv_pivot) else "")
+            _pv_txt = ""
+            if mv_base and np.isfinite(mv_pivot):
+                _pv_txt = (f" · VCP: {mv_dalga} daralma dalgası, pivot {mv_pivot:.2f} "
+                           f"(fiyatın %{max(0.0, (mv_pivot/float(ddf['close'].iloc[-1])-1)*100):.1f} üstünde), "
+                           f"taban dibi {mv_dip:.2f}, son daralma %{mv_son_daralma:.1f}")
+            elif np.isfinite(mv_pivot):
+                _pv_txt = f" · Pivot (bilgi): {mv_pivot:.2f}"
             verdict = (f"Aday — haftalık yapı kriterlerden geçiyor (setup {w_plan.setup_score}/100). "
                        f"Fiyat haftalık bandın üstünde; giriş bölgesinde değil. "
                        f"Bant: {_wlo:.2f} – {_whi:.2f}.{_armed_txt}{_pv_txt}{rs_note}")
@@ -1058,6 +1067,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "armed_days_ago": armed_days_ago,
             "last_close": float(ddf["close"].iloc[-1]) if ddf is not None and len(ddf) else float("nan"),
             "mv_break": mv_break, "mv_base": mv_base,
+            "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
             "mv_pivot": mv_pivot, "mv_dip": mv_dip,
             "mv_stop": mv_stop, "mv_tp1": mv_tp1, "mv_tp2": mv_tp2,
             "rs_edge_w": (
@@ -2980,7 +2990,7 @@ def plot_chart(
 # =========================================================
 # LİDERLİK MODÜLÜ
 # =========================================================
-@st.cache_data(ttl=300, max_entries=32)
+@st.cache_data(ttl=3600, max_entries=32)
 def _fetch_spy_daily(outputsize: int = 320) -> pd.DataFrame:
     payload = td_time_series("SPY", "1day", int(outputsize))
     return parse_ohlcv(payload)
@@ -4161,6 +4171,133 @@ RETRO_DAILY_BARS = 780
 RETRO_WEEKLY_BARS = 200
 
 
+# =========================================================
+# VCP (Volatility Contraction Pattern) — GERÇEK TESPİT (V7.5)
+# Önceki basit sürüm tek pencere + tek daralma kontrolüydü; 3 yılda 125 hissede
+# yalnız 21 sinyal üretti. Bu sürüm Minervini'nin tarifine sadık:
+#   · Taban uzunluğu SABİT DEĞİL: 4-20 hafta arası aranır
+#   · 2-4 ardışık daralma dalgası; her dalga öncekinden SIĞ (oran serbest)
+#   · Dipler yükselen (her dip öncekinden yüksek ya da eşit)
+#   · Hacim geç dalgalarda erken dalgalardan düşük (kuruma)
+#   · Son daralma ATR'ye göre dar (mutlak % değil — volatiliteye normalize)
+#   · Pivot = son dalganın tepesi; stop = son dalganın dibi (YAPISAL)
+# =========================================================
+VCP_MIN_WAVES = 2
+VCP_MAX_WAVES = 4
+VCP_MIN_BARS = 20      # ~4 hafta
+VCP_MAX_BARS = 100     # ~20 hafta
+
+
+def _local_extrema(h: np.ndarray, l: np.ndarray, order: int = 3):
+    """Yerel tepe/dip indeksleri (her iki yanında `order` bar daha uç yoksa)."""
+    n = len(h)
+    tepe, dip = [], []
+    for i in range(order, n - order):
+        if h[i] == max(h[i - order:i + order + 1]):
+            tepe.append(i)
+        if l[i] == min(l[i - order:i + order + 1]):
+            dip.append(i)
+    return tepe, dip
+
+
+def _vcp_at(d: pd.DataFrame, i: int, atr_pct: float) -> Optional[Dict[str, Any]]:
+    """i. barda biten geçerli bir VCP tabanı var mı? En iyi adayı döndürür."""
+    h = d["high"].astype(float).values
+    l = d["low"].astype(float).values
+    v = d["volume"].astype(float).values if "volume" in d.columns else np.ones(len(d))
+    en_iyi = None
+
+    for L in range(VCP_MIN_BARS, VCP_MAX_BARS + 1, 5):
+        a = i - L
+        if a < 5:
+            continue
+        hw, lw = h[a:i + 1], l[a:i + 1]
+        tepeler, dipler = _local_extrema(hw, lw, order=3)
+        if len(tepeler) < 2 or len(dipler) < 2:
+            continue
+
+        # Tepe→dip dalgalarını sırayla kur
+        dalgalar = []
+        for t in tepeler:
+            sonraki = [x for x in dipler if x > t]
+            if not sonraki:
+                continue
+            dp = sonraki[0]
+            derin = (hw[t] - lw[dp]) / hw[t] if hw[t] > 0 else np.nan
+            if np.isfinite(derin) and derin > 0.01:
+                dalgalar.append({"t": t, "d": dp, "derin": derin,
+                                 "tepe": hw[t], "dip": lw[dp]})
+        # Aynı tepeden türeyen tekrarları ayıkla, kronolojik sırala
+        temiz = []
+        for w in sorted(dalgalar, key=lambda x: x["t"]):
+            if not temiz or w["d"] > temiz[-1]["d"]:
+                temiz.append(w)
+        if not (VCP_MIN_WAVES <= len(temiz) <= VCP_MAX_WAVES + 2):
+            continue
+        temiz = temiz[-VCP_MAX_WAVES:] if len(temiz) > VCP_MAX_WAVES else temiz
+        if len(temiz) < VCP_MIN_WAVES:
+            continue
+
+        # KURAL 1: her dalga öncekinden sığ
+        if not all(temiz[k]["derin"] < temiz[k - 1]["derin"] * 0.95
+                   for k in range(1, len(temiz))):
+            continue
+        # KURAL 2: dipler yükselen (küçük tolerans)
+        if not all(temiz[k]["dip"] >= temiz[k - 1]["dip"] * 0.98
+                   for k in range(1, len(temiz))):
+            continue
+        # KURAL 3: son daralma ATR'ye göre dar (volatiliteye normalize)
+        son_derin = temiz[-1]["derin"] * 100.0
+        if np.isfinite(atr_pct) and atr_pct > 0 and son_derin > max(6.0, 4.0 * atr_pct):
+            continue
+        # KURAL 4: hacim kuruması — son dalga ortalaması ilk dalganınkinden düşük
+        v1 = v[a + temiz[0]["t"]: a + temiz[0]["d"] + 1]
+        v2 = v[a + temiz[-1]["t"]: a + temiz[-1]["d"] + 1]
+        if len(v1) and len(v2) and v2.mean() >= v1.mean():
+            continue
+
+        pivot = float(max(hw[w["t"]] for w in temiz))
+        taban_dip = float(temiz[-1]["dip"])
+        aday = {"pivot": pivot, "dip": taban_dip, "dalga": len(temiz),
+                "bar": L, "son_daralma": son_derin,
+                "derinlik": (pivot - min(w["dip"] for w in temiz)) / pivot * 100.0}
+        # En iyi = en çok dalga, eşitse en dar son daralma
+        if (en_iyi is None or aday["dalga"] > en_iyi["dalga"]
+                or (aday["dalga"] == en_iyi["dalga"] and aday["son_daralma"] < en_iyi["son_daralma"])):
+            en_iyi = aday
+    return en_iyi
+
+
+def detect_vcp(d: pd.DataFrame, i: Optional[int] = None) -> Dict[str, Any]:
+    """Son bar (veya i. bar) için VCP durumu + kırılım bilgisi."""
+    bos = {"var": False, "kirilim": False, "pivot": float("nan"), "dip": float("nan"),
+           "dalga": 0, "son_daralma": float("nan"), "derinlik": float("nan"), "bar": 0}
+    try:
+        if i is None:
+            i = len(d) - 1
+        if i < VCP_MIN_BARS + 10:
+            return bos
+        c = d["close"].astype(float).values
+        v = d["volume"].astype(float).values if "volume" in d.columns else np.ones(len(d))
+        _tr = pd.concat([d["high"] - d["low"],
+                         (d["high"] - d["close"].shift(1)).abs(),
+                         (d["low"] - d["close"].shift(1)).abs()], axis=1).max(axis=1)
+        atr_pct = float((_tr.rolling(14).mean() / d["close"]).iloc[i] * 100.0)
+
+        # Kırılımdan ÖNCEKİ bara kadar olan tabanı ara (bugünün mumu tabana dahil değil)
+        res = _vcp_at(d, i - 1, atr_pct)
+        if not res:
+            return bos
+        vol50 = float(np.nanmean(v[max(0, i - 50):i])) if i > 5 else float("nan")
+        kirilim = bool(c[i] > res["pivot"] and c[i - 1] <= res["pivot"]
+                       and np.isfinite(vol50) and v[i] > 1.4 * vol50)
+        return {"var": True, "kirilim": kirilim, "pivot": res["pivot"], "dip": res["dip"],
+                "dalga": res["dalga"], "son_daralma": res["son_daralma"],
+                "derinlik": res["derinlik"], "bar": res["bar"]}
+    except Exception:
+        return bos
+
+
 def _retro_base_pivot(d: pd.DataFrame, base_len: int = 25) -> Dict[str, pd.Series]:
     """MINERVINI TARZI GİRİŞ: taban (konsolidasyon) + pivot kırılımı.
 
@@ -4485,6 +4622,28 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             sigs = dict(sigs)
             sigs["v6 · CANLI KURAL (kurulu pencere)"] = pd.Series(v6, index=d.index)
 
+            # ---- v8: GERÇEK VCP (çok dalgalı taban + pivot kırılımı) ----
+            # Hız: her barda VCP aramak pahalı (~9ms). Sadece "kırılım adayı"
+            # günlerde çalıştırılır: kapanış 20 günlük zirveyi aşmış + hacim patlamış.
+            _hi20 = d["high"].astype(float).rolling(20).max().shift(1).values
+            _v50 = d["volume"].astype(float).rolling(50).mean().shift(1).values \
+                if "volume" in d.columns else np.full(len(d), np.nan)
+            _vv = d["volume"].astype(float).values if "volume" in d.columns else np.zeros(len(d))
+            _cc = d["close"].astype(float).values
+            _aday = ((_cc > _hi20) & (_vv > 1.4 * _v50))
+            v8 = np.zeros(len(d), dtype=bool)
+            _vcp_bilgi = {}
+            for _i in np.where(_aday)[0]:
+                _i = int(_i)
+                if _i < 40 or _i >= len(d) - fwd:
+                    continue
+                _r = detect_vcp(d, _i)
+                if _r.get("kirilim"):
+                    v8[_i] = True
+                    _vcp_bilgi[_i] = _r
+            v8 = v8 & (setup_arr >= 60) & (rs_ser.values >= 45)
+            sigs["v8 · GERÇEK VCP (çok dalgalı)"] = pd.Series(v8, index=d.index)
+
             # ---- v7: TABAN + PİVOT KIRILIMI (Minervini girişi) ----
             # Aynı kalite kapısı (setup≥60 + RS≥45), farklı ALIM NOKTASI.
             bp = _retro_base_pivot(d)
@@ -4495,14 +4654,26 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             # Gerçek kullanıcı simülasyonu (stop/TP/iz süren) ancak fiyat yoluyla
             # yapılabilir; özet metrikler (MFE/MAE) yetmez.
             SIM_MAX_HOLD = 60
-            for _kural, _mask in (("v6 · mevcut giriş", v6), ("v7 · taban+pivot", v7)):
+            for _kural, _mask in (("v6 · mevcut giriş", v6), ("v7 · taban+pivot", v7),
+                                  ("v8 · gerçek VCP", v8)):
                 for i in np.where(_mask)[0]:
                     i = int(i)
                     if i < 60 or i >= len(d) - 5:
                         continue
                     try:
                         giris = float(d["close"].iloc[i])
-                        if _kural.startswith("v7"):
+                        if _kural.startswith("v8"):
+                            _b = _vcp_bilgi.get(i)
+                            if not _b:
+                                continue
+                            stop = float(_b["dip"]) * 0.99
+                            if not (giris > stop > 0):
+                                continue
+                            _R = giris - stop
+                            if _R / giris > 0.15:
+                                continue
+                            tp1, tp2 = giris + 2.0 * _R, giris + 4.0 * _R
+                        elif _kural.startswith("v7"):
                             # YAPISAL STOP: tabanın dibinin %1 altı; hedefler R katı
                             stop = float(bp["dip"].iloc[i]) * 0.99
                             if not (giris > stop > 0):
@@ -5706,7 +5877,16 @@ with tab_scan:
         _liste = [s.strip().upper() for s in scan_syms.split(",") if s.strip()]
         _bar = st.progress(0.0)
         _durum = st.empty()
+        _ardisik_kota = 0
         for _k, _sym in enumerate(_liste):
+            if _ardisik_kota >= 3:
+                st.error(
+                    f"⛔ API kotası doldu — tarama {_k}/{len(_liste)} hissede durduruldu. "
+                    "Twelve Data ücretsiz planı günde 800 çağrı verir; bugünkü retro-test "
+                    "ve taramalar kotayı tüketmiş olabilir. Yarın devam et ya da kalan "
+                    "listeyi sonra tara (taranan sonuçlar tabloda duruyor)."
+                )
+                break
             _durum.caption(f"Taranıyor: {_sym} ({_k + 1}/{len(_liste)})")
             try:
                 _ddf_tmp = _fetch_daily_df(_sym, 1000)   # aynı cache'i mtf ile paylaşır
@@ -5729,14 +5909,20 @@ with tab_scan:
                         "Taban dibi": round(_dp, 2) if np.isfinite(_dp) else "",
                         "Risk %": (round((_px - float(_m.get("mv_stop", np.nan))) / _px * 100, 1)
                                    if np.isfinite(_m.get("mv_stop", np.nan)) and _px > 0 else ""),
+                        "Dalga": _m.get("mv_dalga", "") or "",
+                        "Son daralma %": (round(float(_m.get("mv_son_daralma", np.nan)), 1)
+                                          if np.isfinite(_m.get("mv_son_daralma", np.nan)) else ""),
                         "Setup": _m.get("w_setup", ""),
                         "RS": round(float(_m.get("rs_rating", np.nan)), 0)
                               if np.isfinite(_m.get("rs_rating", np.nan)) else "",
                     }
                     rows = [r for r in rows if r["Ticker"] != _sym] + [_row]
+                    _ardisik_kota = 0
             except Exception as e:
+                _msg = _sanitize_err(e)
+                _ardisik_kota = _ardisik_kota + 1 if ("429" in _msg or "rate limit" in _msg.lower()) else 0
                 rows = [r for r in rows if r["Ticker"] != _sym] + [
-                    {"Ticker": _sym, "Durum": f"HATA: {_sanitize_err(e)[:40]}", "Kapı": "",
+                    {"Ticker": _sym, "Durum": f"HATA: {_msg[:40]}", "Kapı": "",
                      "Fiyat": "", "Pivot": "", "Pivota %": "", "Taban dibi": "",
                      "Risk %": "", "Setup": "", "RS": ""}]
             st.session_state["scan_rows"] = rows
