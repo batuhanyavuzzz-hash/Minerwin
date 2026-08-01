@@ -2885,7 +2885,7 @@ def build_pdf_bytes_single(
             if mtf.get("mv_dalga"):
                 _ref_rows.append(["VCP", f"{int(mtf['mv_dalga'])} daralma dalgası"])
         _ref_rows += [
-            ["Haftalık Bant (bilgi — EMA20/50)",
+            ["Haftalık Bant (EMA20–EMA50)",
              f"{mtf.get('w_entry_low', float('nan')):.2f} – {mtf.get('w_entry_high', float('nan')):.2f}"],
             ["52W Dip",           f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
             ["52W Zirve Uzaklık", f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
@@ -3005,10 +3005,19 @@ def build_pdf_bytes_single(
             ["RS Ham Güç (SPY farkı, gölge ölçüm)",
              f"{mtf.get('rs_edge_w', float('nan')):+.1f} — bilgi; kararlara etki etmez"
              if np.isfinite(mtf.get("rs_edge_w", float("nan"))) else "—"],
-            ["Haftalık Bant — alarm (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
+            ["Haftalık Bant (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
         ]
-        if not _closed:
-            mtf_rows.append(["Günlük Teyit Bandı", f"{mtf['d_entry_low']:.2f} – {mtf['d_entry_high']:.2f}"])
+        _pv2 = mtf.get("mv_pivot", float("nan"))
+        if np.isfinite(_pv2):
+            mtf_rows.insert(0, ["VCP Pivot (giriş tetiği)", f"{_pv2:.2f}"])
+            _dp2 = mtf.get("mv_dip", float("nan"))
+            if np.isfinite(_dp2):
+                mtf_rows.insert(1, ["VCP Taban Dibi (stop)", f"{_dp2:.2f}"])
+            if mtf.get("mv_dalga"):
+                _sd2 = mtf.get("mv_son_daralma", float("nan"))
+                mtf_rows.insert(2, ["VCP Yapısı",
+                                    f"{int(mtf['mv_dalga'])} daralma dalgası"
+                                    + (f", son daralma %{_sd2:.1f}" if np.isfinite(_sd2) else "")])
         story.append(_data_table(["Parametre", "Değer"], mtf_rows, sty,
                                  [page_w*0.42, page_w*0.58]))
 
