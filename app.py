@@ -5648,7 +5648,9 @@ with tab_scan:
         for _k, _sym in enumerate(_liste):
             _durum.caption(f"Taranıyor: {_sym} ({_k + 1}/{len(_liste)})")
             try:
-                _m = build_mtf_summary(_sym)
+                _ddf_tmp = _fetch_daily_df(_sym, 320)
+                _lo52, _hi52 = compute_52w_levels(_ddf_tmp, 260)
+                _m = build_mtf_summary(_sym, _lo52, _hi52)
                 if _m and not _m.get("error"):
                     _px = float(_m.get("last_close", float("nan")))
                     _pv = float(_m.get("mv_pivot", float("nan")))
@@ -5673,8 +5675,9 @@ with tab_scan:
                     rows = [r for r in rows if r["Ticker"] != _sym] + [_row]
             except Exception as e:
                 rows = [r for r in rows if r["Ticker"] != _sym] + [
-                    {"Ticker": _sym, "Durum": "HATA", "Kapı": "", "Fiyat": "", "Pivot": "",
-                     "Pivota %": "", "Taban dibi": "", "Risk %": "", "Setup": "", "RS": ""}]
+                    {"Ticker": _sym, "Durum": f"HATA: {_sanitize_err(e)[:40]}", "Kapı": "",
+                     "Fiyat": "", "Pivot": "", "Pivota %": "", "Taban dibi": "",
+                     "Risk %": "", "Setup": "", "RS": ""}]
             st.session_state["scan_rows"] = rows
             _bar.progress((_k + 1) / len(_liste))
             if _k < len(_liste) - 1:
