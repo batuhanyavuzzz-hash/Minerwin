@@ -273,7 +273,7 @@ if isinstance(GITHUB_TOKEN, str):
 # BU SAYI ELLE ARTIRILIR ki karne "hangi kural dönemine ait karar" bilsin.
 ARMED_DAYS = 14          # kapı açıldıktan sonra setup kaç gün "kurulu" kalır
 BAND_TOLERANCE = 1.08    # teyit günü fiyat bant üstünün en fazla %8 üzerinde olabilir
-RULE_VER = "v2"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
+RULE_VER = "v3"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
 
 GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
 GIST_FILENAME = "history.csv"
@@ -911,6 +911,36 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
 
         # Eski (eşzamanlı) tanım gölgede kalır — karnede karşılaştırma için
         teyit_v1_shadow = bool(d_plan.status_tag.startswith("🟢"))
+
+        # ===== MINERVINI GİRİŞİ (V7.4 / RULE_VER v3) =====
+        # Alım noktası artık VCP tabanı + PİVOT KIRILIMI. Stop YAPISAL: taban dibi.
+        # Retro kanıtı (3 yıl / 30 hisse, eşit ayarlarla):
+        #   eski giriş  → isabet %29, stopla kapanan %66, en büyük düşüş -%13.5
+        #   pivot girişi→ isabet %53, stopla kapanan %35, en büyük düşüş  -%3.0
+        mv_break = False        # bugün pivot kırıldı mı
+        mv_base = False         # taban kurulu mu (daralma + hacim kuruması)
+        mv_pivot = float("nan")
+        mv_dip = float("nan")
+        mv_stop = mv_tp1 = mv_tp2 = float("nan")
+        mv_dist = float("nan")  # pivota uzaklık %
+        try:
+            _bp = _retro_base_pivot(ddf)
+            mv_break = bool(_bp["sinyal"].iloc[-1])
+            mv_pivot = float(_bp["pivot"].iloc[-1])
+            mv_dip = float(_bp["dip"].iloc[-1])
+            _px = float(ddf["close"].iloc[-1])
+            _der = (mv_pivot - mv_dip) / mv_pivot if mv_pivot > 0 else float("nan")
+            mv_base = bool(np.isfinite(_der) and 0.05 <= _der <= 0.35
+                           and bool(_bp["daralma"].iloc[-1]) and bool(_bp["vol_kuru"].iloc[-1]))
+            if np.isfinite(mv_pivot) and mv_pivot > 0:
+                mv_dist = (mv_pivot / _px - 1.0) * 100.0
+            if np.isfinite(mv_dip) and mv_dip > 0:
+                mv_stop = mv_dip * 0.99
+                _R = _px - mv_stop
+                if _R > 0:
+                    mv_tp1, mv_tp2 = _px + 2.0 * _R, _px + 4.0 * _R
+        except Exception:
+            pass
         w_extended = w_plan.status_tag.startswith("⚫")
         rs_weak = np.isfinite(rs_rating) and rs_rating < 60
         rs_very_weak = np.isfinite(rs_rating) and rs_rating < 45
@@ -935,50 +965,36 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
                        f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
-        elif w_extended and armed_recent and daily_green and np.isfinite(_whi) and \
-                float(ddf["close"].iloc[-1]) <= _whi * BAND_TOLERANCE:
-            # SIRALI AKIŞ TAMAMLANDI: fiyat banda indi (setup kuruldu) → sonraki
-            # günlerde günlük teyit geldi. Eski kurgu bunu "uzamış" diye reddediyordu;
-            # retro-test bu vakaların isabetini %84 / medyan +11.07 rel ölçtü.
+        elif mv_break and np.isfinite(mv_stop) and (float(ddf["close"].iloc[-1]) - mv_stop) > 0:
+            # PİVOT KIRILIMI — Minervini girişi. Stop yapısal (taban dibi).
             gate = "ACIK"
-            _above = (float(ddf["close"].iloc[-1]) / _whi - 1.0) * 100.0 if _whi > 0 else float("nan")
-            verdict = (f"Giriş koşulları oluşmuş (sıralı akış) — fiyat {armed_days_ago} gün önce "
-                       f"haftalık banda indi, günlük teyit bugün geldi. "
-                       f"Fiyat bant üstünün %{max(0.0, _above):.1f} üzerinde (tolerans %8 içinde)."
+            _px = float(ddf["close"].iloc[-1])
+            _riskp = (_px - mv_stop) / _px * 100.0
+            verdict = (f"Giriş koşulları oluştu — VCP tabanı tamamlandı ve pivot "
+                       f"({mv_pivot:.2f}) hacimle kırıldı. Yapısal stop: {mv_stop:.2f} "
+                       f"(risk %{_riskp:.1f}). Hedefler: {mv_tp1:.2f} (2R) / {mv_tp2:.2f} (4R)."
                        f"{rs_note}")
             verdict_kind = "success"
-        elif w_extended:
+        elif mv_base and np.isfinite(mv_pivot):
+            # Taban kurulu, kırılım bekleniyor — alarm buraya kurulur
             gate = "BEKLEMEDE"
-            _armed_txt = ""
-            if armed_recent:
-                _armed_txt = (f" Setup kurulu: fiyat {armed_days_ago} gün önce banda indi — "
-                              f"günlük teyit gelirse giriş koşulu oluşur ({ARMED_DAYS} gün geçerli).")
-            verdict = (f"Aday — haftalık yapı kriterlerden geçiyor (setup {w_plan.setup_score}/100). "
-                       f"Fiyat haftalık bandın üstünde; giriş bölgesinde değil. "
-                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{_armed_txt}{rs_note}")
+            verdict = (f"Aday — VCP tabanı kurulu (setup {w_plan.setup_score}/100). "
+                       f"Pivot: {mv_pivot:.2f} (fiyatın %{max(0.0, mv_dist):.1f} üstünde), "
+                       f"taban dibi: {mv_dip:.2f}. Pivot hacimle kırılırsa giriş koşulu oluşur."
+                       f"{rs_note}")
             verdict_kind = "warning"
-        elif daily_green:
-            gate = "ACIK"
-            verdict = (f"Giriş koşulları oluşmuş — haftalık yapı uygun, günlük teyit mevcut.{rs_note}")
-            verdict_kind = "success"
         else:
-            gate = "ACIK"
-            # NEW (V7.2): Fiyat banda SERT düşüşle geldiyse (günlük yapı fiyatın
-            # üstünde kırık) hüküm bunu adıyla söyler — koşul yapısal-ikili,
-            # şiddet sürekli sayı; yeni eşik icat edilmedi.
-            _cls = float(d_plan.debug.get("close", float("nan")))
-            _dlo = float(d_plan.entry_low) if np.isfinite(d_plan.entry_low) else float("nan")
-            if np.isfinite(_cls) and np.isfinite(_dlo) and _dlo > _cls > 0:
-                _gap = (_dlo - _cls) / _cls * 100.0
-                _apc = float(d_plan.debug.get("atr_pct", float("nan")))
-                _amul = (_gap / _apc) if (np.isfinite(_apc) and _apc > 0) else float("nan")
-                _sev = f" (≈{_amul:.1f}×ATR)" if np.isfinite(_amul) else ""
-                verdict = (f"Aday — haftalık uygun; günlük yapı fiyatın "
-                           f"%{_gap:.1f}{_sev} üstünde — teyit için günlük onarım gerekli. "
-                           f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
-            else:
-                verdict = (f"Aday — haftalık uygun; günlük teyit henüz oluşmadı. "
-                           f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
+            gate = "BEKLEMEDE"
+            _neden = "taban henüz daralmadı / hacim kurumadı"
+            if np.isfinite(mv_pivot) and np.isfinite(mv_dip) and mv_pivot > 0:
+                _d = (mv_pivot - mv_dip) / mv_pivot * 100.0
+                if _d > 35:
+                    _neden = f"taban çok derin (%{_d:.0f}) — sağlıklı konsolidasyon değil"
+                elif _d < 5:
+                    _neden = f"taban çok sığ (%{_d:.0f}) — henüz yapı oluşmadı"
+            verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100) ancak "
+                       f"giriş kurulumu yok: {_neden}. Haftalık bant: {_wlo:.2f} – {_whi:.2f}."
+                       f"{rs_note}")
             verdict_kind = "warning"
 
         out.update({
@@ -994,6 +1010,10 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "teyit_v1_shadow": teyit_v1_shadow,
             "armed_recent": armed_recent,
             "armed_days_ago": armed_days_ago,
+            "last_close": float(ddf["close"].iloc[-1]) if ddf is not None and len(ddf) else float("nan"),
+            "mv_break": mv_break, "mv_base": mv_base,
+            "mv_pivot": mv_pivot, "mv_dip": mv_dip,
+            "mv_stop": mv_stop, "mv_tp1": mv_tp1, "mv_tp2": mv_tp2,
             "rs_edge_w": (
                 sum(rs_edges.get(k, float("nan")) * w for k, w in
                     [("edge_3m", 0.30), ("edge_6m", 0.35), ("edge_12m", 0.35)])
@@ -3830,6 +3850,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         st.session_state.pop(_k, None)
                     d_plan = mtf["_d_plan"]
                     w_plan = mtf["_w_plan"]  # FIX (V7.2): kayıt seviyeleri için
+                    ddf_last_close = float(mtf.get("last_close", d_plan.entry_high))
                     record = {
                         "timestamp": datetime.now(TR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                         "ticker": sw_ticker,
@@ -3862,11 +3883,11 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "levels_src": ("D" if mtf.get("gate") == "ACIK" else "W"),
                         **(
                             {
-                                "entry_low": round(float(d_plan.entry_low), 4),
-                                "entry_high": round(float(d_plan.entry_high), 4),
-                                "stop": round(float(d_plan.stop), 4),
-                                "tp1": round(float(d_plan.tp1), 4),
-                                "tp2": round(float(d_plan.tp2), 4),
+                                "entry_low": round(float(mtf.get("mv_pivot", d_plan.entry_low)), 4),
+                                "entry_high": round(float(ddf_last_close), 4),
+                                "stop": round(float(mtf.get("mv_stop", d_plan.stop)), 4),
+                                "tp1": round(float(mtf.get("mv_tp1", d_plan.tp1)), 4),
+                                "tp2": round(float(mtf.get("mv_tp2", d_plan.tp2)), 4),
                                 "rr_tp1": round(float(d_plan.rr_tp1), 4) if np.isfinite(d_plan.rr_tp1) else "",
                                 "rr_tp2": round(float(d_plan.rr_tp2), 4) if np.isfinite(d_plan.rr_tp2) else "",
                             }
@@ -3921,11 +3942,12 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         if _old_t != "":
             _ar = mtf.get("armed_recent", False)
             _ad = mtf.get("armed_days_ago")
+            _mvp, _mvd = mtf.get("mv_pivot", float("nan")), mtf.get("mv_dip", float("nan"))
             st.caption(
-                f"🔎 Kural seti **{RULE_VER}**: teyit = 2 gün EMA20 üstü + RSI↑ · "
-                + (f"setup KURULU (banda {_ad} gün önce indi, {ARMED_DAYS} gün geçerli)" if _ar
-                   else f"setup kurulu değil (son {ARMED_DAYS} günde banda inmedi)")
-                + " · " + ("eski eşzamanlı kural da onaylardı" if _old_t else "eski eşzamanlı kural onaylamazdı")
+                f"🔎 Kural seti **{RULE_VER}** (Minervini girişi): VCP tabanı + pivot kırılımı, "
+                f"stop = taban dibi · "
+                + (f"pivot {_mvp:.2f} / dip {_mvd:.2f}" if np.isfinite(_mvp) else "taban verisi yok")
+                + " · " + ("taban KURULU" if mtf.get("mv_base") else "taban kurulmadı")
             )
         _wlo, _whi = mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))
         if np.isfinite(_wlo) and np.isfinite(_whi) and _whi > 0:
@@ -4114,7 +4136,9 @@ def _retro_base_pivot(d: pd.DataFrame, base_len: int = 25) -> Dict[str, pd.Serie
 
     sinyal = (kirilim & hacim_patlama & daralma & vol_kuru
               & derinlik.between(0.05, 0.35)).fillna(False)
-    return {"sinyal": sinyal, "pivot": pivot, "dip": dip}
+    return {"sinyal": sinyal, "pivot": pivot, "dip": dip,
+            "daralma": daralma.fillna(False), "vol_kuru": vol_kuru.fillna(False),
+            "derinlik": derinlik}
 
 
 def _retro_signal_series(d: pd.DataFrame) -> Dict[str, pd.Series]:
