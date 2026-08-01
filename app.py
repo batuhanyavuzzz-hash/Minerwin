@@ -997,11 +997,11 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             if not daily_green:
                 _eksikler = []
                 if not _bugun_ok:
-                    _eksikler.append(f"kapanış günlük EMA20'nin ({float(_e20.iloc[-1]):.2f}) altında")
+                    _eksikler.append(f"kapanışın günlük EMA20 üstüne çıkması ({float(_e20.iloc[-1]):.2f})")
                 elif not _dun_ok:
-                    _eksikler.append("EMA20 üstünde henüz 1 gün (2 gün gerekiyor)")
+                    _eksikler.append("EMA20 üstünde ikinci kapanış (bugün birincisi)")
                 if not _rsi_ok:
-                    _eksikler.append("RSI yönü aşağı (3 güne göre düşüyor)")
+                    _eksikler.append("RSI'ın yukarı dönmesi")
                 teyit_eksik = " ve ".join(_eksikler)
         except Exception:
             daily_green = d_plan.status_tag.startswith("🟢")
@@ -1105,25 +1105,42 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict_kind = "success"
         elif w_extended:
             gate = "BEKLEMEDE"
-            _armed_txt = ""
+            _kalan = max(0, ARMED_DAYS - int(armed_days_ago or 0)) if armed_recent else 0
+            _px_now = float(ddf["close"].iloc[-1])
+            _uzak = (_px_now / _whi - 1.0) * 100.0 if np.isfinite(_whi) and _whi > 0 else float("nan")
+
+            # 1) Durum tespiti
             if armed_recent:
-                _kalan = max(0, ARMED_DAYS - int(armed_days_ago or 0))
-                _eksik_txt = f" Bekleyen şart: {teyit_eksik}." if teyit_eksik else ""
-                _armed_txt = (f" Kurulum hazır: fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
-                              f"indi; giriş hakkı {_kalan} gün daha geçerli.{_eksik_txt}")
-            _chase_txt = ""
+                _s1 = (f"Kurulum hazır — fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
+                       f"({_wlo:.2f}–{_whi:.2f}) değdi")
+                if np.isfinite(_uzak) and _uzak > 0:
+                    _s1 += f", şu an bandın %{_uzak:.1f} üstünde"
+                _s1 += "."
+            else:
+                _s1 = (f"Fiyat alarm bandının ({_wlo:.2f}–{_whi:.2f}) "
+                       f"%{max(0.0, _uzak):.1f} üstünde — giriş bölgesinde değil.")
+
+            # 2) Giriş için ne gerekiyor
             if _chase.get("sebep"):
-                _chase_txt = f" Teyit oluştu ancak giriş uzak: {_chase['sebep']}."
-            _pv_txt = ""
+                _s2 = f" Giriş için engel: {_chase['sebep']}."
+            elif teyit_eksik:
+                _s2 = f" Giriş için gereken: {teyit_eksik}."
+            elif armed_recent:
+                _s2 = " Giriş koşulları oluşmak üzere."
+            else:
+                _s2 = " Fiyat banda geldiğinde analiz yenilenir."
+
+            # 3) Süre (yalnız kurulum varsa)
+            _s3 = f" Kurulum {_kalan} gün daha geçerli." if (armed_recent and _kalan > 0) else ""
+
+            # 4) VCP bilgisi (varsa)
+            _s4 = ""
             if mv_base and np.isfinite(mv_pivot):
-                _pv_txt = (f" · VCP: {mv_dalga} daralma dalgası, pivot {mv_pivot:.2f} "
-                           f"(fiyatın %{max(0.0, (mv_pivot/float(ddf['close'].iloc[-1])-1)*100):.1f} üstünde), "
-                           f"taban dibi {mv_dip:.2f}, son daralma %{mv_son_daralma:.1f}")
-            elif np.isfinite(mv_pivot):
-                _pv_txt = f" · Pivot (bilgi): {mv_pivot:.2f}"
-            verdict = (f"Aday — haftalık yapı kriterlerden geçiyor (setup {w_plan.setup_score}/100). "
-                       f"Fiyat haftalık bandın üstünde; giriş bölgesinde değil. "
-                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{_armed_txt}{_chase_txt}{_pv_txt}{rs_note}")
+                _s4 = (f" VCP: {mv_dalga} daralma dalgası, pivot {mv_pivot:.2f}, "
+                       f"taban dibi {mv_dip:.2f}.")
+
+            verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100). "
+                       + _s1 + _s2 + _s3 + _s4 + rs_note)
             verdict_kind = "warning"
         elif daily_green:
             gate = "ACIK"
