@@ -4561,8 +4561,8 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
     return out
 
 
-tab_single, tab_portfolio, tab_retro = st.tabs(
-    ["📈 Tek Hisse Analiz", "🧳 Portföy Analiz", "🧪 Retro-Test"]
+tab_single, tab_scan, tab_portfolio, tab_retro = st.tabs(
+    ["📈 Tek Hisse Analiz", "🔎 Toplu Tarama", "🧳 Portföy Analiz", "🧪 Retro-Test"]
 )
 
 
@@ -5611,3 +5611,87 @@ with tab_retro:
                 data=rows.to_csv(index=False).encode("utf-8-sig"),
                 file_name="minerwin_retrotest.csv", mime="text/csv", key="rt_dl",
             )
+
+
+# =========================================================
+# SEKME: TOPLU TARAMA (NEW V7.4)
+# Pivot kırılımı seyrek olaydır → geniş liste taranmadan aday bulunamaz.
+# Amaç: listeyi tarayıp "kırılan" ve "kırılıma yakın" hisseleri öne çıkarmak.
+# Sonuçlar oturumda birikir; liste parça parça taranabilir (API kotası).
+# =========================================================
+with tab_scan:
+    st.subheader("🔎 Toplu Tarama — aday avı")
+    st.caption(
+        "Listeyi tarar, her hisse için VCP tabanı ve pivot durumunu çıkarır. "
+        "Sıralama: önce pivotu KIRANLAR, sonra pivota en yakın olanlar. "
+        "Aday bulunca 📈 Tek Hisse sekmesinde detayına bak."
+    )
+    _scan_default = st.session_state.get("scan_list", "")
+    scan_syms = st.text_area("Taranacak hisseler (virgülle)", value=_scan_default,
+                             height=90, key="scan_syms")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    scan_go = c1.button("▶️ Taramayı Başlat", type="primary", key="scan_go")
+    scan_clear = c2.button("🗑️ Sonuçları temizle", key="scan_clear")
+    _n = len([s for s in scan_syms.split(",") if s.strip()])
+    c3.caption(f"{_n} hisse · tahmini süre ~{max(1, round(_n * 8 / 60))} dk "
+               "(API kotası nedeniyle hisse başına bekleme var)")
+
+    if scan_clear:
+        st.session_state["scan_rows"] = []
+
+    if scan_go and _n:
+        rows = st.session_state.get("scan_rows", [])
+        _mevcut = {r["Ticker"] for r in rows}
+        _liste = [s.strip().upper() for s in scan_syms.split(",") if s.strip()]
+        _bar = st.progress(0.0)
+        _durum = st.empty()
+        for _k, _sym in enumerate(_liste):
+            _durum.caption(f"Taranıyor: {_sym} ({_k + 1}/{len(_liste)})")
+            try:
+                _m = build_mtf_summary(_sym)
+                if _m and not _m.get("error"):
+                    _px = float(_m.get("last_close", float("nan")))
+                    _pv = float(_m.get("mv_pivot", float("nan")))
+                    _dp = float(_m.get("mv_dip", float("nan")))
+                    _uzak = (_pv / _px - 1) * 100 if (np.isfinite(_pv) and _px > 0) else float("nan")
+                    _row = {
+                        "Ticker": _sym,
+                        "Durum": ("🟢 PİVOT KIRILDI" if _m.get("mv_break")
+                                  else "🟡 TABAN KURULU" if _m.get("mv_base")
+                                  else "⚪ kurulum yok"),
+                        "Kapı": _m.get("gate", ""),
+                        "Fiyat": round(_px, 2) if np.isfinite(_px) else "",
+                        "Pivot": round(_pv, 2) if np.isfinite(_pv) else "",
+                        "Pivota %": round(_uzak, 1) if np.isfinite(_uzak) else "",
+                        "Taban dibi": round(_dp, 2) if np.isfinite(_dp) else "",
+                        "Risk %": (round((_px - float(_m.get("mv_stop", np.nan))) / _px * 100, 1)
+                                   if np.isfinite(_m.get("mv_stop", np.nan)) and _px > 0 else ""),
+                        "Setup": _m.get("w_setup", ""),
+                        "RS": round(float(_m.get("rs_rating", np.nan)), 0)
+                              if np.isfinite(_m.get("rs_rating", np.nan)) else "",
+                    }
+                    rows = [r for r in rows if r["Ticker"] != _sym] + [_row]
+            except Exception as e:
+                rows = [r for r in rows if r["Ticker"] != _sym] + [
+                    {"Ticker": _sym, "Durum": "HATA", "Kapı": "", "Fiyat": "", "Pivot": "",
+                     "Pivota %": "", "Taban dibi": "", "Risk %": "", "Setup": "", "RS": ""}]
+            st.session_state["scan_rows"] = rows
+            _bar.progress((_k + 1) / len(_liste))
+            if _k < len(_liste) - 1:
+                time.sleep(8.0)
+        _durum.caption("Tarama tamam.")
+
+    _rows = st.session_state.get("scan_rows", [])
+    if _rows:
+        _df = pd.DataFrame(_rows)
+        _sira = {"🟢 PİVOT KIRILDI": 0, "🟡 TABAN KURULU": 1, "⚪ kurulum yok": 2, "HATA": 3}
+        _df["_s"] = _df["Durum"].map(_sira).fillna(9)
+        _df["_u"] = pd.to_numeric(_df["Pivota %"], errors="coerce").abs()
+        _df = _df.sort_values(["_s", "_u"]).drop(columns=["_s", "_u"])
+        _kir = (_df["Durum"] == "🟢 PİVOT KIRILDI").sum()
+        _tab = (_df["Durum"] == "🟡 TABAN KURULU").sum()
+        st.markdown(f"**{len(_df)} hisse tarandı — {_kir} pivot kırılımı, {_tab} taban kurulu**")
+        st.dataframe(_df, use_container_width=True, hide_index=True)
+        st.download_button("📥 Tarama sonucunu indir (CSV)",
+                           data=_df.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="minerwin_tarama.csv", mime="text/csv", key="scan_dl")
