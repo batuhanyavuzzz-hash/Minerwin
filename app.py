@@ -1008,15 +1008,6 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
                        f"haftalık banda indi, günlük teyit bugün geldi. "
                        f"Fiyat bant üstünün %{max(0.0, _above):.1f} üzerinde (tolerans %8 içinde)."
                        f"{rs_note}")
-            try:
-                _e = float(ddf["close"].iloc[-1]); _s0 = float(d_plan.stop)
-                if _e > _s0 > 0:
-                    _s1 = _e - (_e - _s0) * STOP_TIGHTEN
-                    verdict += (f" · Kalibre stop: {_s1:.2f} (mesafe ×{STOP_TIGHTEN}); "
-                                f"TP1'de kısmi satma, TP1 sonrası iz süren stop, en fazla "
-                                f"{MAX_HOLD_DAYS} gün taşı.")
-            except Exception:
-                pass
             verdict_kind = "success"
         elif w_extended:
             gate = "BEKLEMEDE"
@@ -2763,12 +2754,33 @@ def build_pdf_bytes_single(
             elif ps.get("reason") == "risk_exceeds":
                 plan_left.append(["Pozisyon Boyutu",
                                   "1 adet dahi hedef risk bütçesinin üstünde (adet başına risk hedefi aşıyor)"])
+        # V7.5: Yönetim kuralları hükümde değil, planda durur (kalibrasyon çıktısı)
+        if mtf and mtf.get("gate") == "ACIK":
+            plan_left.append([
+                "Yönetim",
+                f"TP1'de kısmi satış yok · TP1 sonrası iz süren stop · en fazla {MAX_HOLD_DAYS} gün",
+            ])
         plan_right = [
             ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
             ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
             ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
             ["Pivot Kırılımı",     "Var" if plan.breakout_detected else "Yok"],
         ]
+        # V7.5: Gerçek VCP tespiti (çok dalgalı taban) — plan tablosunda görünür
+        if mtf and mtf.get("mv_dalga"):
+            _vd = int(mtf.get("mv_dalga") or 0)
+            _vp = float(mtf.get("mv_pivot", float("nan")))
+            _vdip = float(mtf.get("mv_dip", float("nan")))
+            _vsd = float(mtf.get("mv_son_daralma", float("nan")))
+            if _vd >= 2 and np.isfinite(_vp):
+                plan_right.append(["VCP Tabanı", f"{_vd} daralma dalgası"])
+                plan_right.append(["VCP Pivot / Dip", f"{_vp:.2f} / {_vdip:.2f}"])
+                if np.isfinite(_vsd):
+                    plan_right.append(["Son daralma", f"%{_vsd:.1f}"])
+            else:
+                plan_right.append(["VCP Tabanı", "Yok"])
+        elif mtf:
+            plan_right.append(["VCP Tabanı", "Yok"])
 
         half_w = page_w * 0.48
         gap_w  = page_w * 0.04
@@ -2869,6 +2881,16 @@ def build_pdf_bytes_single(
                 "Haftalık bant raporda referans olarak yer alır; yapı düzeldiğinde yeniden değerlendirilir."
             )
         story += _section_header("Plan", sty, page_w)
+    elif mtf and mtf.get("gate") == "ACIK":
+        # V7.5: Hüküm giriş veriyorsa senaryo "kovalama olur" diyemez — tek ses.
+        scenario_src = (
+            "Giriş koşulları oluşmuş durumda. Uygulama: pozisyon boyutu tabloda hesaplanan "
+            "adet üzerinden alınır; stop emri aynı gün girilir. Yönetim: TP1'de kısmi satış "
+            f"yapılmaz, TP1 sonrası iz süren stop devreye alınır, pozisyon en fazla "
+            f"{MAX_HOLD_DAYS} işlem günü taşınır. Haftalık yapı bozulursa (trend kaybı veya "
+            "göreli güç düşüşü) plan süresinden önce kapatılır."
+        )
+        story += _section_header("Uygulama Planı", sty, page_w)
     else:
         scenario_src = plan.scenario
         story += _section_header("Senaryo", sty, page_w)
