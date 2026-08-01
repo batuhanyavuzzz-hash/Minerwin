@@ -353,7 +353,7 @@ def _band_tolerance_pct(ddf: pd.DataFrame) -> float:
         return float(min(BAND_TOL_MAX, max(BAND_TOL_MIN, BAND_TOL_ATR_CARPAN * _atrp)))
     except Exception:
         return 8.0
-RULE_VER = "v4"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
+RULE_VER = "v5"   # v5: ANA TETİK = VCP tabanı + pivot kırılımı (retro: PF 3.35 vs 1.34)
 
 GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
 GIST_FILENAME = "history.csv"
@@ -639,6 +639,51 @@ def parse_ohlcv(payload: dict) -> pd.DataFrame:
 def _fetch_daily_df(symbol: str, outputsize: int = 320) -> pd.DataFrame:
     payload = td_time_series(symbol, "1day", int(outputsize))
     return parse_ohlcv(payload)
+
+
+# =========================================================
+# HAZIR TARAMA EVRENLERİ (V7.6)
+# =========================================================
+EVREN_MINERVINI = ",".join([
+    # Momentum / lider adayları — sistemin asıl av sahası
+    "NVDA","AVGO","AMD","MU","MRVL","CRDO","ALAB","NVMI","ONTO","ACLS","ACMR","ARM","TSM","ASML","AMAT",
+    "LRCX","KLAC","TER","ENTG","MPWR","SWKS","QRVO","NXPI","MCHP","ON","SMCI","ANET","PSTG","STX","SNDK",
+    "WDC","LITE","FN","CIEN","COHR","AEIS","VRT","ETN","PWR","GEV","VST","TLN","CEG","NRG","OKLO","SMR",
+    "LEU","CCJ","UEC","DNN","UUUU","NNE","BE","PLUG","FCEL","EOSE","ENPH","RUN","SHLS","ARRY","FSLR",
+    "PLTR","CRWD","PANW","ZS","S","OKTA","NET","DDOG","SNOW","MDB","ESTC","GTLB","TEAM","NOW","CRM",
+    "APP","TTD","ROKU","SPOT","NFLX","RBLX","U","DKNG","FLUT","SHOP","SQ","PYPL","AFRM","SOFI","UPST",
+    "HOOD","COIN","NU","TOST","LMND","CVNA","IREN","RIOT","MARA","CLSK","HUT","BITF","CIFR","WULF","APLD",
+    "CORZ","IONQ","RGTI","QBTS","BBAI","SOUN","AI","PATH","TEM","RXRX","CRSP","NTLA","BEAM","SRPT","ALNY",
+    "IONS","VKTX","EXAS","GH","NTRA","HIMS","OSCR","DOCS","ISRG","VRTX","REGN","BSX","AXON","KTOS","AVAV",
+    "RKLB","ASTS","LUNR","PL","ACHR","JOBY","EH","BLDE","ONDS","UMAC","BWXT","HWM","TDG","LDOS","PSN",
+    "CACI","SNPS","CDNS","ADBE","ORCL","MSFT","GOOGL","AMZN","META","AAPL","UBER","ABNB","DASH","BKNG",
+    "CELH","DUOL","ANF","DECK","ONON","BIRK","CAVA","WING","SG","CMG","SBUX","NKE","LULU","TJX","ROST",
+    "COST","WMT","TGT","HD","LOW","DELL","HPE","NTAP","JBL","FLEX","SANM","ZBRA","KEYS","TDY","GRMN",
+    "GLW","APH","TEL","ADI","TXN","QCOM","INTC","ARQQ","LAES","GLXY","SEZL","DAVE","OS","BMNR","CRCL",
+    "SPCE","RDW","NVAX","MRNA","APLS","VERV","TERN","ALT","CLOV","ALHC","HUMA","PGNY","AMPL","FROG","DOCN",
+    "TWLO","ZM","DOCU","HUBS","VEEV","WDAY","SPGI","ICE","CME","MCO","KKR","APO","ARES","BX","TW","NDAQ",
+    "MSCI","FICO","VRSK","INFO","CPRT","ODFL","SAIA","XPO","URI","LII","HUBB","EMR","PH","ITW","ROK",
+])
+
+EVREN_GENIS = ",".join([
+    # Geniş piyasa — mega-cap ve savunmacı sektörler (kıyas evreni)
+    "JPM","BAC","GS","MS","WFC","C","SCHW","BLK","AXP","V","MA","COF","CB","PGR","TRV","ALL","MET",
+    "PRU","AIG","AFL","USB","PNC","TFC","FITB","KEY","RF","CFG","HBAN","MTB","STT","BK","NTRS","AMP",
+    "LLY","UNH","JNJ","ABBV","MRK","PFE","TMO","ABT","DHR","AMGN","GILD","BIIB","MDT","SYK","ZTS","BDX",
+    "BAX","EW","HOLX","RMD","STE","WST","DGX","LH","CI","ELV","CNC","MOH","HCA","UHS","MCK","COR","CAH",
+    "CAT","DE","RTX","LMT","GE","HON","UNP","UPS","FDX","BA","NOC","GD","LHX","TXT","CSX","NSC","ODFL",
+    "WM","RSG","JCI","CARR","OTIS","IR","DOV","SWK","PNR","AME","FTV","XYL","GGG","NDSN","IEX",
+    "XOM","CVX","COP","SLB","EOG","OXY","PSX","MPC","VLO","HES","DVN","FANG","HAL","BKR","OKE","WMB",
+    "KMI","TRGP","LNG","EQT","AR","CTRA","MRO","APA","FCX","NEM","LIN","APD","SHW","ECL","NUE","STLD",
+    "PG","KO","PEP","MDLZ","CL","KMB","GIS","K","HSY","SYY","KR","DG","DLTR","MCD","YUM","QSR","DPZ",
+    "DIS","CMCSA","VZ","T","TMUS","CHTR","EA","TTWO","WBD","PARA","FOXA","NWSA","OMC","IPG",
+    "NEE","DUK","SO","D","EXC","AEP","XEL","ED","WEC","ES","PEG","SRE","PCG","FE","ETR","AEE","CMS",
+    "PLD","AMT","EQIX","SPG","O","CCI","PSA","WELL","VTR","AVB","EQR","MAA","ESS","UDR","INVH","ARE",
+    "DLR","IRM","VICI","GLPI","HST","RHP","KIM","REG","FRT","BXP","VNO","SLG","HIW",
+    "ADP","PAYX","INTU","FIS","FISV","GPN","JKHY","BR","CTAS","FAST","GWW","WSO","POOL","SITE",
+    "MMM","GLW","EMN","DD","PPG","IFF","ALB","CE","LYB","MOS","CF","ADM","BG","TSN","HRL","CAG",
+    "SJM","CPB","MKC","CHD","CLX","EL","COTY","ULTA","BBY","AZO","ORLY","GPC","LKQ","TSCO",
+])
 
 
 def _weekly_from_daily(ddf: pd.DataFrame) -> pd.DataFrame:
@@ -1088,54 +1133,54 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
                        f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
-        elif w_extended and armed_recent and daily_green and np.isfinite(_whi) and \
-                float(ddf["close"].iloc[-1]) <= _whi * (1.0 + _band_tol / 100.0):
-            # SIRALI AKIŞ (v6): fiyat banda indi (setup kuruldu) → günlük teyit geldi.
-            # 125 hisse/3 yıl portföy simülasyonu (kalibre çıkışlarla):
-            #   v6 pullback girişi → 14.674$ (+%46.7), 87 işlem, düşüş -%7.9
-            #   v7 pivot kırılımı  → 10.053$ (+%0.5), 21 işlem, düşüş -%3.5
-            # Pivot girişi daha güvenli ama işlem üretmiyor; kâr pullback'te.
+        elif mv_break and np.isfinite(mv_stop) and np.isfinite(mv_pivot) and \
+                (float(ddf["close"].iloc[-1]) - mv_stop) > 0:
+            # ===== V7.6 ANA TETİK: VCP PİVOT KIRILIMI =====
+            # Retro kanıtı (247 hisse / 3 yıl, gerçek trader kurallarıyla):
+            #   mega-cap evreni:  v6 +888$ (PF 1.15) | v8 +3.595$ (PF 2.40)
+            #   momentum evreni:  v6 +2.212$ (PF 1.34) | v8 +6.213$ (PF 3.35)
+            # v8 her iki evrende, her iki dönem yarısında da üstün.
             gate = "ACIK"
-            _above = (float(ddf["close"].iloc[-1]) / _whi - 1.0) * 100.0 if _whi > 0 else float("nan")
-            verdict = (f"Giriş koşulları oluştu — fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
-                       f"indi ve bugün günlük teyit verdi. Şu an bandın %{max(0.0, _above):.1f} "
-                       f"üstünde; bu hissenin volatilitesine göre kovalama sınırı "
-                       f"%{_band_tol:.0f} — sınırın içinde."
-                       f"{rs_note}")
+            _px = float(ddf["close"].iloc[-1])
+            _riskp = (_px - mv_stop) / _px * 100.0
+            verdict = (f"Giriş koşulları oluştu — VCP tabanı ({mv_dalga} daralma dalgası) "
+                       f"tamamlandı ve pivot {mv_pivot:.2f} hacimle kırıldı. "
+                       f"Stop {mv_stop:.2f} (taban dibi, risk %{_riskp:.1f}).{rs_note}")
             verdict_kind = "success"
-        elif w_extended:
+        elif mv_base and np.isfinite(mv_pivot):
+            # Taban kurulu, kırılım bekleniyor — ALARM BURAYA KURULUR
             gate = "BEKLEMEDE"
-            _px_now = float(ddf["close"].iloc[-1])
-            _uzak = (_px_now / _whi - 1.0) * 100.0 if np.isfinite(_whi) and _whi > 0 else float("nan")
-            # SADE HÜKÜM: durum + konum + tek eksik. Detaylar tablolarda durur.
-            if np.isfinite(_uzak) and _uzak > 0.1:
-                _konum = f"Fiyat bandın ({_wlo:.2f}–{_whi:.2f}) %{_uzak:.1f} üstünde."
-            else:
-                _konum = f"Fiyat alarm bandında ({_wlo:.2f}–{_whi:.2f})."
-            if _chase.get("sebep"):
-                _eksik = " Giriş için fazla uzak — kovalama sınırı aşılıyor."
-            elif teyit_eksik:
-                _eksik = " Giriş için günlük teyit bekleniyor."
-            else:
-                _eksik = " Giriş koşulları oluşmak üzere."
-            verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100). "
-                       + _konum + _eksik + rs_note)
+            _px = float(ddf["close"].iloc[-1])
+            _uz = (mv_pivot / _px - 1.0) * 100.0 if _px > 0 else float("nan")
+            verdict = (f"Aday — VCP tabanı kurulu ({mv_dalga} daralma dalgası). "
+                       f"Pivot {mv_pivot:.2f}"
+                       + (f", fiyatın %{_uz:.1f} üstünde" if np.isfinite(_uz) and _uz > 0 else "")
+                       + f". Taban dibi {mv_dip:.2f}. Pivot hacimle kırılırsa giriş koşulu oluşur."
+                       + rs_note)
             verdict_kind = "warning"
-        elif daily_green:
-            gate = "ACIK"
-            verdict = f"Giriş koşulları oluşmuş — haftalık yapı uygun, günlük teyit mevcut.{rs_note}"
-            verdict_kind = "success"
         else:
-            gate = "ACIK"
-            _cls = float(d_plan.debug.get("close", float("nan")))
-            _dlo = float(d_plan.entry_low) if np.isfinite(d_plan.entry_low) else float("nan")
-            if np.isfinite(_cls) and np.isfinite(_dlo) and _dlo > _cls > 0:
-                _gap = (_dlo - _cls) / _cls * 100.0
-                verdict = (f"Aday — haftalık uygun; günlük yapı fiyatın %{_gap:.1f} üstünde — "
-                           f"teyit için günlük onarım gerekli. Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
-            else:
-                verdict = (f"Aday — haftalık uygun; günlük teyit henüz oluşmadı. "
-                           f"Bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
+            # Yapı uygun ama kurulum yok — sebebi yazılır
+            gate = "BEKLEMEDE"
+            _neden = "henüz konsolidasyon oluşmamış"
+            try:
+                if np.isfinite(mv_pivot) and np.isfinite(mv_dip) and mv_pivot > 0:
+                    _d = (mv_pivot - mv_dip) / mv_pivot * 100.0
+                    _px = float(ddf["close"].iloc[-1])
+                    _r = (_px - mv_dip * 0.99) / _px * 100.0 if _px > 0 else float("nan")
+                    if _d > 35:
+                        _neden = f"taban çok derin (%{_d:.0f}) — sağlıklı konsolidasyon değil"
+                    elif _d < 5:
+                        _neden = f"taban çok sığ (%{_d:.0f}) — yapı henüz oturmamış"
+                    elif np.isfinite(_r) and _r > MAX_BASE_RISK * 100:
+                        _neden = (f"taban geniş — stop %{_r:.0f} uzakta "
+                                  f"(üst sınır %{MAX_BASE_RISK*100:.0f})")
+                    else:
+                        _neden = "daralma dalgaları veya hacim kuruması tamamlanmamış"
+            except Exception:
+                pass
+            verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100), "
+                       f"ancak giriş kurulumu yok: {_neden}. "
+                       f"Haftalık bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
             verdict_kind = "warning"
 
         out.update({
@@ -1154,6 +1199,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "last_close": float(ddf["close"].iloc[-1]) if ddf is not None and len(ddf) else float("nan"),
             "mv_break": mv_break, "mv_base": mv_base,
             "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
+            "mv_risk_pct": (((float(ddf["close"].iloc[-1]) - mv_stop) / float(ddf["close"].iloc[-1]) * 100.0)
+                            if np.isfinite(mv_stop) and len(ddf) else float("nan")),
             "band_tol_pct": _band_tol,
             "teyit_eksik": teyit_eksik,
             "chase_ok": _chase.get("ok", True),
@@ -2864,8 +2911,13 @@ def build_pdf_bytes_single(
             ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
             ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
             ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
-            ["Pivot Kırılımı",     "Var" if plan.breakout_detected else "Yok"],
         ]
+        # V7.6: Pivot artık ana referans — alarm buraya kurulur
+        if mtf and np.isfinite(mtf.get("mv_pivot", float("nan"))):
+            plan_right.insert(0, ["Pivot — alarm buraya kurulur",
+                                  f"{float(mtf['mv_pivot']):.2f}"])
+            plan_right.insert(1, ["Taban dibi (stop referansı)",
+                                  f"{float(mtf.get('mv_dip', float('nan'))):.2f}"])
         # V7.5: Gerçek VCP tespiti (çok dalgalı taban) — plan tablosunda görünür
         if mtf and mtf.get("mv_dalga"):
             _vd = int(mtf.get("mv_dalga") or 0)
@@ -2967,12 +3019,19 @@ def build_pdf_bytes_single(
         _whi = mtf.get("w_entry_high", float("nan")) if mtf else float("nan")
         if mtf.get("verdict_kind") == "warning":
             if np.isfinite(_whi):
-                scenario_src = (
-                    f"Fiyat giriş bölgesinde değil; haftalık bant referansı {_whi:.2f}. "
-                    f"Fiyat banda geldiğinde analiz yenilenir: o gün haftalık kriterler korunuyor "
-                    f"ve günlük teyit oluşuyorsa giriş değerlendirilir; pullback yapıyı bozmuşsa "
-                    f"hisse adaylıktan çıkar."
-                )
+                _pv = mtf.get("mv_pivot", float("nan")) if mtf else float("nan")
+                if np.isfinite(_pv):
+                    scenario_src = (
+                        f"Giriş için VCP pivotunun ({_pv:.2f}) hacimle kırılması beklenir. "
+                        f"Alarm bu seviyeye kurulur. Kırılım günü haftalık kriterler korunuyorsa "
+                        f"giriş değerlendirilir; stop tabanın dibine yerleştirilir. Kırılım "
+                        f"gelmeden yapılan alım kovalamaya girer."
+                    )
+                else:
+                    scenario_src = (
+                        f"Giriş kurulumu (VCP tabanı) henüz oluşmamış. Haftalık bant referansı "
+                        f"{_whi:.2f}. Konsolidasyon daraldıkça pivot belirginleşir; analiz yenilenir."
+                    )
             else:
                 scenario_src = "Fiyat giriş bölgesinde değil. Koşullar oluştuğunda analiz yenilenir."
         else:
@@ -2984,11 +3043,12 @@ def build_pdf_bytes_single(
     elif mtf and mtf.get("gate") == "ACIK":
         # V7.5: Hüküm giriş veriyorsa senaryo "kovalama olur" diyemez — tek ses.
         scenario_src = (
-            "Giriş koşulları oluşmuş durumda. Uygulama: pozisyon boyutu tabloda hesaplanan "
-            "adet üzerinden alınır; stop emri aynı gün girilir. Yönetim: TP1'de kısmi satış "
-            f"yapılmaz, TP1 sonrası iz süren stop devreye alınır, pozisyon en fazla "
-            f"{MAX_HOLD_DAYS} işlem günü taşınır. Haftalık yapı bozulursa (trend kaybı veya "
-            "göreli güç düşüşü) plan süresinden önce kapatılır."
+            "VCP pivotu kırıldı; giriş koşulları oluştu. Uygulama: pozisyon tabloda hesaplanan "
+            "adet üzerinden alınır, stop emri taban dibine aynı gün girilir. Yönetim: TP1'e "
+            "ulaşıldığında hisse hâlâ güçlüyse (RSI ve haftalık yapı korunuyorsa) taşınır ve "
+            "stop girişe çekilir, güç kaybolmuşsa satılır. Kâr %10'u geçtiğinde iz süren stop "
+            "devreye girer. Haftalık yapı büyük bozulma gösterirse (setup 40 altı veya kapanış "
+            "haftalık EMA50 altında) pozisyon hedef beklenmeden kapatılır."
         )
         story += _section_header("Uygulama Planı", sty, page_w)
     else:
@@ -4073,11 +4133,11 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         "levels_src": ("D" if mtf.get("gate") == "ACIK" else "W"),
                         **(
                             {
-                                "entry_low": round(float(d_plan.entry_low), 4),
-                                "entry_high": round(float(d_plan.entry_high), 4),
-                                "stop": round(float(d_plan.stop), 4),
-                                "tp1": round(float(d_plan.tp1), 4),
-                                "tp2": round(float(d_plan.tp2), 4),
+                                "entry_low": round(float(mtf.get("mv_pivot", d_plan.entry_low)), 4),
+                                "entry_high": round(float(ddf_last_close), 4),
+                                "stop": round(float(mtf.get("mv_stop", d_plan.stop)), 4),
+                                "tp1": round(float(mtf.get("mv_tp1", d_plan.tp1)), 4),
+                                "tp2": round(float(mtf.get("mv_tp2", d_plan.tp2)), 4),
                                 "rr_tp1": round(float(d_plan.rr_tp1), 4) if np.isfinite(d_plan.rr_tp1) else "",
                                 "rr_tp2": round(float(d_plan.rr_tp2), 4) if np.isfinite(d_plan.rr_tp2) else "",
                             }
@@ -6130,28 +6190,42 @@ with tab_scan:
         "Sıralama: önce pivotu KIRANLAR, sonra pivota en yakın olanlar. "
         "Aday bulunca 📈 Tek Hisse sekmesinde detayına bak."
     )
-    _scan_default = st.session_state.get("scan_list", "")
-    scan_syms = st.text_area("Taranacak hisseler (virgülle)", value=_scan_default,
-                             height=90, key="scan_syms")
+    _EVRENLER = {
+        "Minervini evreni (~256) — momentum/lider": EVREN_MINERVINI,
+        "Geniş piyasa (~250) — mega-cap/savunmacı": EVREN_GENIS,
+        "Çekirdek takip (17)": "AEIS,SNDK,BE,CLSK,BEP,INTC,NBIS,BG,AMZN,PLD,WDC,MRVL,CRDO,MU,AVGO,TSLA,IREN",
+        "Elle gir": "",
+    }
+    _sec = st.radio("Tarama evreni", list(_EVRENLER.keys()), key="scan_evren")
+    scan_syms = st.text_area("Taranacak hisseler (virgülle)", value=_EVRENLER[_sec],
+                             height=110, key=f"scan_syms_{_sec}")
     c1, c2, c3 = st.columns([1, 1, 2])
     scan_go = c1.button("▶️ Taramayı Başlat", type="primary", key="scan_go")
     scan_clear = c2.button("🗑️ Sonuçları temizle", key="scan_clear")
     _n = len([s for s in scan_syms.split(",") if s.strip()])
-    c3.caption(f"{_n} hisse · tahmini süre ~{max(1, round(_n * 9 / 60))} dk "
-               "(API kotası nedeniyle hisse başına bekleme var)")
+    c3.caption(f"{_n} hisse · tahmini süre ~{max(1, round(_n * 9 / 60))} dk · "
+               f"API ~{_n} çağrı (günlük kota 800). Kotaya takılırsa durur, "
+               "kaldığı yerden devam edilir.")
 
     if scan_clear:
         st.session_state["scan_rows"] = []
 
     if scan_go and _n:
+        st.session_state["scan_kuyruk"] = list(dict.fromkeys(
+            [s.strip().upper() for s in scan_syms.split(",") if s.strip()]))
+        st.session_state["scan_ilerleme"] = 0
+
+    _sk = st.session_state.get("scan_kuyruk") or []
+    _si = int(st.session_state.get("scan_ilerleme", 0))
+    if _sk and _si < len(_sk):
         rows = st.session_state.get("scan_rows", [])
-        _mevcut = {r["Ticker"] for r in rows}
-        _liste = [s.strip().upper() for s in scan_syms.split(",") if s.strip()]
+        _liste = _sk[_si:]
         _bar = st.progress(0.0)
         _durum = st.empty()
         _ardisik_kota = 0
         for _k, _sym in enumerate(_liste):
             if _ardisik_kota >= 3:
+                st.session_state["scan_ilerleme"] = _si + _k
                 st.error(
                     f"⛔ API kotası doldu — tarama {_k}/{len(_liste)} hissede durduruldu. "
                     "Twelve Data ücretsiz planı günde 800 çağrı verir; bugünkü retro-test "
@@ -6198,10 +6272,16 @@ with tab_scan:
                      "Fiyat": "", "Pivot": "", "Pivota %": "", "Taban dibi": "",
                      "Risk %": "", "Setup": "", "RS": ""}]
             st.session_state["scan_rows"] = rows
-            _bar.progress((_k + 1) / len(_liste))
+            st.session_state["scan_ilerleme"] = _si + _k + 1
+            _bar.progress((_si + _k + 1) / len(_sk))
             if _k < len(_liste) - 1:
                 time.sleep(9.0)   # hisse başına 1 çağrı (haftalık günlükten türetiliyor)
         _durum.caption("Tarama tamam.")
+
+    if _sk and int(st.session_state.get("scan_ilerleme", 0)) < len(_sk):
+        _kalan = len(_sk) - int(st.session_state.get("scan_ilerleme", 0))
+        if st.button(f"▶️ Kaldığı yerden devam et ({_kalan} hisse kaldı)", key="scan_devam"):
+            st.rerun()
 
     _rows = st.session_state.get("scan_rows", [])
     if _rows:
