@@ -970,7 +970,11 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str, Any]:
+ENTRY_EARNINGS_BLOCK_DAYS = 5   # bilanço bu kadar gün içindeyse yeni giriş verilmez
+
+
+def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
+                      earnings_days: float = float("nan")) -> Dict[str, Any]:
     """Haftalık setup + günlük timing'i tek pakette döndürür.
     Kullanıcının iş akışı: haftalık giriş bandına alarm kur → alarm çalınca
     günlük ile teyit et. Bu özet iki adımı tek ekranda birleştirir."""
@@ -1133,6 +1137,14 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
                        f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
+        elif (mv_break and np.isfinite(earnings_days)
+              and 0 <= float(earnings_days) <= ENTRY_EARNINGS_BLOCK_DAYS):
+            # BİLANÇO FRENİ: kırılım oluştu ama gece gap'i stopu tanımaz → giriş ertelenir
+            gate = "BEKLEMEDE"
+            verdict = (f"Pivot kırıldı ancak bilanço {int(earnings_days)} gün içinde — "
+                       f"gece açılan gap stop korumasını geçersiz kılar, giriş ertelendi. "
+                       f"Bilanço sonrası yapı korunuyorsa yeniden değerlendirilir.{rs_note}")
+            verdict_kind = "warning"
         elif mv_break and np.isfinite(mv_stop) and np.isfinite(mv_pivot) and \
                 (float(ddf["close"].iloc[-1]) - mv_stop) > 0:
             # ===== V7.6 ANA TETİK: VCP PİVOT KIRILIMI =====
@@ -2862,8 +2874,18 @@ def build_pdf_bytes_single(
     # karar dilidir. Yerine yalnız referans seviyeler tablosu gelir.
     if _closed:
         story += _section_header("Referans Seviyeler", sty, page_w)
-        _ref_rows = [
-            ["Haftalık Bant — alarm buraya kurulur",
+        _ref_rows = []
+        # V7.6: Alarm PİVOTA kurulur — haftalık bant yalnız bilgi satırıdır.
+        _pv = mtf.get("mv_pivot", float("nan")) if mtf else float("nan")
+        _dp = mtf.get("mv_dip", float("nan")) if mtf else float("nan")
+        if np.isfinite(_pv):
+            _ref_rows.append(["Pivot — ALARM BURAYA KURULUR", f"{_pv:.2f}"])
+            if np.isfinite(_dp):
+                _ref_rows.append(["Taban dibi (stop olacak seviye)", f"{_dp:.2f}"])
+            if mtf.get("mv_dalga"):
+                _ref_rows.append(["VCP", f"{int(mtf['mv_dalga'])} daralma dalgası"])
+        _ref_rows += [
+            ["Haftalık Bant (bilgi — EMA20/50)",
              f"{mtf.get('w_entry_low', float('nan')):.2f} – {mtf.get('w_entry_high', float('nan')):.2f}"],
             ["52W Dip",           f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
             ["52W Zirve Uzaklık", f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
@@ -4071,9 +4093,13 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         else:
             with st.spinner("Haftalık + günlük analiz yapılıyor..."):
                 try:
-                    ddf_tmp = _fetch_daily_df(sw_ticker, 320)
+                    ddf_tmp = _fetch_daily_df(sw_ticker, 1000)
                     low_52w, high_52w = compute_52w_levels(ddf_tmp, 260)
-                    mtf = build_mtf_summary(sw_ticker, low_52w, high_52w)
+                    # Bilanço freni kapı kararını etkilediği için ÖNCE alınır
+                    _e_pre = next_earnings_info(sw_ticker) if use_earnings else {}
+                    _e_days = float(_e_pre.get("days")) if (_e_pre and _e_pre.get("days") is not None
+                                                            and not _e_pre.get("error")) else float("nan")
+                    mtf = build_mtf_summary(sw_ticker, low_52w, high_52w, earnings_days=_e_days)
                     if mtf.get("error"):
                         raise RuntimeError(mtf["error"])
                     try:
@@ -4081,7 +4107,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                         st.session_state["__mh"] = mh
                     except Exception:
                         mh = {}
-                    earn = next_earnings_info(sw_ticker) if use_earnings else {}
+                    earn = _e_pre
                     price = float(mtf["_ddf"].iloc[-1]["close"])
                     if use_quote:
                         try:
@@ -5160,7 +5186,10 @@ with tab_single:
                             mh = {}
 
                         # NEW (V6.3): MTF özet (haftalık setup + günlük timing)
-                        mtf = build_mtf_summary(ticker, low_52w, high_52w) if show_mtf else {}
+                        _ed = float(earn.get("days")) if (check_earnings and earn
+                                                          and earn.get("days") is not None
+                                                          and not earn.get("error")) else float("nan")
+                        mtf = build_mtf_summary(ticker, low_52w, high_52w, earnings_days=_ed) if show_mtf else {}
 
                         if show_quote:
                             try:
@@ -6237,7 +6266,13 @@ with tab_scan:
             try:
                 _ddf_tmp = _fetch_daily_df(_sym, 1000)   # aynı cache'i mtf ile paylaşır
                 _lo52, _hi52 = compute_52w_levels(_ddf_tmp, 260)
-                _m = build_mtf_summary(_sym, _lo52, _hi52)
+                try:
+                    _e = next_earnings_info(_sym)
+                    _ed = float(_e.get("days")) if (_e and _e.get("days") is not None
+                                                    and not _e.get("error")) else float("nan")
+                except Exception:
+                    _ed = float("nan")
+                _m = build_mtf_summary(_sym, _lo52, _hi52, earnings_days=_ed)
                 if _m and not _m.get("error"):
                     _px = float(_m.get("last_close", float("nan")))
                     _pv = float(_m.get("mv_pivot", float("nan")))
