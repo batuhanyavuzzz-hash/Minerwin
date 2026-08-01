@@ -4535,128 +4535,182 @@ def _retro_gate_mask(d: pd.DataFrame, w: pd.DataFrame) -> pd.Series:
 
 
 def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 4,
-                       risk_pct: float = 1.0, tp1_pay: float = 0.5,
-                       iz_suren: bool = True, komisyon_bp: float = 5.0,
-                       ayida_alma: bool = False, stop_carpan: float = 1.0,
-                       max_gun: int = 60) -> Dict[str, Any]:
-    """3 yıllık GERÇEK kullanım simülasyonu: sinyaller sırayla gelir, sermaye
-    riske göre bölünür, çıkışlar programın kendi kurallarıyla yapılır.
-    - Giriş: sinyal günü kapanışı (kayma yok, komisyon var)
-    - Adet:  (özkaynak × risk%) / (giriş − stop), pozisyon en fazla özkaynak/max_poz
-    - Çıkış: stop / TP1'de tp1_pay kadar sat + stop'u girişe çek / TP2 / iz süren
+                       komisyon_bp: float = 5.0, rotasyon_rs_farki: float = 10.0,
+                       tp1_guc_rsi: float = 55.0, tp1_guc_setup: float = 70.0,
+                       bozulma_setup: float = 40.0, iz_suren_pct: float = 8.0,
+                       iz_suren_esik_kar: float = 10.0, dist_yasak: float = 10.0,
+                       dist_temkinli: float = 6.0, temkinli_atr_max: float = 4.0,
+                       **_uyumluluk) -> Dict[str, Any]:
+    """GERÇEK TRADER SİMÜLASYONU (V7.6) — kullanıcı spesifikasyonu:
+      1. Her akşam kapanış sonrası tarama
+      2. Sermaye bileşik büyür
+      3. Sermayeyi eşit böler, en fazla 4 pozisyon
+      5. Giriş: sinyalin ERTESİ GÜN AÇILIŞINDA
+      6. Aynı gün birden çok sinyal → RS'i en yüksek olan
+      7. TP1'de: hisse güçlüyse (RSI≥55 ve setup≥70) tutar + stopu girişe çeker;
+         zayıfsa tamamını satar
+      8. Stop'a değerse çıkar; kâr %10'u geçince iz süren stop (%8) devreye girer
+      9. "Aday değil" tek başına satış sebebi DEĞİL — yalnız BÜYÜK BOZULMA
+         (setup<40 veya kapanış haftalık EMA50 altında) satış getirir
+     10. Rejim: dağıtım≥10 veya SPY EMA50 altı → alım yok;
+         dağıtım 6-9 → yalnız ATR%<4 olan sakin hisseler
+     11. Bilanço filtresi: geçmiş bilanço tarihleri retro veride yok — UYGULANMADI
+     12. Süre sınırı yok; çıkış = stop / TP1-zayıflık / iz süren / büyük bozulma /
+         ROTASYON (portföy doluyken RS'i en az 10 puan yüksek yeni sinyal gelirse,
+         kârdaki en zayıf pozisyon satılır)
     """
     if not sim_rows:
         return {}
-    ev = sorted(sim_rows, key=lambda r: r["tarih"])
-    nakit = float(sermaye)
-    acik = []          # dict: ticker, adet, giris, stop, tp1, tp2, gun, yol, tp1_alindi
-    kapanan = []
-    equity_seri = []
-    # KÜRESEL SAAT: sinyal günleri değil, tüm işlem günleri (yoksa pozisyonlar ilerlemez)
+    komisyon = komisyon_bp / 10000.0
+    ev = sorted(sim_rows, key=lambda r: (r["tarih"], -float(r.get("rs", 50))))
     _ilk = pd.to_datetime(ev[0]["tarih"])
-    _son = pd.to_datetime(ev[-1]["tarih"]) + pd.Timedelta(days=130)
+    _son = pd.to_datetime(ev[-1]["tarih"]) + pd.Timedelta(days=200)
     gunler = [str(x.date()) for x in pd.bdate_range(_ilk, _son)]
     _sig_gun = {}
     for r in ev:
         _sig_gun.setdefault(r["tarih"], []).append(r)
-    komisyon = komisyon_bp / 10000.0
 
-    def _pozisyon_degeri(p, gun_no):
-        k = gun_no - p["baslangic"] - 1
-        if 0 <= k < len(p["yol_c"]):
-            return p["adet"] * p["yol_c"][k]
-        return p["adet"] * p["son_fiyat"]
+    nakit = float(sermaye)
+    acik, kapanan, equity_seri = [], [], []
+
+    def _yol(p, k, ad, varsayilan=None):
+        dizi = p.get(ad)
+        if dizi and 0 <= k < len(dizi):
+            return dizi[k]
+        return varsayilan
+
+    def _deger(p, gnum):
+        k = gnum - p["baslangic"] - 1
+        v = _yol(p, k, "yol_c")
+        return p["adet"] * (v if v is not None else p["son_fiyat"])
+
+    def _kapat(p, fiyat, sebep, gun):
+        nonlocal nakit
+        nakit += p["adet"] * fiyat * (1 - komisyon)
+        p["cikis"] = fiyat; p["sebep"] = sebep; p["cikis_gun"] = gun
+        kapanan.append(p)
+        if p in acik:
+            acik.remove(p)
 
     for gnum, gun in enumerate(gunler):
-        # --- açık pozisyonları bir gün ilerlet ---
+        # ---------- 1) AÇIK POZİSYONLARI GÜNCELLE ----------
         for p in list(acik):
             k = gnum - p["baslangic"] - 1
-            if k >= max_gun and p in acik:      # süre doldu → kapat
-                nakit += p["adet"] * p["son_fiyat"] * (1 - komisyon)
-                p["cikis"] = p["son_fiyat"]; p["sebep"] = "süre"
-                kapanan.append(p); acik.remove(p); continue
-            if k < 0 or k >= len(p["yol_h"]):
-                if k >= len(p["yol_h"]):     # yol bitti → kapat
-                    nakit += p["adet"] * p["son_fiyat"] * (1 - komisyon)
-                    p["cikis"] = p["son_fiyat"]; p["sebep"] = "süre"
-                    kapanan.append(p); acik.remove(p)
+            if k < 0:
                 continue
-            hi, lo, cl = p["yol_h"][k], p["yol_l"][k], p["yol_c"][k]
+            hi, lo, cl = _yol(p, k, "yol_h"), _yol(p, k, "yol_l"), _yol(p, k, "yol_c")
+            if cl is None:                      # veri yolu bitti
+                _kapat(p, p["son_fiyat"], "veri sonu", gun); continue
             p["son_fiyat"] = cl
-            # 1) stop
-            if lo <= p["stop"]:
-                nakit += p["adet"] * p["stop"] * (1 - komisyon)
-                p["cikis"] = p["stop"]; p["sebep"] = "stop"
-                kapanan.append(p); acik.remove(p); continue
-            # 2) TP1 → kısmi sat, stop'u girişe çek
-            if (not p["tp1_alindi"]) and hi >= p["tp1"]:
-                sat = int(p["adet"] * tp1_pay)
-                if sat > 0:
-                    nakit += sat * p["tp1"] * (1 - komisyon)
-                    p["adet"] -= sat
-                    p["kismi"] = sat * (p["tp1"] - p["giris"])
-                p["tp1_alindi"] = True
-                p["stop"] = max(p["stop"], p["giris"])
-            # 3) TP2 → tamamen çık
-            if p["adet"] > 0 and hi >= p["tp2"]:
-                nakit += p["adet"] * p["tp2"] * (1 - komisyon)
-                p["cikis"] = p["tp2"]; p["sebep"] = "TP2"
-                kapanan.append(p); acik.remove(p); continue
-            # 4) iz süren stop (TP1 sonrası, %8 geri çekilme)
-            if iz_suren and p["tp1_alindi"]:
-                p["zirve"] = max(p.get("zirve", p["giris"]), hi)
-                p["stop"] = max(p["stop"], p["zirve"] * 0.92)
 
-        # --- yeni girişler ---
+            # (8) STOP — kesin çıkış
+            if lo is not None and lo <= p["stop"]:
+                _kapat(p, p["stop"], "stop", gun); continue
+
+            # (9) BÜYÜK BOZULMA — setup<40 veya kapanış haftalık EMA50 altında
+            _s = _yol(p, k, "yol_setup", 60.0)
+            _e50w = _yol(p, k, "yol_ema50w")
+            if (_s is not None and float(_s) < bozulma_setup) or \
+               (_e50w is not None and np.isfinite(_e50w) and cl < float(_e50w)):
+                _kapat(p, cl, "büyük bozulma", gun); continue
+
+            # (7) TP1'e ULAŞTI — güç testi
+            if (not p["tp1_alindi"]) and hi is not None and hi >= p["tp1"]:
+                p["tp1_alindi"] = True
+                _rsi = _yol(p, k, "yol_rsi", 50.0)
+                _guclu = (float(_rsi) >= tp1_guc_rsi) and (float(_s or 0) >= tp1_guc_setup)
+                if not _guclu:
+                    _kapat(p, p["tp1"], "TP1 — güç yok", gun); continue
+                p["stop"] = max(p["stop"], p["giris"])        # stopu girişe çek
+                p["zirve"] = max(p.get("zirve", p["giris"]), hi)
+
+            # (8b) İZ SÜREN — kâr %10'u geçtiyse zirveden %8 geri çekilmede çık
+            if hi is not None:
+                p["zirve"] = max(p.get("zirve", p["giris"]), hi)
+            if p["zirve"] >= p["giris"] * (1 + iz_suren_esik_kar / 100.0):
+                p["stop"] = max(p["stop"], p["zirve"] * (1 - iz_suren_pct / 100.0))
+
+        # ---------- 2) YENİ SİNYALLER ----------
         for r in _sig_gun.get(gun, []):
-            if len(acik) >= max_poz:
-                break
+            # (10) REJİM FİLTRESİ
+            _dist = float(r.get("dist_days", 0) or 0)
+            if bool(r.get("spy_alti")) or _dist >= dist_yasak:
+                continue
+            if _dist >= dist_temkinli and float(r.get("atr_pct", 3.0)) >= temkinli_atr_max:
+                continue
             if any(p["ticker"] == r["ticker"] for p in acik):
                 continue
-            if ayida_alma and r.get("rejim") == "AYI":
-                continue
-            giris, stop = r["giris"], r["stop"]
+
+            # (5) GİRİŞ: ertesi gün açılışı
+            giris = float(r.get("acilis_ertesi") or r["giris"])
+            stop, tp1, tp2 = float(r["stop"]), float(r["tp1"]), float(r["tp2"])
             if not (giris > stop > 0):
                 continue
-            # Stop genişliği ayarı: mesafe × çarpan (risk boyutlandırması da buna göre)
-            stop = giris - (giris - stop) * float(stop_carpan)
-            if stop <= 0:
+            _yeni_rs = float(r.get("rs", 50))
+
+            # (12) ROTASYON — portföy doluysa
+            if len(acik) >= max_poz:
+                _adaylar = [p for p in acik
+                            if p["son_fiyat"] > p["giris"]
+                            and _yeni_rs - float(p.get("rs", 50)) >= rotasyon_rs_farki]
+                if not _adaylar:
+                    continue
+                _cikar = min(_adaylar, key=lambda p: float(p.get("rs", 50)))
+                _kapat(_cikar, _cikar["son_fiyat"], "rotasyon", gun)
+
+            # (2,3) SERMAYEYİ EŞİT BÖL
+            ozkaynak = nakit + sum(_deger(p, gnum) for p in acik)
+            boyut = min(nakit, ozkaynak / max_poz)
+            adet = int(boyut / (giris * (1 + komisyon)))   # komisyon dahil sığmalı
+            if adet <= 0 or adet * giris * (1 + komisyon) > nakit:
                 continue
-            ozkaynak = nakit + sum(_pozisyon_degeri(p, gnum) for p in acik)
-            risk_tutar = ozkaynak * (risk_pct / 100.0)
-            adet = int(min(risk_tutar / (giris - stop), (ozkaynak / max_poz) / giris))
-            maliyet = adet * giris * (1 + komisyon)
-            if adet <= 0 or maliyet > nakit:
-                continue
-            nakit -= maliyet
-            acik.append({"ticker": r["ticker"], "adet": adet, "giris": giris, "stop": stop,
-                         "tp1": r["tp1"], "tp2": r["tp2"], "baslangic": gnum,
-                         "yol_h": r["yol_h"], "yol_l": r["yol_l"], "yol_c": r["yol_c"],
-                         "son_fiyat": giris, "tp1_alindi": False, "kismi": 0.0,
-                         "giris_tarih": gun})
+            nakit -= adet * giris * (1 + komisyon)
+            acik.append({
+                "ticker": r["ticker"], "adet": adet, "giris": giris, "stop": stop,
+                "tp1": tp1, "tp2": tp2, "baslangic": gnum, "rs": _yeni_rs,
+                "yol_h": r.get("yol_h"), "yol_l": r.get("yol_l"), "yol_c": r.get("yol_c"),
+                "yol_setup": r.get("yol_setup"), "yol_rsi": r.get("yol_rsi"),
+                "yol_ema50w": r.get("yol_ema50w"),
+                "son_fiyat": giris, "tp1_alindi": False, "kismi": 0.0,
+                "zirve": giris, "giris_tarih": gun,
+            })
+
         equity_seri.append({"gun": gun,
-                            "ozkaynak": nakit + sum(_pozisyon_degeri(p, gnum) for p in acik),
+                            "ozkaynak": nakit + sum(_deger(p, gnum) for p in acik),
                             "poz": len(acik)})
 
     for p in list(acik):
-        nakit += p["adet"] * p["son_fiyat"] * (1 - komisyon)
-        p["cikis"] = p["son_fiyat"]; p["sebep"] = "açık"
-        kapanan.append(p)
+        _kapat(p, p["son_fiyat"], "açık", gunler[-1])
 
     eq = pd.DataFrame(equity_seri)
-    son = float(eq["ozkaynak"].iloc[-1]) if len(eq) else sermaye
-    getiriler = []
+    son = float(eq["ozkaynak"].iloc[-1]) if len(eq) else float(sermaye)
+    defter = []
     for p in kapanan:
-        pnl = p["adet"] * (p["cikis"] - p["giris"]) + p.get("kismi", 0.0)
-        maliyet = (p["adet"] + (p.get("kismi", 0) and 0)) * p["giris"]
-        getiriler.append(pnl)
-    dd = float(((eq["ozkaynak"] / eq["ozkaynak"].cummax()) - 1).min() * 100) if len(eq) else 0.0
+        _pnl = p["adet"] * (p["cikis"] - p["giris"])
+        defter.append({
+            "Hisse": p["ticker"], "Giriş tarihi": p.get("giris_tarih", ""),
+            "Giriş": round(p["giris"], 2), "Stop": round(p["stop"], 2),
+            "TP1": round(p.get("tp1", float("nan")), 2),
+            "RS": round(float(p.get("rs", np.nan)), 0),
+            "Çıkış tarihi": p.get("cikis_gun", ""), "Çıkış": round(p.get("cikis", float("nan")), 2),
+            "Sebep": p.get("sebep", ""), "Adet": int(p["adet"]),
+            "K/Z $": round(_pnl, 2),
+            "K/Z %": round((p.get("cikis", np.nan) / p["giris"] - 1) * 100, 2),
+            "Gün": (pd.to_datetime(p.get("cikis_gun")) - pd.to_datetime(p.get("giris_tarih"))).days
+                   if p.get("cikis_gun") and p.get("giris_tarih") else np.nan,
+        })
+    getiriler = [x["K/Z $"] for x in defter]
     kaz = [g for g in getiriler if g > 0]
+    dd = float(((eq["ozkaynak"] / eq["ozkaynak"].cummax()) - 1).min() * 100) if len(eq) else 0.0
+    _yil = max(1e-9, len(eq) / 252.0)
     return {
-        "son": son, "getiri_pct": (son / sermaye - 1) * 100,
+        "defter": defter, "son": son, "getiri_pct": (son / sermaye - 1) * 100,
+        "cagr": ((son / sermaye) ** (1 / _yil) - 1) * 100 if son > 0 else float("nan"),
         "islem": len(kapanan), "isabet": (100 * len(kaz) / len(kapanan)) if kapanan else 0,
         "drawdown": dd, "equity": eq,
         "ort_poz": float(eq["poz"].mean()) if len(eq) else 0,
+        "profit_factor": (sum(kaz) / abs(sum(g for g in getiriler if g <= 0)))
+                         if any(g <= 0 for g in getiriler) else float("inf"),
         "sebepler": pd.Series([p["sebep"] for p in kapanan]).value_counts().to_dict(),
         "kapanan": kapanan,
     }
@@ -4772,6 +4826,30 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             v7 = (bp["sinyal"].values & (setup_arr >= 60) & (rs_ser.values >= 45))
             sigs["v7 · TABAN + PİVOT KIRILIMI"] = pd.Series(v7, index=d.index)
 
+            # Trader spesifikasyonu serileri (bir kez hesaplanır)
+            _tr_s = pd.concat([d["high"] - d["low"],
+                               (d["high"] - d["close"].shift(1)).abs(),
+                               (d["low"] - d["close"].shift(1)).abs()], axis=1).max(axis=1)
+            _atr_pct_ser = (_tr_s.rolling(14).mean() / d["close"]) * 100.0
+            # Dağıtım günü (SPY): düşüş + artan hacim, 25 günlük pencere
+            try:
+                _spy_d = spy.set_index(pd.to_datetime(spy["time"]))
+                _dist = ((_spy_d["close"] < _spy_d["close"].shift(1)) &
+                         (_spy_d["volume"] > _spy_d["volume"].shift(1))).rolling(25).sum()
+                _dist_ser = pd.Series(_dist.reindex(dt, method="ffill").values, index=d.index)
+                _spy_alti = pd.Series(
+                    (_spy_d["close"] < _spy_d["ema50"]).reindex(dt, method="ffill").fillna(False).values,
+                    index=d.index)
+            except Exception:
+                _dist_ser = pd.Series(0.0, index=d.index)
+                _spy_alti = pd.Series(False, index=d.index)
+            # Haftalık EMA50 (büyük bozulma kontrolü için günlük tarihlere eşlenir)
+            try:
+                _e50w = pd.Series(w["ema50"].values, index=pd.to_datetime(w["time"]))
+                _ema50w_al = pd.Series(_e50w.reindex(dt, method="ffill").values, index=d.index).ffill()
+            except Exception:
+                _ema50w_al = pd.Series(np.nan, index=d.index)
+
             # ---- PORTFÖY SİMÜLASYONU İÇİN: giriş planı + ileri fiyat yolu ----
             # Gerçek kullanıcı simülasyonu (stop/TP/iz süren) ancak fiyat yoluyla
             # yapılabilir; özet metrikler (MFE/MAE) yetmez.
@@ -4816,6 +4894,21 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                             "giris": giris,
                             "stop": stop, "tp1": tp1, "tp2": tp2,
                             "rejim": str(reg_al.iloc[i]),
+                            # Gerçek trader gibi: her gün programın hükmünü de izler.
+                            # yol_setup = o günkü haftalık setup skoru (yapı bozulursa çıkar)
+                            # Trader spesifikasyonu için gereken ek veriler
+                            "rs": float(rs_ser.iloc[i]) if np.isfinite(rs_ser.iloc[i]) else 50.0,
+                            "atr_pct": float(_atr_pct_ser.iloc[i]) if np.isfinite(_atr_pct_ser.iloc[i]) else 3.0,
+                            "dist_days": float(_dist_ser.iloc[i]) if np.isfinite(_dist_ser.iloc[i]) else 0.0,
+                            "spy_alti": bool(_spy_alti.iloc[i]),
+                            "acilis_ertesi": (float(d["open"].iloc[i + 1])
+                                              if i + 1 < len(d) else float(d["close"].iloc[i])),
+                            "yol_setup": [float(x) if np.isfinite(x) else 60.0
+                                          for x in setup_arr[i + 1:j2]],
+                            "yol_rejim": [str(x) for x in reg_al.iloc[i + 1:j2]],
+                            "yol_rsi": [float(x) if np.isfinite(x) else 50.0
+                                        for x in d["rsi14"].iloc[i + 1:j2]],
+                            "yol_ema50w": [float(x) for x in _ema50w_al.iloc[i + 1:j2]],
                             "yol_h": [float(x) for x in d["high"].iloc[i + 1:j2]],
                             "yol_l": [float(x) for x in d["low"].iloc[i + 1:j2]],
                             "yol_c": [float(x) for x in d["close"].iloc[i + 1:j2]],
@@ -5929,32 +6022,41 @@ with tab_retro:
                                       horizontal=True, key="sim_kural")
                 _sim = [r for r in _sim if r.get("kural", "v6 · mevcut giriş") == _kural_sec]
                 st.caption(f"{len(_sim)} sinyal · v7'de stop TABAN DİBİ (yapısal), hedefler 2R/4R")
-                cA, cB, cC, cD = st.columns(4)
+                cA, cB = st.columns(2)
                 _cap = cA.number_input("Sermaye ($)", 1000, 1000000, 10000, 1000, key="sim_cap")
-                _mp = cB.number_input("Maks. pozisyon", 1, 10, 4, 1, key="sim_mp")
-                _rp = cC.number_input("İşlem başı risk %", 0.25, 5.0, 1.0, 0.25, key="sim_rp")
-                _tp1p = cD.number_input("TP1'de satılan %", 0, 100, 50, 10, key="sim_tp1") / 100.0
-                c1, c2, c3, c4 = st.columns(4)
-                _iz = c1.checkbox("İz süren stop", True, key="sim_iz")
-                _ayi = c2.checkbox("Ayıda alma", False, key="sim_ayi")
-                _sc = c3.number_input("Stop genişliği ×", 0.5, 3.0, 1.0, 0.25, key="sim_sc",
-                                      help="1.0 = programın hesapladığı stop. 1.5 = %50 daha geniş "
-                                           "(gürültüde stop yeme azalır, tek kayıp büyür).")
-                _mg = c4.number_input("Maks. tutma (gün)", 10, 60, 60, 5, key="sim_mg")
+                _mp = cB.number_input("Maks. pozisyon", 1, 8, 4, 1, key="sim_mp")
+                st.caption(
+                    "Trader kuralları (spesifikasyon): sermaye eşit bölünür ve bileşik büyür · "
+                    "giriş ertesi gün açılışında · aynı gün birden çok sinyalde RS'i yüksek olan · "
+                    "TP1'de güç varsa taşır, yoksa satar · kâr %10'u geçince iz süren stop (%8) · "
+                    "yalnız büyük bozulmada erken çıkış (setup<40 ya da haftalık EMA50 altı) · "
+                    "dağıtım≥10 veya SPY EMA50 altında alım yok, dağıtım 6-9'da yalnız ATR%<4 · "
+                    "portföy doluyken RS'i 10 puan yüksek sinyal gelirse rotasyon. "
+                    "Bilanço filtresi retro veride uygulanamıyor."
+                )
+                _sr = simulate_portfolio(_sim, sermaye=float(_cap), max_poz=int(_mp))
 
-                _sr = simulate_portfolio(_sim, sermaye=float(_cap), max_poz=int(_mp),
-                                         risk_pct=float(_rp), tp1_pay=float(_tp1p),
-                                         iz_suren=bool(_iz), ayida_alma=bool(_ayi),
-                                         stop_carpan=float(_sc), max_gun=int(_mg))
                 if _sr:
-                    m1, m2, m3, m4 = st.columns(4)
+                    m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("Son sermaye", f"{_sr['son']:,.0f} $", f"%{_sr['getiri_pct']:.1f}")
-                    m2.metric("İşlem", f"{_sr['islem']}", f"isabet %{_sr['isabet']:.0f}")
-                    m3.metric("En büyük düşüş", f"%{_sr['drawdown']:.1f}")
-                    m4.metric("Ort. açık pozisyon", f"{_sr['ort_poz']:.1f} / {int(_mp)}")
+                    m2.metric("Yıllık (CAGR)", f"%{_sr.get('cagr', float('nan')):.1f}")
+                    m3.metric("İşlem", f"{_sr['islem']}", f"isabet %{_sr['isabet']:.0f}")
+                    m4.metric("En büyük düşüş", f"%{_sr['drawdown']:.1f}")
+                    _pf = _sr.get("profit_factor", float("nan"))
+                    m5.metric("Profit factor", f"{_pf:.2f}" if np.isfinite(_pf) else "∞")
                     _eq = _sr["equity"].copy()
                     _eq["gun"] = pd.to_datetime(_eq["gun"])
                     st.line_chart(_eq.set_index("gun")["ozkaynak"], height=220)
+                    if _sr.get("defter"):
+                        _dft = pd.DataFrame(_sr["defter"])
+                        with st.expander(f"📒 İşlem defteri — {len(_dft)} işlem (tek tek incele)"):
+                            st.dataframe(_dft, use_container_width=True, hide_index=True)
+                        st.download_button(
+                            "📥 İşlem defterini indir (CSV)",
+                            data=_dft.to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"minerwin_islem_defteri.csv",
+                            mime="text/csv", key="sim_defter_dl",
+                        )
                     st.caption(f"Çıkış sebepleri: {_sr['sebepler']} · "
                                "Komisyon %0.05 dahil; kayma ve bilanço gap'i modellenmedi. "
                                "Sinyaller yalnız denek evrenindeki hisselerden gelir — "
