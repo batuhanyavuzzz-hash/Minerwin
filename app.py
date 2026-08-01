@@ -985,15 +985,24 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         # v3 (hacim şartlı) kapıyla geometrik olarak çelişiyor → reddedildi (12 sinyal).
         # Teyit (v2): kapanış üst üste 2 gün günlük EMA20 üstünde + RSI yükseliyor
         daily_green = False
+        teyit_eksik = ""      # teyit yoksa HANGİ şart tutmadı
         try:
             _c = ddf["close"].astype(float)
             _e20 = ddf["ema20"].astype(float)
             _r14 = ddf["rsi14"].astype(float)
-            daily_green = bool(
-                float(_c.iloc[-1]) > float(_e20.iloc[-1])
-                and float(_c.iloc[-2]) > float(_e20.iloc[-2])
-                and float(_r14.iloc[-1]) > float(_r14.iloc[-4])
-            )
+            _bugun_ok = float(_c.iloc[-1]) > float(_e20.iloc[-1])
+            _dun_ok = float(_c.iloc[-2]) > float(_e20.iloc[-2])
+            _rsi_ok = float(_r14.iloc[-1]) > float(_r14.iloc[-4])
+            daily_green = bool(_bugun_ok and _dun_ok and _rsi_ok)
+            if not daily_green:
+                _eksikler = []
+                if not _bugun_ok:
+                    _eksikler.append(f"kapanış günlük EMA20'nin ({float(_e20.iloc[-1]):.2f}) altında")
+                elif not _dun_ok:
+                    _eksikler.append("EMA20 üstünde henüz 1 gün (2 gün gerekiyor)")
+                if not _rsi_ok:
+                    _eksikler.append("RSI yönü aşağı (3 güne göre düşüyor)")
+                teyit_eksik = " ve ".join(_eksikler)
         except Exception:
             daily_green = d_plan.status_tag.startswith("🟢")
 
@@ -1099,9 +1108,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             _armed_txt = ""
             if armed_recent:
                 _kalan = max(0, ARMED_DAYS - int(armed_days_ago or 0))
+                _eksik_txt = f" Bekleyen şart: {teyit_eksik}." if teyit_eksik else ""
                 _armed_txt = (f" Kurulum hazır: fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
-                              f"indi. Günlük teyit gelirse giriş koşulu oluşur — bu hak {_kalan} gün "
-                              f"daha geçerli.")
+                              f"indi; giriş hakkı {_kalan} gün daha geçerli.{_eksik_txt}")
             _chase_txt = ""
             if _chase.get("sebep"):
                 _chase_txt = f" Teyit oluştu ancak giriş uzak: {_chase['sebep']}."
@@ -1150,6 +1159,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "mv_break": mv_break, "mv_base": mv_base,
             "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
             "band_tol_pct": _band_tol,
+            "teyit_eksik": teyit_eksik,
             "chase_ok": _chase.get("ok", True),
             "chase_sebep": _chase.get("sebep", ""),
             "entry_risk_pct": _chase.get("risk_pct", float("nan")),
