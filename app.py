@@ -1905,6 +1905,18 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     )
     high_vol_warning = bool(stop_dbg.get("high_vol_warning", False))
 
+    # KALİBRASYON (V7.4): stop mesafesi × STOP_TIGHTEN.
+    # 125 hisse / 3 yıl portföy simülasyonu: aynı girişlerle
+    #   ×1.00 (eski) → 10.650 $   |   ×0.75 (kalibre) → 14.674 $
+    # Daha yakın stop = kaybeden pozisyon erken kesiliyor, risk başına
+    # daha büyük pozisyon açılabiliyor; kazananlar iz süren stopla taşınıyor.
+    try:
+        if STOP_TIGHTEN != 1.0 and entry_mid > stop > 0:
+            stop = entry_mid - (entry_mid - stop) * STOP_TIGHTEN
+            stop_dbg["stop_tighten"] = STOP_TIGHTEN
+    except Exception:
+        pass
+
     capacity = _trend_capacity_level(
         setup_score, ema50, ema150, ema200, ema200_slope, rsi14, close
     )
