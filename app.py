@@ -271,6 +271,7 @@ if isinstance(GITHUB_TOKEN, str):
 # NEW (V7.2): Kural seti sürümü — history kayıtlarına yazılır. Filtre
 # eşiklerinden biri (RS, setup, uzamış %8, dağıtım ≥6...) değiştirildiğinde
 # BU SAYI ELLE ARTIRILIR ki karne "hangi kural dönemine ait karar" bilsin.
+MAX_BASE_RISK = 0.12   # taban dibi girişten en fazla %12 uzakta (VCP darlığı)
 ARMED_DAYS = 14          # kapı açıldıktan sonra setup kaç gün "kurulu" kalır
 BAND_TOLERANCE = 1.08    # teyit günü fiyat bant üstünün en fazla %8 üzerinde olabilir
 RULE_VER = "v3"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
@@ -561,6 +562,25 @@ def _fetch_daily_df(symbol: str, outputsize: int = 320) -> pd.DataFrame:
     return parse_ohlcv(payload)
 
 
+def _weekly_from_daily(ddf: pd.DataFrame) -> pd.DataFrame:
+    """Haftalık mumları GÜNLÜK veriden türetir (API çağrısı yok).
+    Twelve Data ücretsiz planı 8 çağrı/dk; hisse başına ayrı haftalık çekmek
+    tarama hızını yarıya düşürüyordu. Haftalık = W-FRI toplaması.
+    Son hafta TAMAMLANMAMIŞ olabilir — çağıran taraf gerektiğinde atar."""
+    d = ddf.copy()
+    d["_t"] = pd.to_datetime(d["time"])
+    d = d.set_index("_t").sort_index()
+    w = pd.DataFrame({
+        "open": d["open"].resample("W-FRI").first(),
+        "high": d["high"].resample("W-FRI").max(),
+        "low": d["low"].resample("W-FRI").min(),
+        "close": d["close"].resample("W-FRI").last(),
+        "volume": d["volume"].resample("W-FRI").sum(),
+    }).dropna()
+    w = w.reset_index().rename(columns={"_t": "time"})
+    return w
+
+
 @st.cache_data(ttl=600, max_entries=32)
 def _fetch_weekly_df(symbol: str, outputsize: int = 60) -> pd.DataFrame:
     """Weekly veri çeker — weekly trend kontrolü için kullanılır."""
@@ -832,10 +852,13 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
     günlük ile teyit et. Bu özet iki adımı tek ekranda birleştirir."""
     out = {"error": ""}
     try:
-        wdf = _add_indicators(_fetch_weekly_df(symbol, 260))
+        # TEK ÇAĞRI: geniş günlük veri hem günlük hem haftalık için kullanılır.
+        # (Haftalık EMA150/200 için ~1000 günlük bar gerekir → 200 haftalık bar.)
+        _wide = _fetch_daily_df(symbol, 1000)
+        wdf = _add_indicators(_weekly_from_daily(_wide))
         w_plan = build_trade_plan(wdf, low_52w=low_52w, high_52w=high_52w)
 
-        ddf = _add_indicators(_fetch_daily_df(symbol, 320))
+        ddf = _add_indicators(_wide.tail(320).reset_index(drop=True))
         d_plan = build_trade_plan(ddf, low_52w=low_52w, high_52w=high_52w)
 
         # NEW (V7.0): RS Rating hesaplanır ve KARARA BAĞLANIR.
@@ -930,7 +953,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             mv_dip = float(_bp["dip"].iloc[-1])
             _px = float(ddf["close"].iloc[-1])
             _der = (mv_pivot - mv_dip) / mv_pivot if mv_pivot > 0 else float("nan")
-            mv_base = bool(np.isfinite(_der) and 0.05 <= _der <= 0.35
+            # Taban darlığı şartı: dip girişten %MAX_BASE_RISK'ten uzaksa geçersiz
+            _risk_ok = bool(np.isfinite(mv_dip) and _px > 0 and (_px - mv_dip * 0.99) / _px <= MAX_BASE_RISK)
+            mv_base = bool(np.isfinite(_der) and 0.05 <= _der <= 0.35 and _risk_ok
                            and bool(_bp["daralma"].iloc[-1]) and bool(_bp["vol_kuru"].iloc[-1]))
             if np.isfinite(mv_pivot) and mv_pivot > 0:
                 mv_dist = (mv_pivot / _px - 1.0) * 100.0
@@ -965,7 +990,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
                        f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
-        elif mv_break and np.isfinite(mv_stop) and (float(ddf["close"].iloc[-1]) - mv_stop) > 0:
+        elif (mv_break and np.isfinite(mv_stop)
+              and (float(ddf["close"].iloc[-1]) - mv_stop) > 0
+              and (float(ddf["close"].iloc[-1]) - mv_stop) / float(ddf["close"].iloc[-1]) <= MAX_BASE_RISK):
             # PİVOT KIRILIMI — Minervini girişi. Stop yapısal (taban dibi).
             gate = "ACIK"
             _px = float(ddf["close"].iloc[-1])
@@ -992,6 +1019,11 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
                     _neden = f"taban çok derin (%{_d:.0f}) — sağlıklı konsolidasyon değil"
                 elif _d < 5:
                     _neden = f"taban çok sığ (%{_d:.0f}) — henüz yapı oluşmadı"
+                elif np.isfinite(mv_stop) and float(ddf["close"].iloc[-1]) > 0 and \
+                        (float(ddf["close"].iloc[-1]) - mv_stop) / float(ddf["close"].iloc[-1]) > MAX_BASE_RISK:
+                    _rr = (float(ddf["close"].iloc[-1]) - mv_stop) / float(ddf["close"].iloc[-1]) * 100
+                    _neden = (f"taban geniş — stop %{_rr:.0f} uzakta (üst sınır "
+                              f"%{MAX_BASE_RISK*100:.0f}); dar konsolidasyon değil")
             verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100) ancak "
                        f"giriş kurulumu yok: {_neden}. Haftalık bant: {_wlo:.2f} – {_whi:.2f}."
                        f"{rs_note}")
@@ -5633,7 +5665,7 @@ with tab_scan:
     scan_go = c1.button("▶️ Taramayı Başlat", type="primary", key="scan_go")
     scan_clear = c2.button("🗑️ Sonuçları temizle", key="scan_clear")
     _n = len([s for s in scan_syms.split(",") if s.strip()])
-    c3.caption(f"{_n} hisse · tahmini süre ~{max(1, round(_n * 8 / 60))} dk "
+    c3.caption(f"{_n} hisse · tahmini süre ~{max(1, round(_n * 9 / 60))} dk "
                "(API kotası nedeniyle hisse başına bekleme var)")
 
     if scan_clear:
@@ -5648,7 +5680,7 @@ with tab_scan:
         for _k, _sym in enumerate(_liste):
             _durum.caption(f"Taranıyor: {_sym} ({_k + 1}/{len(_liste)})")
             try:
-                _ddf_tmp = _fetch_daily_df(_sym, 320)
+                _ddf_tmp = _fetch_daily_df(_sym, 1000)   # aynı cache'i mtf ile paylaşır
                 _lo52, _hi52 = compute_52w_levels(_ddf_tmp, 260)
                 _m = build_mtf_summary(_sym, _lo52, _hi52)
                 if _m and not _m.get("error"):
@@ -5681,7 +5713,7 @@ with tab_scan:
             st.session_state["scan_rows"] = rows
             _bar.progress((_k + 1) / len(_liste))
             if _k < len(_liste) - 1:
-                time.sleep(8.0)
+                time.sleep(9.0)   # hisse başına 1 çağrı (haftalık günlükten türetiliyor)
         _durum.caption("Tarama tamam.")
 
     _rows = st.session_state.get("scan_rows", [])
