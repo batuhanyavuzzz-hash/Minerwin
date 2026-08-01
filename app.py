@@ -312,6 +312,23 @@ def _daily_chase_check(ddf: pd.DataFrame, d_plan) -> Dict[str, Any]:
     return out
 
 
+def rs_sirali_puan(ham_guc: Dict[str, float]) -> Dict[str, int]:
+    """Taranan EVREN İÇİNDE yüzdelik RS sırası (IBD mantığı).
+
+    Mevcut rs_rating hissenin yalnızca SPY'a göre farkını ölçer ve kelepçe
+    yüzünden 20-80 arasında sıkışır — "piyasanın en iyi %20'si" anlamı taşımaz.
+    Bu fonksiyon taramada biriken ham güç değerlerini sıralayıp 1-99 arası
+    yüzdelik verir: 99 = evrenin en güçlüsü. Minervini'nin eşikleri (80+)
+    ancak bu cetvelde anlamlıdır. KARAR ETKİLEMEZ — bilgi katmanıdır.
+    """
+    gecerli = {k: float(v) for k, v in ham_guc.items()
+               if v is not None and np.isfinite(float(v))}
+    if len(gecerli) < 5:
+        return {}
+    s = pd.Series(gecerli).rank(pct=True) * 98 + 1
+    return {k: int(round(v)) for k, v in s.items()}
+
+
 def _gun_ifadesi(n) -> str:
     """0 → 'bugün', 1 → 'dün', 2+ → 'N gün önce'. Rapor dilinde sayı değil, insan dili."""
     try:
@@ -3002,6 +3019,9 @@ def build_pdf_bytes_single(
             )) or "—"])
         mtf_rows += [
             ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
+            ["RS Sırası (taranan evrende)",
+             (f"{mtf['rs_sira']} / 99 — {mtf.get('rs_sira_n', 0)} hisse arasında"
+              if mtf.get("rs_sira") else "— (henüz toplu tarama yapılmadı)")],
             ["RS Ham Güç (SPY farkı, gölge ölçüm)",
              f"{mtf.get('rs_edge_w', float('nan')):+.1f} — bilgi; kararlara etki etmez"
              if np.isfinite(mtf.get("rs_edge_w", float("nan"))) else "—"],
@@ -4109,6 +4129,11 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
                     _e_days = float(_e_pre.get("days")) if (_e_pre and _e_pre.get("days") is not None
                                                             and not _e_pre.get("error")) else float("nan")
                     mtf = build_mtf_summary(sw_ticker, low_52w, high_52w, earnings_days=_e_days)
+                    # Son toplu taramadan evren içi RS sırası (bilgi)
+                    _rsira = st.session_state.get("rs_sira", {})
+                    if _rsira.get(sw_ticker.upper()):
+                        mtf["rs_sira"] = int(_rsira[sw_ticker.upper()])
+                        mtf["rs_sira_n"] = int(st.session_state.get("rs_sira_n", 0))
                     if mtf.get("error"):
                         raise RuntimeError(mtf["error"])
                     try:
@@ -6317,6 +6342,8 @@ with tab_scan:
                         "Taban dibi": round(_dp, 2) if np.isfinite(_dp) else "",
                         "Risk %": (round((_px - float(_m.get("mv_stop", np.nan))) / _px * 100, 1)
                                    if np.isfinite(_m.get("mv_stop", np.nan)) and _px > 0 else ""),
+                        "_ham_guc": (float(_m.get("rs_edge_w", np.nan))
+                                     if np.isfinite(_m.get("rs_edge_w", np.nan)) else np.nan),
                         "Dalga": _m.get("mv_dalga", "") or "",
                         "Son daralma %": (round(float(_m.get("mv_son_daralma", np.nan)), 1)
                                           if np.isfinite(_m.get("mv_son_daralma", np.nan)) else ""),
@@ -6348,6 +6375,15 @@ with tab_scan:
     _rows = st.session_state.get("scan_rows", [])
     if _rows:
         _df = pd.DataFrame(_rows)
+        # EVREN İÇİ RS SIRASI (1-99) — taranan hisseler arasında yüzdelik
+        if "_ham_guc" in _df.columns:
+            _hg = {r["Ticker"]: r.get("_ham_guc") for r in _rows}
+            _sira = rs_sirali_puan(_hg)
+            if _sira:
+                _df["RS sırası"] = _df["Ticker"].map(_sira)
+                st.session_state["rs_sira"] = _sira
+                st.session_state["rs_sira_n"] = len(_sira)
+            _df = _df.drop(columns=["_ham_guc"])
         _sira = {"🟢 PİVOT KIRILDI": 0, "🟡 TABAN KURULU": 1, "⚪ kurulum yok": 2, "HATA": 3}
         _df["_s"] = _df["Durum"].map(_sira).fillna(9)
         _df["_u"] = pd.to_numeric(_df["Pivota %"], errors="coerce").abs()
