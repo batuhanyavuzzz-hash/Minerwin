@@ -5886,21 +5886,69 @@ with tab_retro:
         "tekrar denenir. Sonuç 1 saat cache'lenir; butona tekrar basmak yeniden çalıştırır."
     )
 
+    # OTOMATİK BLOKLAMA: uzun liste 30'arlı parçalara bölünür, aralarında
+    # beklenir; kotaya takılınca durur ve kaldığı yeri hatırlar.
+    RETRO_BLOK = 30
     if run_rt:
-        _tick = tuple(sorted({s.strip().upper() for s in rt_syms.split(",") if s.strip()}))
-        st.session_state["__rt_nonce"] = int(st.session_state.get("__rt_nonce", 0)) + 1
-        with st.spinner(f"{len(_tick)} hisse geçmişe karşı sınanıyor… (~{max(1, round(len(_tick)*RETRO_PACE_SEC/60))} dk, sekmeyi kapatma)"):
-            _yeni = run_retro_test(_tick, int(rt_fwd), nonce=int(st.session_state["__rt_nonce"]))
+        _hepsi = [s.strip().upper() for s in rt_syms.split(",") if s.strip()]
+        _hepsi = list(dict.fromkeys(_hepsi))
+        st.session_state["__rt_kuyruk"] = _hepsi
+        st.session_state["__rt_ilerleme"] = 0
+        st.session_state["__rt_res"] = None if not rt_birik else st.session_state.get("__rt_res")
+
+    _kuyruk = st.session_state.get("__rt_kuyruk") or []
+    _ilerleme = int(st.session_state.get("__rt_ilerleme", 0))
+
+    if _kuyruk and _ilerleme < len(_kuyruk):
+        _kalan_sayi = len(_kuyruk) - _ilerleme
+        _bar_all = st.progress(_ilerleme / max(1, len(_kuyruk)))
+        _durum_all = st.empty()
+        _durdu = False
+        while _ilerleme < len(_kuyruk) and not _durdu:
+            _blok = _kuyruk[_ilerleme:_ilerleme + RETRO_BLOK]
+            _no = _ilerleme // RETRO_BLOK + 1
+            _toplam_blok = (len(_kuyruk) + RETRO_BLOK - 1) // RETRO_BLOK
+            _durum_all.caption(
+                f"Blok {_no}/{_toplam_blok} — {len(_blok)} hisse "
+                f"({_ilerleme}/{len(_kuyruk)} tamamlandı) · ~{max(1, round(len(_blok)*RETRO_PACE_SEC/60))} dk"
+            )
+            st.session_state["__rt_nonce"] = int(st.session_state.get("__rt_nonce", 0)) + 1
+            _yeni = run_retro_test(tuple(sorted(_blok)), int(rt_fwd),
+                                   nonce=int(st.session_state["__rt_nonce"]))
             _onceki = st.session_state.get("__rt_res")
-            if rt_birik and _onceki and _onceki.get("rows"):
+            if _onceki and _onceki.get("rows"):
                 _eski_t = {(r["def"], r["ticker"], r["tarih"]) for r in _onceki["rows"]}
-                _birlesik = list(_onceki["rows"]) + [
+                _yeni = dict(_yeni)
+                _yeni["rows"] = list(_onceki["rows"]) + [
                     r for r in _yeni.get("rows", [])
-                    if (r["def"], r["ticker"], r["tarih"]) not in _eski_t
-                ]
-                _yeni = dict(_yeni); _yeni["rows"] = _birlesik
+                    if (r["def"], r["ticker"], r["tarih"]) not in _eski_t]
+                _eski_s = {(s["kural"], s["ticker"], s["tarih"]) for s in _onceki.get("sim", [])}
+                _yeni["sim"] = list(_onceki.get("sim", [])) + [
+                    s for s in _yeni.get("sim", [])
+                    if (s["kural"], s["ticker"], s["tarih"]) not in _eski_s]
                 _yeni["errors"] = (_onceki.get("errors", []) + _yeni.get("errors", []))[-10:]
             st.session_state["__rt_res"] = _yeni
+            _ilerleme += len(_blok)
+            st.session_state["__rt_ilerleme"] = _ilerleme
+            _bar_all.progress(_ilerleme / max(1, len(_kuyruk)))
+
+            # Kota kontrolü: son turda çok sayıda kota hatası varsa dur
+            _son_hatalar = " ".join(_yeni.get("errors", [])[-6:])
+            if "429" in _son_hatalar or "rate limit" in _son_hatalar.lower():
+                _durdu = True
+                st.error(
+                    f"⛔ API kotası doldu. {_ilerleme}/{len(_kuyruk)} hisse tamamlandı. "
+                    "Kota yenilenince aşağıdaki **Kaldığı yerden devam et** butonuna bas — "
+                    "biriken sonuçlar korunuyor."
+                )
+        if not _durdu:
+            _durum_all.caption(f"✅ Tarama tamam — {_ilerleme}/{len(_kuyruk)} hisse.")
+
+    if _kuyruk and int(st.session_state.get("__rt_ilerleme", 0)) < len(_kuyruk):
+        if st.button(f"▶️ Kaldığı yerden devam et "
+                     f"({len(_kuyruk) - int(st.session_state.get('__rt_ilerleme', 0))} hisse kaldı)",
+                     key="rt_devam"):
+            st.rerun()
 
     _res = st.session_state.get("__rt_res")
     if _res:
