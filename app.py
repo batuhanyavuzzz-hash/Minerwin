@@ -138,7 +138,7 @@ import streamlit as st
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # PDF (ReportLab)
 from reportlab.lib.pagesizes import A4
