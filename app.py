@@ -274,8 +274,37 @@ if isinstance(GITHUB_TOKEN, str):
 STOP_TIGHTEN = 0.75      # kalibrasyon: stop mesafesi ×0.75 (125 hisse/3 yıl simülasyonu)
 MAX_HOLD_DAYS = 40       # kalibrasyon: pozisyon en fazla 40 işlem günü taşınır
 MAX_BASE_RISK = 0.12   # taban dibi girişten en fazla %12 uzakta (VCP darlığı)
+def _gun_ifadesi(n) -> str:
+    """0 → 'bugün', 1 → 'dün', 2+ → 'N gün önce'. Rapor dilinde sayı değil, insan dili."""
+    try:
+        n = int(n)
+    except Exception:
+        return "yakın zamanda"
+    return "bugün" if n <= 0 else ("dün" if n == 1 else f"{n} gün önce")
+
+
 ARMED_DAYS = 14          # kapı açıldıktan sonra setup kaç gün "kurulu" kalır
-BAND_TOLERANCE = 1.08    # teyit günü fiyat bant üstünün en fazla %8 üzerinde olabilir
+# Kovalama toleransı ARTIK SABİT DEĞİL: hissenin kendi volatilitesine göre.
+# Gerekçe: %8, günlük ATR'si %1 olan KO için çok geniş (8 günlük hareket),
+# ATR'si %4 olan CRWV için çok dar (2 günlük hareket). Ölçü: 2×ATR%,
+# %4 ile %12 arasına sıkıştırılır.
+BAND_TOL_ATR_CARPAN = 2.0
+BAND_TOL_MIN = 4.0
+BAND_TOL_MAX = 12.0
+
+
+def _band_tolerance_pct(ddf: pd.DataFrame) -> float:
+    """Hisseye özel kovalama toleransı (%). ATR yoksa %8'e düşer."""
+    try:
+        _tr = pd.concat([ddf["high"] - ddf["low"],
+                         (ddf["high"] - ddf["close"].shift(1)).abs(),
+                         (ddf["low"] - ddf["close"].shift(1)).abs()], axis=1).max(axis=1)
+        _atrp = float((_tr.rolling(14).mean() / ddf["close"]).iloc[-1] * 100.0)
+        if not np.isfinite(_atrp) or _atrp <= 0:
+            return 8.0
+        return float(min(BAND_TOL_MAX, max(BAND_TOL_MIN, BAND_TOL_ATR_CARPAN * _atrp)))
+    except Exception:
+        return 8.0
 RULE_VER = "v4"   # v2: teyit tanımı v1(bant içi) → v3(EMA20+RSI>50+hacim), retro-test kararı
 
 GIST_DESC = "minerwin-history (otomatik — MinerWin uygulamasi)"
@@ -920,6 +949,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         except Exception:
             daily_green = d_plan.status_tag.startswith("🟢")
 
+        _band_tol = _band_tolerance_pct(ddf)   # hisseye özel kovalama sınırı (%)
+
         # KURULU PENCERE: son 14 günde fiyat haftalık banda dokundu mu?
         armed_recent = False
         armed_days_ago = None
@@ -996,7 +1027,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
                        f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
             verdict_kind = "error"
         elif w_extended and armed_recent and daily_green and np.isfinite(_whi) and \
-                float(ddf["close"].iloc[-1]) <= _whi * BAND_TOLERANCE:
+                float(ddf["close"].iloc[-1]) <= _whi * (1.0 + _band_tol / 100.0):
             # SIRALI AKIŞ (v6): fiyat banda indi (setup kuruldu) → günlük teyit geldi.
             # 125 hisse/3 yıl portföy simülasyonu (kalibre çıkışlarla):
             #   v6 pullback girişi → 14.674$ (+%46.7), 87 işlem, düşüş -%7.9
@@ -1004,17 +1035,20 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             # Pivot girişi daha güvenli ama işlem üretmiyor; kâr pullback'te.
             gate = "ACIK"
             _above = (float(ddf["close"].iloc[-1]) / _whi - 1.0) * 100.0 if _whi > 0 else float("nan")
-            verdict = (f"Giriş koşulları oluşmuş (sıralı akış) — fiyat {armed_days_ago} gün önce "
-                       f"haftalık banda indi, günlük teyit bugün geldi. "
-                       f"Fiyat bant üstünün %{max(0.0, _above):.1f} üzerinde (tolerans %8 içinde)."
+            verdict = (f"Giriş koşulları oluştu — fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
+                       f"indi ve bugün günlük teyit verdi. Şu an bandın %{max(0.0, _above):.1f} "
+                       f"üstünde; bu hissenin volatilitesine göre kovalama sınırı "
+                       f"%{_band_tol:.0f} — sınırın içinde."
                        f"{rs_note}")
             verdict_kind = "success"
         elif w_extended:
             gate = "BEKLEMEDE"
             _armed_txt = ""
             if armed_recent:
-                _armed_txt = (f" Setup kurulu: fiyat {armed_days_ago} gün önce banda indi — "
-                              f"günlük teyit gelirse giriş koşulu oluşur ({ARMED_DAYS} gün geçerli).")
+                _kalan = max(0, ARMED_DAYS - int(armed_days_ago or 0))
+                _armed_txt = (f" Kurulum hazır: fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
+                              f"indi. Günlük teyit gelirse giriş koşulu oluşur — bu hak {_kalan} gün "
+                              f"daha geçerli.")
             _pv_txt = ""
             if mv_base and np.isfinite(mv_pivot):
                 _pv_txt = (f" · VCP: {mv_dalga} daralma dalgası, pivot {mv_pivot:.2f} "
@@ -1059,6 +1093,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "last_close": float(ddf["close"].iloc[-1]) if ddf is not None and len(ddf) else float("nan"),
             "mv_break": mv_break, "mv_base": mv_base,
             "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
+            "band_tol_pct": _band_tol,
             "mv_pivot": mv_pivot, "mv_dip": mv_dip,
             "mv_stop": mv_stop, "mv_tp1": mv_tp1, "mv_tp2": mv_tp2,
             "rs_edge_w": (
