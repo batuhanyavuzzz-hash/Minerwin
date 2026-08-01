@@ -4755,6 +4755,8 @@ def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 
                 "ticker": r["ticker"], "adet": adet, "giris": giris, "stop": stop,
                 "tp1": tp1, "tp2": tp2, "baslangic": gnum, "rs": _yeni_rs,
                 "yol_h": r.get("yol_h"), "yol_l": r.get("yol_l"), "yol_c": r.get("yol_c"),
+                "vcp_dalga": r.get("vcp_dalga", ""), "vcp_son_daralma": r.get("vcp_son_daralma", ""),
+                "vcp_bar": r.get("vcp_bar", ""),
                 "yol_setup": r.get("yol_setup"), "yol_rsi": r.get("yol_rsi"),
                 "yol_ema50w": r.get("yol_ema50w"),
                 "son_fiyat": giris, "tp1_alindi": False, "kismi": 0.0,
@@ -4775,6 +4777,9 @@ def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 
         _pnl = p["adet"] * (p["cikis"] - p["giris"])
         defter.append({
             "Hisse": p["ticker"], "Giriş tarihi": p.get("giris_tarih", ""),
+            "VCP dalga": p.get("vcp_dalga", ""),
+            "Son daralma %": p.get("vcp_son_daralma", ""),
+            "Taban (bar)": p.get("vcp_bar", ""),
             "Giriş": round(p["giris"], 2), "Stop": round(p["stop"], 2),
             "TP1": round(p.get("tp1", float("nan")), 2),
             "RS": round(float(p.get("rs", np.nan)), 0),
@@ -4973,8 +4978,13 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                             dp = build_trade_plan(d.iloc[:i + 1], low_52w=_lo52s, high_52w=_hi52s)
                             stop, tp1, tp2 = float(dp.stop), float(dp.tp1), float(dp.tp2)
                         j2 = min(len(d), i + 1 + SIM_MAX_HOLD)
+                        _vb = _vcp_bilgi.get(i, {}) if _kural.startswith("v8") else {}
                         out["sim"].append({
                             "kural": _kural,
+                            "vcp_dalga": _vb.get("dalga", ""),
+                            "vcp_son_daralma": round(_vb.get("son_daralma", float("nan")), 2)
+                                               if _vb else "",
+                            "vcp_bar": _vb.get("bar", ""),
                             "ticker": sym,
                             "tarih": str(dt.iloc[i].date()),
                             "giris": giris,
@@ -5030,6 +5040,14 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                         "def": name, "ticker": sym,
                         "grup": ("NÖTR" if sym in _RETRO_NEUTRAL
                                  else "ZAYIF" if sym in _RETRO_WEAK else "SEÇİLMİŞ"),
+                        "vcp_dalga": (_vcp_bilgi.get(i, {}).get("dalga", "")
+                                      if name.startswith("v8") else ""),
+                        "vcp_son_daralma": (round(_vcp_bilgi.get(i, {}).get("son_daralma", float("nan")), 2)
+                                            if name.startswith("v8") and i in _vcp_bilgi else ""),
+                        "vcp_derinlik": (round(_vcp_bilgi.get(i, {}).get("derinlik", float("nan")), 2)
+                                         if name.startswith("v8") and i in _vcp_bilgi else ""),
+                        "vcp_bar": (_vcp_bilgi.get(i, {}).get("bar", "")
+                                    if name.startswith("v8") else ""),
                         "kapi_gercek": real.get(i, {}).get("kapi", ""),
                         "setup_w": real.get(i, {}).get("setup_w", np.nan),
                         "rs": round(float(rs_ser.iloc[i]), 1) if np.isfinite(rs_ser.iloc[i]) else np.nan,
