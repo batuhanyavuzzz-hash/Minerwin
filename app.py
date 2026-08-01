@@ -274,6 +274,44 @@ if isinstance(GITHUB_TOKEN, str):
 STOP_TIGHTEN = 0.75      # kalibrasyon: stop mesafesi ×0.75 (125 hisse/3 yıl simülasyonu)
 MAX_HOLD_DAYS = 40       # kalibrasyon: pozisyon en fazla 40 işlem günü taşınır
 MAX_BASE_RISK = 0.12   # taban dibi girişten en fazla %12 uzakta (VCP darlığı)
+def _daily_chase_check(ddf: pd.DataFrame, d_plan) -> Dict[str, Any]:
+    """Günlük tarafta kovalama freni. Döner: ok (teyit geçerli mi) + gerekçe."""
+    out = {"ok": True, "sebep": "", "risk_pct": float("nan"),
+           "bant_uzaklik": float("nan"), "limit": float("nan")}
+    try:
+        px = float(ddf["close"].iloc[-1])
+        # (1) Risk tavanı
+        stop = float(d_plan.stop)
+        if px > 0 and np.isfinite(stop) and stop > 0:
+            out["risk_pct"] = (px - stop) / px * 100.0
+            if out["risk_pct"] > MAX_ENTRY_RISK_PCT:
+                out["ok"] = False
+                out["sebep"] = (f"giriş-stop mesafesi %{out['risk_pct']:.1f} — "
+                                f"üst sınır %{MAX_ENTRY_RISK_PCT:.0f}; bu noktadan alım "
+                                f"riski taşınamaz hale getirir")
+                return out
+        # (2) Bant mesafesi
+        hi = float(max(d_plan.entry_low, d_plan.entry_high))
+        if np.isfinite(hi) and hi > 0 and px > hi:
+            out["bant_uzaklik"] = (px / hi - 1.0) * 100.0
+            _tr = pd.concat([ddf["high"] - ddf["low"],
+                             (ddf["high"] - ddf["close"].shift(1)).abs(),
+                             (ddf["low"] - ddf["close"].shift(1)).abs()], axis=1).max(axis=1)
+            _atrp = float((_tr.rolling(14).mean() / ddf["close"]).iloc[-1] * 100.0)
+            limit = min(DAILY_CHASE_CAP_PCT, 2.0 * _atrp) if np.isfinite(_atrp) and _atrp > 0 \
+                else DAILY_CHASE_CAP_PCT
+            out["limit"] = limit
+            if out["bant_uzaklik"] > limit:
+                out["ok"] = False
+                out["sebep"] = (f"fiyat günlük bandın %{out['bant_uzaklik']:.1f} üstünde — "
+                                f"bu hissede kovalama sınırı %{limit:.1f}")
+        else:
+            out["bant_uzaklik"] = 0.0
+    except Exception:
+        pass
+    return out
+
+
 def _gun_ifadesi(n) -> str:
     """0 → 'bugün', 1 → 'dün', 2+ → 'N gün önce'. Rapor dilinde sayı değil, insan dili."""
     try:
@@ -288,6 +326,16 @@ ARMED_DAYS = 14          # kapı açıldıktan sonra setup kaç gün "kurulu" ka
 # Gerekçe: %8, günlük ATR'si %1 olan KO için çok geniş (8 günlük hareket),
 # ATR'si %4 olan CRWV için çok dar (2 günlük hareket). Ölçü: 2×ATR%,
 # %4 ile %12 arasına sıkıştırılır.
+# GÜNLÜK KOVALAMA FRENİ (V7.5) — Minervini mantığı:
+#   (1) RİSK TAVANI: giriş-stop mesafesi %MAX_ENTRY_RISK'i geçerse işlem geçersiz.
+#       Kovalayan giriş stopu uzatır → risk şişer → sistem kendiliğinden reddeder.
+#       Volatiliteye göre otomatik ayarlanır (stop zaten ATR'den türüyor).
+#   (2) BANT MESAFESİ: kapanış, günlük EMA20-50 bandının üstünden en fazla
+#       min(2×ATR%, %5) uzakta. Minervini'nin "pivottan %5'ten fazla yukarıda alma"
+#       kuralının bant karşılığı; aşırı volatil hissede sert tavan görevi görür.
+MAX_ENTRY_RISK_PCT = 10.0
+DAILY_CHASE_CAP_PCT = 5.0
+
 BAND_TOL_ATR_CARPAN = 2.0
 BAND_TOL_MIN = 4.0
 BAND_TOL_MAX = 12.0
@@ -949,7 +997,12 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
         except Exception:
             daily_green = d_plan.status_tag.startswith("🟢")
 
-        _band_tol = _band_tolerance_pct(ddf)   # hisseye özel kovalama sınırı (%)
+        _band_tol = _band_tolerance_pct(ddf)   # haftalık banda özel kovalama sınırı (%)
+
+        # GÜNLÜK KOVALAMA FRENİ: teyit oluşsa bile giriş noktası uzaksa geçersiz
+        _chase = _daily_chase_check(ddf, d_plan)
+        if daily_green and not _chase["ok"]:
+            daily_green = False
 
         # KURULU PENCERE: son 14 günde fiyat haftalık banda dokundu mu?
         armed_recent = False
@@ -1049,6 +1102,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
                 _armed_txt = (f" Kurulum hazır: fiyat {_gun_ifadesi(armed_days_ago)} alarm bandına "
                               f"indi. Günlük teyit gelirse giriş koşulu oluşur — bu hak {_kalan} gün "
                               f"daha geçerli.")
+            _chase_txt = ""
+            if _chase.get("sebep"):
+                _chase_txt = f" Teyit oluştu ancak giriş uzak: {_chase['sebep']}."
             _pv_txt = ""
             if mv_base and np.isfinite(mv_pivot):
                 _pv_txt = (f" · VCP: {mv_dalga} daralma dalgası, pivot {mv_pivot:.2f} "
@@ -1058,7 +1114,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
                 _pv_txt = f" · Pivot (bilgi): {mv_pivot:.2f}"
             verdict = (f"Aday — haftalık yapı kriterlerden geçiyor (setup {w_plan.setup_score}/100). "
                        f"Fiyat haftalık bandın üstünde; giriş bölgesinde değil. "
-                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{_armed_txt}{_pv_txt}{rs_note}")
+                       f"Bant: {_wlo:.2f} – {_whi:.2f}.{_armed_txt}{_chase_txt}{_pv_txt}{rs_note}")
             verdict_kind = "warning"
         elif daily_green:
             gate = "ACIK"
@@ -1094,6 +1150,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float) -> Dict[str,
             "mv_break": mv_break, "mv_base": mv_base,
             "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
             "band_tol_pct": _band_tol,
+            "chase_ok": _chase.get("ok", True),
+            "chase_sebep": _chase.get("sebep", ""),
+            "entry_risk_pct": _chase.get("risk_pct", float("nan")),
             "mv_pivot": mv_pivot, "mv_dip": mv_dip,
             "mv_stop": mv_stop, "mv_tp1": mv_tp1, "mv_tp2": mv_tp2,
             "rs_edge_w": (
