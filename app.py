@@ -1076,6 +1076,12 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
         except Exception:
             daily_green = d_plan.status_tag.startswith("🟢")
 
+        # MINERVINI TREND ŞABLONU (gölge — kararı etkilemez, retro-test bekliyor)
+        try:
+            tt = trend_template(wdf, low_52w, high_52w, rs_rating)
+        except Exception:
+            tt = {"skor": 0, "maks": 8, "kriterler": []}
+
         _band_tol = _band_tolerance_pct(ddf)   # haftalık banda özel kovalama sınırı (%)
 
         # GÜNLÜK KOVALAMA FRENİ: teyit oluşsa bile giriş noktası uzaksa geçersiz
@@ -1241,6 +1247,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             "armed_days_ago": armed_days_ago,
             "last_close": float(ddf["close"].iloc[-1]) if ddf is not None and len(ddf) else float("nan"),
             "mv_break": mv_break, "mv_base": mv_base,
+            "trend_tpl_skor": tt.get("skor", 0),
+            "trend_tpl": tt.get("kriterler", []),
             "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
             "mv_risk_pct": (((float(ddf["close"].iloc[-1]) - mv_stop) / float(ddf["close"].iloc[-1]) * 100.0)
                             if np.isfinite(mv_stop) and len(ddf) else float("nan")),
@@ -2002,6 +2010,58 @@ def _status_tag(
     if is_extended and timing_score < 50:
         return "⚫ UZAMIŞ — KOVALAMA"
     return "🟡 PULLBACK BEKLENİYOR"
+
+
+# =========================================================
+# MINERVINI TREND ŞABLONU (V7.7) — 8 kriterli geç/kal listesi
+# Mevcut setup skoru pullback mantığından kalmaydı: uzama ve volatiliteyi
+# cezalandırıyor, dar baz/kırılım bonusu veriyordu — VCP motoruyla çelişiyor
+# (kırılım anında fiyat EMA50 üstünde olur, bu kusur değil şarttır).
+# Trend Şablonu bunun yerine Minervini'nin kendi kriterlerini kullanır.
+# ŞİMDİLİK GÖLGE: raporda görünür, kapı kararını ETKİLEMEZ (retro-test bekliyor).
+# =========================================================
+def trend_template(wdf: pd.DataFrame, low_52w: float, high_52w: float,
+                   rs_rating: float = float("nan"),
+                   rs_esik: float = 45.0) -> Dict[str, Any]:
+    """Haftalık veriyle 8 kriter. Döner: {skor, maks, kriterler:[(ad, gecti, detay)]}"""
+    out = {"skor": 0, "maks": 8, "kriterler": []}
+    try:
+        son = wdf.iloc[-1]
+        c = float(son["close"])
+        e50, e150, e200 = float(son["ema50"]), float(son["ema150"]), float(son["ema200"])
+        # EMA200 eğimi: ~1 ay (4 hafta) önceye göre
+        e200_onceki = float(wdf["ema200"].iloc[-5]) if len(wdf) >= 5 else float("nan")
+        dip_uzak = ((c / low_52w - 1) * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
+        zirve_uzak = ((1 - c / high_52w) * 100) if (np.isfinite(high_52w) and high_52w > 0) else float("nan")
+
+        kriterler = [
+            ("Fiyat EMA150 ve EMA200 üstünde",
+             bool(c > e150 and c > e200),
+             f"{c:.2f} / {e150:.2f} / {e200:.2f}"),
+            ("EMA150 > EMA200",
+             bool(e150 > e200), f"{e150:.2f} > {e200:.2f}"),
+            ("EMA200 en az 1 aydır yukarı",
+             bool(np.isfinite(e200_onceki) and e200 > e200_onceki),
+             f"{e200:.2f} ← {e200_onceki:.2f}" if np.isfinite(e200_onceki) else "veri yok"),
+            ("EMA50 > EMA150 > EMA200",
+             bool(e50 > e150 > e200), f"{e50:.2f} > {e150:.2f} > {e200:.2f}"),
+            ("Fiyat EMA50 üstünde",
+             bool(c > e50), f"{c:.2f} > {e50:.2f}"),
+            ("52H dipten en az %30 yukarıda",
+             bool(np.isfinite(dip_uzak) and dip_uzak >= 30),
+             f"%{dip_uzak:.0f}" if np.isfinite(dip_uzak) else "—"),
+            ("52H zirveden en fazla %25 aşağıda",
+             bool(np.isfinite(zirve_uzak) and zirve_uzak <= 25),
+             f"%{zirve_uzak:.0f}" if np.isfinite(zirve_uzak) else "—"),
+            ("Göreli güç yeterli",
+             bool(np.isfinite(rs_rating) and rs_rating >= rs_esik),
+             f"RS {rs_rating:.0f}" if np.isfinite(rs_rating) else "—"),
+        ]
+        out["kriterler"] = kriterler
+        out["skor"] = sum(1 for _, g, _ in kriterler if g)
+    except Exception:
+        pass
+    return out
 
 
 def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> TradePlan:
@@ -3098,6 +3158,24 @@ def build_pdf_bytes_single(
                                     + (f", son daralma %{_sd2:.1f}" if np.isfinite(_sd2) else "")])
         story.append(_data_table(["Parametre", "Değer"], mtf_rows, sty,
                                  [page_w*0.42, page_w*0.58]))
+
+    # V7.7: Minervini Trend Şablonu — 8 kriterli geç/kal listesi
+    if mtf and mtf.get("trend_tpl"):
+        story += _section_header("Minervini Trend Şablonu", sty, page_w)
+        _tt_rows = [[("✓ " if g else "✗ ") + ad, det] for ad, g, det in mtf["trend_tpl"]]
+        _sk = mtf.get("trend_tpl_skor", 0)
+        story.append(Paragraph(
+            html.escape(f"Sonuç: {_sk}/8 kriter sağlanıyor"
+                        + ("  —  tam şablon" if _sk == 8 else
+                           "  —  neredeyse tam" if _sk == 7 else "")),
+            sty["h3"]))
+        story.append(_data_table(["Kriter", "Değer"], _tt_rows, sty,
+                                 [page_w*0.58, page_w*0.42]))
+        story.append(Paragraph(html.escape(
+            "Trend Şablonu, Minervini'nin aday hisse için aradığı sekiz yapısal koşuldur. "
+            "Şu an bilgi amaçlı gösterilir; kapı kararı VCP kırılımı ve mevcut kriterlerle verilir."),
+            sty["small"]))
+        story.append(Spacer(1, 0.2*cm))
 
     story += _section_header("Skor Dağılımı", sty, page_w)
     b = plan.breakdown
@@ -4947,7 +5025,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
 
             # ---- HAFTALIK PLAN SERİSİ: her tamamlanmış hafta için bir kez ----
             wt = pd.to_datetime(w["time"])
-            wplan_setup, wplan_lo, wplan_hi, wplan_ext = {}, {}, {}, {}
+            wplan_setup, wplan_lo, wplan_hi, wplan_ext, wplan_tt = {}, {}, {}, {}, {}
             _w_start = max(60, len(w) - 170)   # ~3 yıl + ısınma; öncesi kullanılmıyor
             for k in range(_w_start, len(w)):
                 try:
@@ -4957,11 +5035,30 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                     wplan_lo[k] = float(_wp.entry_low)
                     wplan_hi[k] = float(_wp.entry_high)
                     wplan_ext[k] = bool(_wp.status_tag.startswith("⚫"))
+                    # TREND ŞABLONU kriterleri (RS hariç — RS günlük seride ayrı)
+                    _s = w.iloc[k]
+                    _c, _e50 = float(_s["close"]), float(_s["ema50"])
+                    _e150, _e200 = float(_s["ema150"]), float(_s["ema200"])
+                    _e200_p = float(w["ema200"].iloc[k - 4]) if k >= 4 else np.nan
+                    _dipu = ((_c / _lo52 - 1) * 100) if _lo52 > 0 else np.nan
+                    _zirv = ((1 - _c / _hi52) * 100) if _hi52 > 0 else np.nan
+                    wplan_tt[k] = {
+                        "tt1": bool(_c > _e150 and _c > _e200),
+                        "tt2": bool(_e150 > _e200),
+                        "tt3": bool(np.isfinite(_e200_p) and _e200 > _e200_p),
+                        "tt4": bool(_e50 > _e150 > _e200),
+                        "tt5": bool(_c > _e50),
+                        "tt7": bool(np.isfinite(_dipu) and _dipu >= 30),
+                        "tt8": bool(np.isfinite(_zirv) and _zirv <= 25),
+                        "dip_uzak": round(_dipu, 1) if np.isfinite(_dipu) else "",
+                        "zirve_uzak": round(_zirv, 1) if np.isfinite(_zirv) else "",
+                    }
                 except Exception:
                     pass
             # Günlük tarihleri TAMAMLANMIŞ haftaya eşle (look-ahead yok)
             kidx = np.searchsorted(wt.values, (dt - pd.Timedelta(days=7)).values, side="right") - 1
             setup_arr = np.array([wplan_setup.get(int(k), np.nan) for k in kidx], dtype=float)
+            tt_arr = [wplan_tt.get(int(k), {}) for k in kidx]
             lo_arr = np.array([wplan_lo.get(int(k), np.nan) for k in kidx], dtype=float)
             hi_arr = np.array([wplan_hi.get(int(k), np.nan) for k in kidx], dtype=float)
             ext_arr = np.array([wplan_ext.get(int(k), False) for k in kidx], dtype=bool)
@@ -5000,7 +5097,12 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                 if _r.get("kirilim"):
                     v8[_i] = True
                     _vcp_bilgi[_i] = _r
-            v8 = v8 & (setup_arr >= 60) & (rs_ser.values >= 45)
+            # NOT: v8 sinyalleri ESKİ kapıyla (setup>=60) SÜZÜLMÜYOR.
+            # Eski skorlama VCP kırılımını cezalandırıyordu (uzama/volatilite),
+            # dolayısıyla v8'in gerçek performansını gizliyordu. Kapı senaryoları
+            # (trend şablonu varyantları) satırlardaki tt* kolonlarıyla SONRADAN
+            # hesaplanır. Burada yalnız RS vetosu uygulanır.
+            v8 = v8 & (rs_ser.values >= 45)
             sigs["v8 · GERÇEK VCP (çok dalgalı)"] = pd.Series(v8, index=d.index)
 
             # ---- v7: TABAN + PİVOT KIRILIMI (Minervini girişi) ----
@@ -5132,6 +5234,13 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                         "def": name, "ticker": sym,
                         "grup": ("NÖTR" if sym in _RETRO_NEUTRAL
                                  else "ZAYIF" if sym in _RETRO_WEAK else "SEÇİLMİŞ"),
+                        **{f"tt{j}": tt_arr[i].get(f"tt{j}", "") for j in (1,2,3,4,5,7,8)},
+                        "tt_dip_uzak": tt_arr[i].get("dip_uzak", ""),
+                        "tt_zirve_uzak": tt_arr[i].get("zirve_uzak", ""),
+                        "tt_zorunlu5": all(tt_arr[i].get(f"tt{j}") is True for j in (1,2,3,4,5))
+                                       if tt_arr[i] else "",
+                        "eski_kapi_ok": (bool(setup_arr[i] >= 60)
+                                         if np.isfinite(setup_arr[i]) else ""),
                         "vcp_dalga": (_vcp_bilgi.get(i, {}).get("dalga", "")
                                       if name.startswith("v8") else ""),
                         "vcp_son_daralma": (round(_vcp_bilgi.get(i, {}).get("son_daralma", float("nan")), 2)
@@ -5470,7 +5579,7 @@ with tab_single:
                                 cM1, cM2, cM3, cM4 = st.columns(4)
                                 cM1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
                                 cM2.metric("Haftalık Durum", mtf["w_status"])
-                                cM3.metric("Günlük Timing", f"{mtf['d_timing']} / 100")
+                                cM3.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 8")
                                 cM4.metric("Günlük Durum", mtf["d_status"])
                                 if mtf["verdict_kind"] == "success":
                                     st.success(mtf["verdict"])
