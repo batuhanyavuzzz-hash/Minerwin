@@ -2959,14 +2959,14 @@ def build_pdf_bytes_single(
                                    kind=str(mtf.get("verdict_kind", ""))))
         story.append(Spacer(1, 4))
         if _gate == "ACIK":
-            sub_line = (f"{html.escape(str(mtf.get('vcp_durum', '—')))}"
+            sub_line = (f"{html.escape(_strip_emoji(str(mtf.get('vcp_durum', '—'))).strip())}"
                         f"  —  {html.escape(str(mtf.get('vcp_aciklama', '')))}")
         else:
-            sub_line = (f"{html.escape(str(mtf.get('vcp_durum', '—')))}"
+            sub_line = (f"{html.escape(_strip_emoji(str(mtf.get('vcp_durum', '—'))).strip())}"
                     f"  —  {html.escape(str(mtf.get('vcp_aciklama', '')))}")
         story.append(Paragraph(sub_line, sty["small"]))
     else:
-        story.append(_status_badge(str((mtf or {}).get("vcp_durum", "⚪ KURULUM YOK")),
+        story.append(_status_badge(_strip_emoji(str((mtf or {}).get("vcp_durum", "KURULUM YOK"))).strip(),
                                    sty, page_w))
     story.append(Spacer(1, 8))
 
@@ -2994,7 +2994,7 @@ def build_pdf_bytes_single(
         _row2_clr = [_C_ACCENT, (_C_RED if _gate == "RET" else _C_AMBER), min5_clr]
     else:
         row2_items = [
-            ("VCP DURUMU", str((mtf or {}).get("vcp_durum", "—"))),
+            ("VCP DURUMU", _strip_emoji(str((mtf or {}).get("vcp_durum", "—"))).strip()),
             ("SON DARALMA",
              (f"%{(mtf or {}).get('mv_son_daralma', float('nan')):.1f}"
               if mtf and np.isfinite((mtf or {}).get("mv_son_daralma", float("nan"))) else "—")),
@@ -3113,73 +3113,67 @@ def build_pdf_bytes_single(
         rr1 = f"1:{plan.rr_tp1:.2f}" if np.isfinite(plan.rr_tp1) else "—"
         rr2 = f"1:{plan.rr_tp2:.2f}" if np.isfinite(plan.rr_tp2) else "—"
 
-        plan_left = [
-            ["Giriş Bölgesi",      f"{plan.entry_low:.2f} — {plan.entry_high:.2f}"],
-            ["Stop",               f"{plan.stop:.2f}"],
-            ["TP1  (R/R)",         f"{plan.tp1:.2f}  ({rr1})"],
-            ["TP2  (R/R)",         f"{plan.tp2:.2f}  ({rr2})"],
-        ]
-        # NEW (V7.0): Pozisyon boyutu — raporun cevaplamadığı son eyleme dönük soru
-        if ps is not None:
-            if ps.get("suppressed"):
-                plan_left.append([
-                    "Pozisyon Boyutu",
-                    "Günlük giriş planı kapalı (haftalık kapı) — giriş günü güncel değerlerle hesaplanır",
-                ])
-            elif np.isfinite(ps.get("shares", float("nan"))):
-                _rp = f" (hedef %{risk_pct:.2f})" if np.isfinite(risk_pct) else ""
-                _teyit_note = " — teyit sonrası güncel değerlerle yenile" if _hold else ""
-                plan_left.append([
-                    "Pozisyon Boyutu",
-                    f"{int(ps['shares'])} adet ≈ ${ps['cost']:,.0f} | risk ${ps['risk_amt']:,.0f}{_rp}{_teyit_note}",
-                ])
-            elif ps.get("reason") == "risk_exceeds":
-                plan_left.append(["Pozisyon Boyutu",
-                                  "1 adet dahi hedef risk bütçesinin üstünde (adet başına risk hedefi aşıyor)"])
-        # V7.5: Yönetim kuralları hükümde değil, planda durur (kalibrasyon çıktısı)
-        if mtf and mtf.get("gate") == "ACIK":
-            plan_left.append([
-                "Yönetim",
-                f"TP1'de kısmi satış yok · TP1 sonrası iz süren stop · en fazla {MAX_HOLD_DAYS} gün",
-            ])
-        plan_right = [
-            ["52W Dip",            f"{plan.low_52w:.2f}" if np.isfinite(plan.low_52w) else "—"],
-            ["52W Zirve Uzaklık",  f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
-            ["Dar Baz",            "Var" if plan.base_detected else "Yok"],
-        ]
-        # V7.6: Pivot artık ana referans — alarm buraya kurulur
-        if mtf and np.isfinite(mtf.get("mv_pivot", float("nan"))):
-            plan_right.insert(0, ["Pivot — alarm buraya kurulur",
-                                  f"{float(mtf['mv_pivot']):.2f}"])
-            plan_right.insert(1, ["Taban dibi (stop referansı)",
-                                  f"{float(mtf.get('mv_dip', float('nan'))):.2f}"])
-        # V7.5: Gerçek VCP tespiti (çok dalgalı taban) — plan tablosunda görünür
-        if mtf and mtf.get("mv_dalga"):
-            _vd = int(mtf.get("mv_dalga") or 0)
-            _vp = float(mtf.get("mv_pivot", float("nan")))
-            _vdip = float(mtf.get("mv_dip", float("nan")))
-            _vsd = float(mtf.get("mv_son_daralma", float("nan")))
-            if _vd >= 2 and np.isfinite(_vp):
-                plan_right.append(["VCP Tabanı", f"{_vd} daralma dalgası"])
-                plan_right.append(["VCP Pivot / Dip", f"{_vp:.2f} / {_vdip:.2f}"])
-                if np.isfinite(_vsd):
-                    plan_right.append(["Son daralma", f"%{_vsd:.1f}"])
-            else:
-                plan_right.append(["VCP Tabanı", "Yok"])
-        elif mtf:
-            plan_right.append(["VCP Tabanı", "Yok"])
+        # V7.7: AÇIK durumda seviyeler VCP'den (pivot/taban dibi), aksi halde plan
+        _vp = (mtf or {}).get("mv_pivot", float("nan"))
+        _vd = (mtf or {}).get("mv_dip", float("nan"))
+        _vcp_acik = bool(mtf and mtf.get("gate") == "ACIK"
+                         and np.isfinite(_vp) and np.isfinite(_vd) and _vp > _vd)
+        if _vcp_acik:
+            _vstop = _vd * 0.99
+            _vR = _vp - _vstop
+            _vtp1, _vtp2 = _vp + 2 * _vR, _vp + 4 * _vR
+            plan_left = [
+                ["Giriş (pivot)",   f"{_vp:.2f}"],
+                ["Stop (taban dibi)", f"{_vstop:.2f}  (risk %{_vR/_vp*100:.1f})"],
+                ["TP1 (2R)",        f"{_vtp1:.2f}"],
+                ["TP2 (4R)",        f"{_vtp2:.2f}"],
+            ]
+            try:
+                if ps and np.isfinite(ps.get("account", float("nan"))) and ps["account"] > 0:
+                    _adet = int((ps["account"] * (risk_pct / 100.0)) / _vR) if _vR > 0 else 0
+                    _adet = max(0, min(_adet, int((ps["account"] / 4) / _vp)))
+                    plan_left.append(["Pozisyon Boyutu",
+                                      f"{_adet} adet ≈ ${_adet*_vp:,.0f} | risk ${_adet*_vR:,.0f}"])
+            except Exception:
+                pass
+            plan_left.append(["Yönetim",
+                              f"TP1'de kısmi satış yok · TP1 sonrası iz süren stop · "
+                              f"en fazla {MAX_HOLD_DAYS} gün"])
+        else:
+            plan_left = [
+                ["Pivot (giriş tetiği)",
+                 f"{_vp:.2f}" if np.isfinite(_vp) else "— (kurulum yok)"],
+                ["Stop olacak seviye",
+                 f"{_vd*0.99:.2f}" if np.isfinite(_vd) else "—"],
+                ["Durum", "Pivot kırılana kadar giriş yok"],
+            ]
 
-        half_w = page_w * 0.48
-        gap_w  = page_w * 0.04
-        tbl_left  = _data_table(["Parametre", "Değer"], plan_left,  sty, [half_w*0.48, half_w*0.52])
-        tbl_right = _data_table(["Parametre", "Değer"], plan_right, sty, [half_w*0.48, half_w*0.52])
-        side_by_side = Table([[tbl_left, "", tbl_right]], colWidths=[half_w, gap_w, half_w])
+        plan_right = [
+            ["Pivot (alarm buraya kurulur)",
+             f"{_vp:.2f}" if np.isfinite(_vp) else "—"],
+            ["Taban dibi",
+             f"{_vd:.2f}" if np.isfinite(_vd) else "—"],
+            ["VCP Yapısı",
+             (f"{int((mtf or {}).get('mv_dalga', 0))} daralma dalgası"
+              if (mtf or {}).get("mv_dalga") else "—")],
+            ["Son daralma",
+             (f"%{float((mtf or {}).get('mv_son_daralma')):.1f}"
+              if np.isfinite((mtf or {}).get("mv_son_daralma", float("nan"))) else "—")],
+            ["Kırılım",
+             ((f"{(mtf or {}).get('mv_kir_yas')} gün önce"
+               + (f", hacim {float((mtf or {}).get('mv_kir_hacim')):.1f}×"
+                  if np.isfinite((mtf or {}).get("mv_kir_hacim", float("nan"))) else ""))
+              if (mtf or {}).get("mv_kir_yas") not in (None, "") else "yok")],
+            ["52W Zirve Uzaklık",
+             f"%{plan.dist_to_52w_high_pct:.1f}" if np.isfinite(plan.dist_to_52w_high_pct) else "—"],
+        ]
+        _lt = _data_table(["Parametre", "Değer"], plan_left, sty, [page_w*0.24, page_w*0.24])
+        _rt = _data_table(["Parametre", "Değer"], plan_right, sty, [page_w*0.24, page_w*0.24])
+        side_by_side = Table([[_lt, _rt]], colWidths=[page_w*0.49, page_w*0.49])
         side_by_side.setStyle(TableStyle([
-            ("VALIGN",       (0,0), (-1,-1), "TOP"),
-            ("LEFTPADDING",  (0,0), (-1,-1), 0),
-            ("RIGHTPADDING", (0,0), (-1,-1), 0),
-            ("TOPPADDING",   (0,0), (-1,-1), 0),
-            ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ]))
         story.append(side_by_side)
 
@@ -3198,31 +3192,10 @@ def build_pdf_bytes_single(
         # günlük referansı) yalnızca kapı AÇIKken tabloya girer.
         mtf_rows = [
             ["Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7"
-             + (" ✓" if mtf.get("trend_tpl_gecti") else " ✗")],
-            ["VCP Durumu", str(mtf.get("vcp_durum", "—"))],
+             + (" (sağlanıyor)" if mtf.get("trend_tpl_gecti") else " (eksik)")],
+            ["VCP Durumu", _strip_emoji(str(mtf.get("vcp_durum", "—"))).strip()],
         ]
-        if not _closed:
-            mtf_rows += [
-
-            ]
         mtf_rows.append(["Durum", _strip_emoji(str(mtf["verdict"]))])
-        if not _closed:
-            mtf_rows.append(["Evre", _strip_emoji(_swing_phase(
-                plan.debug.get("close", float("nan")),
-                mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan")),
-                mtf.get("d_entry_low", float("nan")), mtf.get("d_entry_high", float("nan")),
-                atr_pct=float(plan.debug.get("atr_pct", float("nan"))),
-            )) or "—"])
-        mtf_rows += [
-            ["RS Rating", f"{mtf.get('rs_rating', float('nan')):.0f}" if np.isfinite(mtf.get("rs_rating", float("nan"))) else "—"],
-            ["RS Sırası (taranan evrende)",
-             (f"{mtf['rs_sira']} / 99 — {mtf.get('rs_sira_n', 0)} hisse arasında"
-              if mtf.get("rs_sira") else "— (henüz toplu tarama yapılmadı)")],
-            ["RS Ham Güç (SPY farkı, gölge ölçüm)",
-             f"{mtf.get('rs_edge_w', float('nan')):+.1f} — bilgi; kararlara etki etmez"
-             if np.isfinite(mtf.get("rs_edge_w", float("nan"))) else "—"],
-            ["Haftalık Bant (EMA20–EMA50)", f"{mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}"],
-        ]
         _pv2 = mtf.get("mv_pivot", float("nan"))
         if np.isfinite(_pv2):
             mtf_rows.insert(0, ["VCP Pivot (giriş tetiği)", f"{_pv2:.2f}"])
@@ -3240,7 +3213,7 @@ def build_pdf_bytes_single(
     # V7.7: Minervini Trend Şablonu — 8 kriterli geç/kal listesi
     if mtf and mtf.get("trend_tpl"):
         story += _section_header("Minervini Trend Şablonu", sty, page_w)
-        _tt_rows = [[("✓ " if g else "✗ ") + ad, det] for ad, g, det in mtf["trend_tpl"]]
+        _tt_rows = [[("EVET  " if g else "HAYIR  ") + ad, det] for ad, g, det in mtf["trend_tpl"]]
         _sk = mtf.get("trend_tpl_skor", 0)
         _gec = mtf.get("trend_tpl_gecti")
         story.append(Paragraph(
@@ -5632,7 +5605,6 @@ with tab_single:
                         _intraday_note = "" if interval_label == "Günlük (1day)" else " · Aktif timeframe bazlı"
                         with col_baz:
                             st.metric(
-                                "Dar Baz",
                                 "✅ Tespit Edildi" if plan.base_detected else "— Yok",
                                 help=f"Son 20 barda ATR daralması + hacim kuruması birlikte varsa baz oluşmuştur (referans: son {BASE_REF_WINDOW} bar).{_intraday_note}"
                             )
