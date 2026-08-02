@@ -4413,71 +4413,53 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         box = st.success if mtf["verdict_kind"] == "success" else (
             st.warning if mtf["verdict_kind"] == "warning" else st.error)
         box(f"**DURUM:** {mtf['verdict']}")
-        # NEW (V7.2): Gölge teyit satırı — bilgi, hüküm DEĞİL (karar kullanıcının)
-        # V7.3: Teyit artık v3 tanımıyla (resmi). Eski tanım gölgede kayıtta.
-        _old_t = mtf.get("teyit_v1_shadow", "")
-        if _old_t != "":
-            _ar = mtf.get("armed_recent", False)
-            _ad = mtf.get("armed_days_ago")
-            _mvp = mtf.get("mv_pivot", float("nan"))
-            st.caption(
-                f"🔎 Kural seti **{RULE_VER}**: haftalık banda iniş (kurulu pencere {ARMED_DAYS} gün) "
-                f"+ günlük teyit · ÇIKIŞ (kalibre): stop mesafesi ×0.75, TP1'de kısmi satış YOK, "
-                f"TP1 sonrası iz süren stop, en fazla 40 gün taşı"
-                + (f" · VCP pivotu (bilgi): {_mvp:.2f}" if np.isfinite(_mvp) else "")
-            )
-        _wlo, _whi = mtf.get("w_entry_low", float("nan")), mtf.get("w_entry_high", float("nan"))
-        if np.isfinite(_wlo) and np.isfinite(_whi) and _whi > 0:
-            if price > _whi:
-                st.caption(f"Fiyat haftalık bandın %{(price - _whi) / _whi * 100:.1f} üstünde.")
-            elif price < _wlo:
-                st.caption(f"Fiyat haftalık bandın %{(_wlo - price) / _wlo * 100:.1f} altında.")
-            else:
-                st.caption("Fiyat haftalık bandın içinde.")
+        st.caption(f"Kural seti **{RULE_VER}** — Minervini: VCP tabanı + pivot kırılımı, "
+                   f"stop taban dibinde. {mtf.get('vcp_aciklama', '')}")
 
-    # ---- 2) HAFTALIK — her zaman (OMURGA #2: alarm haftalığın malı) ----
-    st.markdown("#### Haftalık")
+    # ---- 2) YAPI ----
+    st.markdown("#### Yapı")
     w1, w2, w3 = st.columns(3)
     w1.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7")
     w2.metric("VCP Durumu", mtf.get("vcp_durum", "—"))
     rsr = mtf.get("rs_rating", float("nan"))
     w3.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
-              help="Endekse göre göreli güç. <45 kalite kriteri dışıdır; 45-60 bilgi notudur.")
-    # NEW (V7.2): Gölge ölçüm — kelepçesiz ham güç, bilgi amaçlı. RS cetveli
-    # 20-80'e sıkışıktır (liderler 80'de yığılır); ham güç liderleri ayrıştırır.
-    # KARARLARA ETKİ ETMEZ; CP-3 cetvel reformunun canlı karşılaştırma verisidir.
-    _rew = mtf.get("rs_edge_w", float("nan"))
-    if np.isfinite(_rew):
-        w3.caption(f"Ham güç (SPY farkı): **{_rew:+.1f}** · gölge ölçüm, karara etki etmez")
-    st.info(
-        f"📐 **Haftalık bant (EMA20–EMA50): {mtf['w_entry_low']:.2f} – {mtf['w_entry_high']:.2f}** — "
-        f"alarm bu banda kurulur; çaldığında analiz yenilenir."
-    )
-    st.caption("Bant her hafta kayar; alarmlar hafta kapanışında yenilenir.")
+              help="Endekse göre göreli güç. <45 kalite kriteri dışıdır.")
+    _rsira = mtf.get("rs_sira")
+    if _rsira:
+        w3.caption(f"Evren sırası: **{_rsira}/99** ({mtf.get('rs_sira_n', 0)} hisse arasında)")
 
-    # ---- 3) GÜNLÜK — yalnızca kapı AÇIKken (OMURGA #1) ----
+    _vp = mtf.get("mv_pivot", float("nan"))
+    _vd = mtf.get("mv_dip", float("nan"))
+    _vstop = mtf.get("mv_stop", float("nan"))
+    if np.isfinite(_vp) and np.isfinite(_vstop):
+        _vR = _vp - _vstop
+        _vrisk = _vR / _vp * 100 if _vp > 0 else float("nan")
+        if gate == "ACIK":
+            st.success(f"**Giriş: {_vp:.2f} (pivot) · Stop: {_vstop:.2f} (risk %{_vrisk:.1f}) · "
+                       f"TP1: {_vp + 2*_vR:.2f} (2R) · TP2: {_vp + 4*_vR:.2f} (4R)**")
+        else:
+            st.info(f"**Pivot {_vp:.2f} — alarm buraya kurulur.** Kırılırsa: stop {_vstop:.2f} "
+                    f"(risk %{_vrisk:.1f}), TP1 {_vp + 2*_vR:.2f}, TP2 {_vp + 4*_vR:.2f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Pivot", f"{_vp:.2f}")
+        c2.metric("Taban dibi", f"{_vd:.2f}" if np.isfinite(_vd) else "—")
+        c3.metric("Dalga", f"{int(mtf.get('mv_dalga', 0) or 0)}")
+        _sd = mtf.get("mv_son_daralma", float("nan"))
+        c4.metric("Son daralma", f"%{_sd:.1f}" if np.isfinite(_sd) else "—")
+        _ky, _kh = mtf.get("mv_kir_yas"), mtf.get("mv_kir_hacim", float("nan"))
+        if _ky not in (None, ""):
+            st.caption(f"Kırılım: {_gun_ifadesi(_ky)}"
+                       + (f", hacim {_kh:.1f}× ortalama" if np.isfinite(_kh) else "")
+                       + (f" — {mtf['mv_kir_gecersiz']}" if mtf.get("mv_kir_gecersiz") else ""))
+    else:
+        st.info("Henüz VCP tabanı oluşmamış — alarm kurulacak pivot yok.")
+
     if gate == "ACIK":
-        st.markdown("#### Günlük")
-        d1, d2, d3 = st.columns(3)
-        d1.metric("Timing", f"{mtf['d_timing']} / 100")
-        d2.metric("Durum", mtf.get("vcp_durum", "—"))
-        d3.metric("Banda Mesafe", f"{d_plan.dist_to_entry_pct:+.1f}%")
-        rr1 = f"1:{d_plan.rr_tp1:.2f}" if np.isfinite(d_plan.rr_tp1) else "—"
-        rr2 = f"1:{d_plan.rr_tp2:.2f}" if np.isfinite(d_plan.rr_tp2) else "—"
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Günlük Bant", f"{mtf['d_entry_low']:.2f}–{mtf['d_entry_high']:.2f}")
-        p2.metric("Stop", f"{d_plan.stop:.2f}")
-        p3.metric("TP1", f"{d_plan.tp1:.2f}", help=f"R/R {rr1}")
-        p4.metric("TP2", f"{d_plan.tp2:.2f}", help=f"R/R {rr2}")
-        if not mtf.get("daily_green"):
-            st.caption("Seviyeler bugünkü değerlerdir; teyit gününde analiz yenilenip güncellenir.")
-        if d_plan.high_vol_warning:
-            st.caption("Not: ATR% yüksek — stop dinamik tavana dayandı; volatilite ortalamanın üstünde.")
-        if d_plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
-            st.caption("Not: TP2, 3.5R zemini nedeniyle tarihsel tavanın üzerinde.")
-
         # Pozisyon boyutu — her zaman hesaplanır, bilgi dilinde (OMURGA #6)
-        ps = position_size_calc(acct_size, risk_pct, d_plan.entry_mid, d_plan.stop)
+        # Pozisyon boyutu VCP seviyeleriyle: giriş=pivot, stop=taban dibi
+        _e_px = _vp if np.isfinite(_vp) else d_plan.entry_mid
+        _s_px = _vstop if np.isfinite(_vstop) else d_plan.stop
+        ps = position_size_calc(acct_size, risk_pct, _e_px, _s_px)
         if np.isfinite(ps.get("shares", float("nan"))):
             cap_note = " · maliyet hesap sınırına çekildi" if ps.get("capped") else ""
             st.info(
