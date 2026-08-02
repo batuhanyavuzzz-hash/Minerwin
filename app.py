@@ -1246,6 +1246,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
 
         out.update({
             "w_setup": w_plan.setup_score, "w_status": w_plan.status_tag,
+            "vcp_durum": ("Pivot kırıldı" if mv_break else
+                          (f"Taban kurulu ({mv_dalga} daralma dalgası)" if mv_base and mv_dalga
+                           else "Taban kurulu" if mv_base else "Kurulum yok")),
             "w_entry_low": w_plan.entry_low, "w_entry_high": w_plan.entry_high,
             "d_timing": d_plan.timing_score, "d_status": d_plan.status_tag,
             "d_entry_low": d_plan.entry_low, "d_entry_high": d_plan.entry_high,
@@ -2340,7 +2343,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     narrative = (
         f"**Güncel Fiyat:** {close:.2f}  \n"
         f"**Toplam Skor:** {int(total)}/100 → **{label}**  \n"
-        f"**Setup Kalitesi:** {setup_score}/100  |  **Zamanlama Skoru:** {timing_score}/100  \n"
+
         f"**Durum:** {status_tag}  \n\n"
         f"EMA20: {ema20:.2f} | EMA50: {ema50:.2f} | EMA150: {ema150:.2f} | EMA200: {ema200:.2f}  \n"
         f"**Trend:** {trend_text} (EMA200 eğim={ema200_slope:.4f})  \n"
@@ -2912,10 +2915,10 @@ def build_pdf_bytes_single(
                                    kind=str(mtf.get("verdict_kind", ""))))
         story.append(Spacer(1, 4))
         if _gate == "ACIK":
-            sub_line = (f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}  |  "
+            sub_line = (f"VCP: {html.escape(str(mtf.get('vcp_durum', '—')))}  |  "
                         f"Günlük: {html.escape(_strip_emoji(plan.status_tag))}")
         else:
-            sub_line = f"Haftalık: {html.escape(_strip_emoji(str(mtf.get('w_status', '—'))))}"
+            sub_line = f"VCP: {html.escape(str(mtf.get('vcp_durum', '—')))}"
         story.append(Paragraph(sub_line, sty["small"]))
     else:
         story.append(_status_badge(plan.status_tag, sty, page_w))
@@ -2945,8 +2948,10 @@ def build_pdf_bytes_single(
         _row2_clr = [_C_ACCENT, (_C_RED if _gate == "RET" else _C_AMBER), min5_clr]
     else:
         row2_items = [
-            ("SETUP (GÜNLÜK)",   f"{plan.setup_score} / 100"),
-            ("TIMING (GÜNLÜK)",  f"{plan.timing_score} / 100"),
+            ("VCP DURUMU", str((mtf or {}).get("vcp_durum", "—"))),
+            ("SON DARALMA",
+             (f"%{(mtf or {}).get('mv_son_daralma', float('nan')):.1f}"
+              if mtf and np.isfinite((mtf or {}).get("mv_son_daralma", float("nan"))) else "—")),
             ("MİNERVİNİ #5",  min5_str),
         ]
         _row2_clr = [_C_ACCENT, _C_ACCENT, min5_clr]
@@ -3148,7 +3153,7 @@ def build_pdf_bytes_single(
         mtf_rows = [
             ["Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7"
              + (" ✓" if mtf.get("trend_tpl_gecti") else " ✗")],
-            ["Haftalık Durum", _strip_emoji(str(mtf["w_status"]))],
+            ["VCP Durumu", str(mtf.get("vcp_durum", "—"))],
         ]
         if not _closed:
             mtf_rows += [
@@ -4416,7 +4421,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
     st.markdown("#### Haftalık")
     w1, w2, w3 = st.columns(3)
     w1.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7")
-    w2.metric("Durum", mtf["w_status"])
+    w2.metric("VCP Durumu", mtf.get("vcp_durum", "—"))
     rsr = mtf.get("rs_rating", float("nan"))
     w3.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
               help="Endekse göre göreli güç. <45 kalite kriteri dışıdır; 45-60 bilgi notudur.")
@@ -5496,7 +5501,7 @@ with tab_single:
                             st.metric("Durum", plan.status_tag)
                         with colm2:
                             st.metric("Toplam Skor", f"{plan.total_score} / 100")
-                            st.metric("Setup / Timing", f"{plan.setup_score} / {plan.timing_score}")
+                            st.metric("VCP", str((mtf or {}).get("vcp_durum", "—")) if show_mtf else "—")
                         with colm3:
                             st.metric("Stop (Aktif)", f"{plan.stop:.2f}")
                             st.metric("TP1 / TP2", f"{plan.tp1:.2f} / {plan.tp2:.2f}")
@@ -5586,7 +5591,7 @@ with tab_single:
                             elif mtf:
                                 cM1, cM2, cM3, cM4 = st.columns(4)
                                 cM1.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7")
-                                cM2.metric("Haftalık Durum", mtf["w_status"])
+                                cM2.metric("VCP Durumu", mtf.get("vcp_durum", "—"))
                                 cM3.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 8")
                                 cM4.metric("Günlük Durum", mtf["d_status"])
                                 if mtf["verdict_kind"] == "success":
