@@ -333,6 +333,31 @@ def rs_sirali_puan(ham_guc: Dict[str, float]) -> Dict[str, int]:
     return {k: int(round(v)) for k, v in s.items()}
 
 
+def _vcp_etiket(kirilim: bool, taban: bool, dalga: int, trend_ok: bool,
+                pivot: float = float("nan"), dip: float = float("nan")) -> str:
+    """TEK DURUM ETİKETİ — sistemde başka durum etiketi yoktur."""
+    if not trend_ok:
+        return "🔴 TREND BOZULDU"
+    if kirilim:
+        return "🟢 PİVOT KIRILDI"
+    if taban:
+        return f"🟡 TABAN KURULU ({dalga} dalga)" if dalga else "🟡 TABAN KURULU"
+    if np.isfinite(pivot) and np.isfinite(dip):
+        return "🔵 TABAN OLUŞUYOR"
+    return "⚪ KURULUM YOK"
+
+
+def _vcp_aciklama(kirilim: bool, taban: bool, trend_ok: bool) -> str:
+    """Etiketin tek cümlelik karşılığı."""
+    if not trend_ok:
+        return "Hissenin uzun vadeli yapısı Minervini kriterlerini karşılamıyor."
+    if kirilim:
+        return "Fiyat, tabanın tepesini hacimle yukarı kırdı."
+    if taban:
+        return "Konsolidasyon tamamlandı; pivotun kırılması bekleniyor."
+    return "Henüz alım için yapı oluşmadı."
+
+
 def _gun_ifadesi(n) -> str:
     """0 → 'bugün', 1 → 'dün', 2+ → 'N gün önce'. Rapor dilinde sayı değil, insan dili."""
     try:
@@ -1246,9 +1271,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
 
         out.update({
             "w_setup": w_plan.setup_score, "w_status": w_plan.status_tag,
-            "vcp_durum": ("Pivot kırıldı" if mv_break else
-                          (f"Taban kurulu ({mv_dalga} daralma dalgası)" if mv_base and mv_dalga
-                           else "Taban kurulu" if mv_base else "Kurulum yok")),
+            "vcp_durum": _vcp_etiket(mv_break, mv_base, mv_dalga, tt.get("gecti", False),
+                                     mv_pivot, mv_dip),
+            "vcp_aciklama": _vcp_aciklama(mv_break, mv_base, tt.get("gecti", False)),
             "w_entry_low": w_plan.entry_low, "w_entry_high": w_plan.entry_high,
             "d_timing": d_plan.timing_score, "d_status": d_plan.status_tag,
             "d_entry_low": d_plan.entry_low, "d_entry_high": d_plan.entry_high,
@@ -2344,7 +2369,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
         f"**Güncel Fiyat:** {close:.2f}  \n"
         f"**Toplam Skor:** {int(total)}/100 → **{label}**  \n"
 
-        f"**Durum:** {status_tag}  \n\n"
+
         f"EMA20: {ema20:.2f} | EMA50: {ema50:.2f} | EMA150: {ema150:.2f} | EMA200: {ema200:.2f}  \n"
         f"**Trend:** {trend_text} (EMA200 eğim={ema200_slope:.4f})  \n"
         f"**Fiyat Konumu:** EMA150 uzaklık %{dist_ema150_pct:.2f}  \n"
@@ -2627,9 +2652,9 @@ def _status_badge(status_tag: str, st_styles: dict, page_w: float, label: str = 
         bg = _C_AMBER
     elif kind == "error":
         bg = _C_RED
-    elif "alim" in tag_lower or status_tag.startswith("🟢"):
+    elif "kırıldı" in tag_lower or "alim" in tag_lower or status_tag.startswith("🟢"):
         bg = _C_GREEN
-    elif "pullback" in tag_lower or status_tag.startswith("🟡"):
+    elif "taban kurulu" in tag_lower or "pullback" in tag_lower or status_tag.startswith("🟡"):
         bg = _C_AMBER
     elif "konsolidasyon" in tag_lower or status_tag.startswith("🔵"):
         bg = _C_ACCENT
@@ -2915,13 +2940,15 @@ def build_pdf_bytes_single(
                                    kind=str(mtf.get("verdict_kind", ""))))
         story.append(Spacer(1, 4))
         if _gate == "ACIK":
-            sub_line = (f"VCP: {html.escape(str(mtf.get('vcp_durum', '—')))}  |  "
-                        f"Günlük: {html.escape(_strip_emoji(plan.status_tag))}")
+            sub_line = (f"{html.escape(str(mtf.get('vcp_durum', '—')))}"
+                        f"  —  {html.escape(str(mtf.get('vcp_aciklama', '')))}")
         else:
-            sub_line = f"VCP: {html.escape(str(mtf.get('vcp_durum', '—')))}"
+            sub_line = (f"{html.escape(str(mtf.get('vcp_durum', '—')))}"
+                    f"  —  {html.escape(str(mtf.get('vcp_aciklama', '')))}")
         story.append(Paragraph(sub_line, sty["small"]))
     else:
-        story.append(_status_badge(plan.status_tag, sty, page_w))
+        story.append(_status_badge(str((mtf or {}).get("vcp_durum", "⚪ KURULUM YOK")),
+                                   sty, page_w))
     story.append(Spacer(1, 8))
 
     close_val = plan.debug.get("close", float("nan"))
@@ -3157,8 +3184,7 @@ def build_pdf_bytes_single(
         ]
         if not _closed:
             mtf_rows += [
-                ["Günlük Timing", f"{mtf['d_timing']} / 100"],
-                ["Günlük Durum", _strip_emoji(str(mtf["d_status"]))],
+
             ]
         mtf_rows.append(["Durum", _strip_emoji(str(mtf["verdict"]))])
         if not _closed:
@@ -4442,7 +4468,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
         st.markdown("#### Günlük")
         d1, d2, d3 = st.columns(3)
         d1.metric("Timing", f"{mtf['d_timing']} / 100")
-        d2.metric("Durum", mtf["d_status"])
+        d2.metric("Durum", mtf.get("vcp_durum", "—"))
         d3.metric("Banda Mesafe", f"{d_plan.dist_to_entry_pct:+.1f}%")
         rr1 = f"1:{d_plan.rr_tp1:.2f}" if np.isfinite(d_plan.rr_tp1) else "—"
         rr2 = f"1:{d_plan.rr_tp2:.2f}" if np.isfinite(d_plan.rr_tp2) else "—"
@@ -5498,7 +5524,7 @@ with tab_single:
                         colm1, colm2, colm3 = st.columns(3)
                         with colm1:
                             st.metric("Güncel Fiyat", f"{float(last_price_line):.2f}")
-                            st.metric("Durum", plan.status_tag)
+                            st.metric("Durum", (mtf or {}).get("vcp_durum", "—") if show_mtf else "—")
                         with colm2:
                             st.metric("Toplam Skor", f"{plan.total_score} / 100")
                             st.metric("VCP", str((mtf or {}).get("vcp_durum", "—")) if show_mtf else "—")
@@ -5593,7 +5619,7 @@ with tab_single:
                                 cM1.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7")
                                 cM2.metric("VCP Durumu", mtf.get("vcp_durum", "—"))
                                 cM3.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 8")
-                                cM4.metric("Günlük Durum", mtf["d_status"])
+                                cM4.metric("Açıklama", mtf.get("vcp_aciklama", "—"))
                                 if mtf["verdict_kind"] == "success":
                                     st.success(mtf["verdict"])
                                 elif mtf["verdict_kind"] == "warning":
@@ -6526,9 +6552,7 @@ with tab_scan:
                     _uzak = (_pv / _px - 1) * 100 if (np.isfinite(_pv) and _px > 0) else float("nan")
                     _row = {
                         "Ticker": _sym,
-                        "Durum": ("🟢 PİVOT KIRILDI" if _m.get("mv_break")
-                                  else "🟡 TABAN KURULU" if _m.get("mv_base")
-                                  else "⚪ kurulum yok"),
+                        "Durum": _m.get("vcp_durum", "⚪ KURULUM YOK"),
                         "Kapı": _m.get("gate", ""),
                         "Fiyat": round(_px, 2) if np.isfinite(_px) else "",
                         "Pivot": round(_pv, 2) if np.isfinite(_pv) else "",
