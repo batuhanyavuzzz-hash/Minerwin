@@ -1042,6 +1042,11 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
 
         # V7.7: Kapı artık MINERVINI TREND ŞABLONU ile açılır (eski 130 puanlık
         # setup skoru pullback mantığından kalmaydı ve VCP kırılımını cezalandırıyordu).
+        try:
+            tt = trend_template(wdf, low_52w, high_52w)
+        except Exception:
+            tt = {"skor": 0, "maks": 7, "kriterler": [], "gecti": False,
+                  "eksik": "hesaplanamadı"}
         weekly_ok = bool(tt.get("gecti"))
 
         # ============ TEYİT + KAPI REFORMU — V7.3 / RULE_VER v2 ============
@@ -1077,12 +1082,6 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
                 teyit_eksik = " ve ".join(_eksikler)
         except Exception:
             daily_green = d_plan.status_tag.startswith("🟢")
-
-        # MINERVINI TREND ŞABLONU (gölge — kararı etkilemez, retro-test bekliyor)
-        try:
-            tt = trend_template(wdf, low_52w, high_52w)
-        except Exception:
-            tt = {"skor": 0, "maks": 7, "kriterler": [], "gecti": False, "eksik": "hesaplanamadı"}
 
         _band_tol = _band_tolerance_pct(ddf)   # haftalık banda özel kovalama sınırı (%)
 
