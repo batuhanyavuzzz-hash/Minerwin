@@ -6174,9 +6174,15 @@ with tab_retro:
         # Altyapı/enerji üretimi/telekom/REIT
         "NEE","DUK","SO","D","EXC","AEP","T","VZ","TMUS","PLD","AMT","EQIX","SPG","O","CCI",
     ])
-    _liste_sec = st.radio("Denek evreni", ["Çekirdek (30)", "Geniş (~120)", "Elle gir"],
+    _RT_EVRENLER = {
+        "Minervini evreni (~256)": EVREN_MINERVINI,
+        "Geniş piyasa (~250)": EVREN_GENIS,
+        "Çekirdek vaka (30)": _def_list,
+        "Elle gir": "",
+    }
+    _liste_sec = st.radio("Denek evreni", list(_RT_EVRENLER.keys()),
                           horizontal=True, key="rt_evren")
-    _val = _def_list if _liste_sec.startswith("Çekirdek") else (_EVREN_GENIS if _liste_sec.startswith("Geniş") else "")
+    _val = _RT_EVRENLER[_liste_sec]
     rt_syms = st.text_area("Denek hisseler (virgülle)", value=_val, height=80, key=f"rt_syms_{_liste_sec}")
     rt_birik = st.checkbox("Sonuçları öncekilerle BİRİKTİR (parça parça çalıştırmak için)",
                            value=True, key="rt_birik",
