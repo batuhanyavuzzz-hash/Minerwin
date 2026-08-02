@@ -1040,7 +1040,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
         except Exception:
             teyit_v2 = ""
 
-        weekly_ok = (w_plan.setup_score >= 60) and (not w_plan.status_tag.startswith(("🔴", "🟣")))
+        # V7.7: Kapı artık MINERVINI TREND ŞABLONU ile açılır (eski 130 puanlık
+        # setup skoru pullback mantığından kalmaydı ve VCP kırılımını cezalandırıyordu).
+        weekly_ok = bool(tt.get("gecti"))
 
         # ============ TEYİT + KAPI REFORMU — V7.3 / RULE_VER v2 ============
         # SORUN (ölçüldü): Eski kurgu kapı ve tetiği AYNI GÜNE bağlıyordu —
@@ -1078,9 +1080,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
 
         # MINERVINI TREND ŞABLONU (gölge — kararı etkilemez, retro-test bekliyor)
         try:
-            tt = trend_template(wdf, low_52w, high_52w, rs_rating)
+            tt = trend_template(wdf, low_52w, high_52w)
         except Exception:
-            tt = {"skor": 0, "maks": 8, "kriterler": []}
+            tt = {"skor": 0, "maks": 7, "kriterler": [], "gecti": False, "eksik": "hesaplanamadı"}
 
         _band_tol = _band_tolerance_pct(ddf)   # haftalık banda özel kovalama sınırı (%)
 
@@ -1161,8 +1163,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             verdict_kind = "error"
         elif not weekly_ok:
             gate = "RET"
-            verdict = (f"Aday değil — haftalık kriterler sağlanmıyor "
-                       f"(setup {w_plan.setup_score}/100, durum: {w_plan.status_tag}).")
+            verdict = (f"Aday değil — Minervini trend şablonu sağlanmıyor "
+                       f"({tt.get('skor', 0)}/7). Eksik: {tt.get('eksik', '—')}.")
             verdict_kind = "error"
         elif (mv_break and np.isfinite(earnings_days)
               and 0 <= float(earnings_days) <= ENTRY_EARNINGS_BLOCK_DAYS):
@@ -1201,11 +1203,22 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             gate = "BEKLEMEDE"
             _px = float(ddf["close"].iloc[-1])
             _uz = (mv_pivot / _px - 1.0) * 100.0 if _px > 0 else float("nan")
+            _proj = ""
+            try:
+                if np.isfinite(mv_pivot) and np.isfinite(mv_dip) and mv_pivot > mv_dip:
+                    _pstop = mv_dip * 0.99
+                    _pR = mv_pivot - _pstop
+                    _priskp = _pR / mv_pivot * 100.0
+                    _proj = (f" Pivottan alım halinde (bugünkü tabana göre): "
+                             f"stop {_pstop:.2f} (risk %{_priskp:.1f}), "
+                             f"TP1 {mv_pivot + 2*_pR:.2f} (2R), TP2 {mv_pivot + 4*_pR:.2f} (4R).")
+            except Exception:
+                pass
             verdict = (f"Aday — VCP tabanı kurulu ({mv_dalga} daralma dalgası). "
                        f"Pivot {mv_pivot:.2f}"
                        + (f", fiyatın %{_uz:.1f} üstünde" if np.isfinite(_uz) and _uz > 0 else "")
                        + f". Taban dibi {mv_dip:.2f}. Pivot hacimle kırılırsa giriş koşulu oluşur."
-                       + rs_note)
+                       + _proj + rs_note)
             verdict_kind = "warning"
         else:
             # Yapı uygun ama kurulum yok — sebebi yazılır
@@ -1227,7 +1240,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
                         _neden = "daralma dalgaları veya hacim kuruması tamamlanmamış"
             except Exception:
                 pass
-            verdict = (f"Aday — haftalık yapı uygun (setup {w_plan.setup_score}/100), "
+            verdict = (f"Aday — trend şablonu tam ({tt.get('skor', 0)}/7), "
                        f"ancak giriş kurulumu yok: {_neden}. "
                        f"Haftalık bant: {_wlo:.2f} – {_whi:.2f}.{rs_note}")
             verdict_kind = "warning"
@@ -1249,6 +1262,13 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             "mv_break": mv_break, "mv_base": mv_base,
             "trend_tpl_skor": tt.get("skor", 0),
             "trend_tpl": tt.get("kriterler", []),
+            "trend_tpl_gecti": bool(tt.get("gecti")),
+            "trend_tpl_eksik": tt.get("eksik", ""),
+            "mv_proj_stop": (mv_dip * 0.99) if np.isfinite(mv_dip) else float("nan"),
+            "mv_proj_tp1": (mv_pivot + 2 * (mv_pivot - mv_dip * 0.99))
+                           if (np.isfinite(mv_pivot) and np.isfinite(mv_dip)) else float("nan"),
+            "mv_proj_tp2": (mv_pivot + 4 * (mv_pivot - mv_dip * 0.99))
+                           if (np.isfinite(mv_pivot) and np.isfinite(mv_dip)) else float("nan"),
             "mv_dalga": mv_dalga, "mv_son_daralma": mv_son_daralma,
             "mv_risk_pct": (((float(ddf["close"].iloc[-1]) - mv_stop) / float(ddf["close"].iloc[-1]) * 100.0)
                             if np.isfinite(mv_stop) and len(ddf) else float("nan")),
@@ -2020,45 +2040,53 @@ def _status_tag(
 # Trend Şablonu bunun yerine Minervini'nin kendi kriterlerini kullanır.
 # ŞİMDİLİK GÖLGE: raporda görünür, kapı kararını ETKİLEMEZ (retro-test bekliyor).
 # =========================================================
-def trend_template(wdf: pd.DataFrame, low_52w: float, high_52w: float,
-                   rs_rating: float = float("nan"),
-                   rs_esik: float = 45.0) -> Dict[str, Any]:
-    """Haftalık veriyle 8 kriter. Döner: {skor, maks, kriterler:[(ad, gecti, detay)]}"""
-    out = {"skor": 0, "maks": 8, "kriterler": []}
+TT_ZIRVE_TOLERANS = 35.0   # retro: %25 katı, %35 orta senaryo kazandı (PF 2.20, 129 işlem)
+TT_DIP_MIN = 30.0
+
+
+def trend_template(wdf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[str, Any]:
+    """MINERVINI TREND ŞABLONU — 7 kriter. RS ayrı veto olduğu için dahil değil.
+
+    Kapı şartı (retro-test kararı, 248 hisse / 5 yıl / 173 bağımsız işlem):
+      1-5 ZORUNLU + dipten >=%30 + zirveden <=%35  → "ORTA" senaryo
+      Karneler: orta PF 2.20 / medyan +1.78 · katı(%25) PF 2.22 ama 13 işlem az
+                eski kapı (setup>=60) PF 2.10 · kapısız PF 2.03, medyan NEGATİF
+      Zirveden %50+ uzak sinyaller: 7 işlem, isabet %0 — bu yüzden üst sınır şart.
+    """
+    out = {"skor": 0, "maks": 7, "kriterler": [], "zorunlu_ok": False,
+           "gecti": False, "eksik": ""}
     try:
         son = wdf.iloc[-1]
         c = float(son["close"])
         e50, e150, e200 = float(son["ema50"]), float(son["ema150"]), float(son["ema200"])
-        # EMA200 eğimi: ~1 ay (4 hafta) önceye göre
-        e200_onceki = float(wdf["ema200"].iloc[-5]) if len(wdf) >= 5 else float("nan")
-        dip_uzak = ((c / low_52w - 1) * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
-        zirve_uzak = ((1 - c / high_52w) * 100) if (np.isfinite(high_52w) and high_52w > 0) else float("nan")
+        e200_p = float(wdf["ema200"].iloc[-5]) if len(wdf) >= 5 else float("nan")
+        dip_u = ((c / low_52w - 1) * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
+        zir_u = ((1 - c / high_52w) * 100) if (np.isfinite(high_52w) and high_52w > 0) else float("nan")
 
         kriterler = [
-            ("Fiyat EMA150 ve EMA200 üstünde",
-             bool(c > e150 and c > e200),
-             f"{c:.2f} / {e150:.2f} / {e200:.2f}"),
-            ("EMA150 > EMA200",
-             bool(e150 > e200), f"{e150:.2f} > {e200:.2f}"),
+            ("Fiyat EMA150 ve EMA200 üstünde", bool(c > e150 and c > e200),
+             f"{c:.2f} vs {e150:.2f} / {e200:.2f}", True),
+            ("EMA150 > EMA200", bool(e150 > e200), f"{e150:.2f} > {e200:.2f}", True),
             ("EMA200 en az 1 aydır yukarı",
-             bool(np.isfinite(e200_onceki) and e200 > e200_onceki),
-             f"{e200:.2f} ← {e200_onceki:.2f}" if np.isfinite(e200_onceki) else "veri yok"),
-            ("EMA50 > EMA150 > EMA200",
-             bool(e50 > e150 > e200), f"{e50:.2f} > {e150:.2f} > {e200:.2f}"),
-            ("Fiyat EMA50 üstünde",
-             bool(c > e50), f"{c:.2f} > {e50:.2f}"),
-            ("52H dipten en az %30 yukarıda",
-             bool(np.isfinite(dip_uzak) and dip_uzak >= 30),
-             f"%{dip_uzak:.0f}" if np.isfinite(dip_uzak) else "—"),
-            ("52H zirveden en fazla %25 aşağıda",
-             bool(np.isfinite(zirve_uzak) and zirve_uzak <= 25),
-             f"%{zirve_uzak:.0f}" if np.isfinite(zirve_uzak) else "—"),
-            ("Göreli güç yeterli",
-             bool(np.isfinite(rs_rating) and rs_rating >= rs_esik),
-             f"RS {rs_rating:.0f}" if np.isfinite(rs_rating) else "—"),
+             bool(np.isfinite(e200_p) and e200 > e200_p),
+             f"{e200:.2f} ← {e200_p:.2f}" if np.isfinite(e200_p) else "veri yok", True),
+            ("EMA50 > EMA150 > EMA200", bool(e50 > e150 > e200),
+             f"{e50:.2f} > {e150:.2f} > {e200:.2f}", True),
+            ("Fiyat EMA50 üstünde", bool(c > e50), f"{c:.2f} > {e50:.2f}", True),
+            (f"52H dipten en az %{TT_DIP_MIN:.0f} yukarıda",
+             bool(np.isfinite(dip_u) and dip_u >= TT_DIP_MIN),
+             f"%{dip_u:.0f}" if np.isfinite(dip_u) else "—", False),
+            (f"52H zirveden en fazla %{TT_ZIRVE_TOLERANS:.0f} aşağıda",
+             bool(np.isfinite(zir_u) and zir_u <= TT_ZIRVE_TOLERANS),
+             f"%{zir_u:.0f}" if np.isfinite(zir_u) else "—", False),
         ]
-        out["kriterler"] = kriterler
-        out["skor"] = sum(1 for _, g, _ in kriterler if g)
+        out["kriterler"] = [(a, g, d) for a, g, d, _ in kriterler]
+        out["skor"] = sum(1 for _, g, _, _ in kriterler if g)
+        out["zorunlu_ok"] = all(g for _, g, _, z in kriterler if z)
+        out["gecti"] = all(g for _, g, _, _ in kriterler)
+        out["eksik"] = "; ".join(a for a, g, _, _ in kriterler if not g)
+        out["dip_uzak"] = dip_u
+        out["zirve_uzak"] = zir_u
     except Exception:
         pass
     return out
@@ -2911,7 +2939,7 @@ def build_pdf_bytes_single(
 
     if _closed:
         row2_items = [
-            ("HAFTALIK SETUP", f"{plan.setup_score} / 100"),
+            ("TREND ŞABLONU", f"{mtf.get('trend_tpl_skor', 0)} / 7" if mtf else "—"),
             ("KAPI", "KAPALI — RET" if _gate == "RET" else "KAPALI — BEKLEMEDE"),
             ("MİNERVİNİ #5",  min5_str),
         ]
@@ -3119,7 +3147,8 @@ def build_pdf_bytes_single(
         # OMURGA #1: günlük satırlar (timing, durum, teyit bandı, Evre'nin
         # günlük referansı) yalnızca kapı AÇIKken tabloya girer.
         mtf_rows = [
-            ["Haftalık Setup", f"{mtf['w_setup']} / 100"],
+            ["Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7"
+             + (" ✓" if mtf.get("trend_tpl_gecti") else " ✗")],
             ["Haftalık Durum", _strip_emoji(str(mtf["w_status"]))],
         ]
         if not _closed:
@@ -3164,41 +3193,21 @@ def build_pdf_bytes_single(
         story += _section_header("Minervini Trend Şablonu", sty, page_w)
         _tt_rows = [[("✓ " if g else "✗ ") + ad, det] for ad, g, det in mtf["trend_tpl"]]
         _sk = mtf.get("trend_tpl_skor", 0)
+        _gec = mtf.get("trend_tpl_gecti")
         story.append(Paragraph(
-            html.escape(f"Sonuç: {_sk}/8 kriter sağlanıyor"
-                        + ("  —  tam şablon" if _sk == 8 else
-                           "  —  neredeyse tam" if _sk == 7 else "")),
+            html.escape(f"Sonuç: {_sk}/7 kriter — "
+                        + ("ŞABLON SAĞLANIYOR (kapı açılabilir)" if _gec
+                           else f"EKSİK: {mtf.get('trend_tpl_eksik','—')}")),
             sty["h3"]))
         story.append(_data_table(["Kriter", "Değer"], _tt_rows, sty,
                                  [page_w*0.58, page_w*0.42]))
         story.append(Paragraph(html.escape(
-            "Trend Şablonu, Minervini'nin aday hisse için aradığı sekiz yapısal koşuldur. "
-            "Şu an bilgi amaçlı gösterilir; kapı kararı VCP kırılımı ve mevcut kriterlerle verilir."),
+            "Trend Şablonu, Minervini'nin aday hisse için aradığı yapısal koşullardır. "
+            "İlk beşi zorunludur; 52 hafta dip/zirve koşulları retro-test kalibrasyonuyla "
+            "(%30 / %35) belirlenmiştir. Şablon sağlanmıyorsa hisse aday değildir."),
             sty["small"]))
         story.append(Spacer(1, 0.2*cm))
 
-    story += _section_header("Skor Dağılımı", sty, page_w)
-    b = plan.breakdown
-    score_items = [
-        ("Trend",              b.trend_stack,        30),
-        ("Fiyat / EMA150",     b.price_vs_ema150,    20),
-        ("Momentum (RSI)",     b.momentum_rsi,       20),
-        ("Volatilite (ATR%)",  b.volatility_atr,     15),
-        ("Uzama (EMA50)",      b.extension_vs_ema50, 15),
-        ("52W Zirve",          b.near_52w_high,      10),
-        ("RSI Yönü",           b.rsi_direction,       5),
-        ("Dar Baz (bonus)",    b.base_bonus,          7),
-        ("Kırılım (bonus)",    b.breakout_bonus,      8),
-    ]
-    story.append(_score_bar_table(score_items, sty, page_w))
-    # FIX (V7.2): Üç sayı üç cetvelde yaşıyor — okuyucuya söylenmeli, yoksa
-    # "tablo 70 ediyor, toplam neden 54?" diye rapor güvensiz görünüyor.
-    _raw_sum = sum(int(v) for _, v, _ in score_items)
-    story.append(Spacer(1, 0.08 * cm))
-    story.append(Paragraph(html.escape(
-        f"Cetvel notu: tablo HAM puandır (bu hisse: {_raw_sum}/130). "
-        f"TOPLAM SKOR = ham/130×100; SETUP = ilk dört bileşen/85×100. "
-        f"Üç sayı aynı hesabın farklı ölçekleridir."), sty["small"]))
 
     # V7.0: Senaryo metni hükümle çelişemez — karar giriş vermiyorsa günlük
     # grafiğin "girilebilir" iması yerine hükme hizalı plan yazılır.
@@ -4407,7 +4416,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
     # ---- 2) HAFTALIK — her zaman (OMURGA #2: alarm haftalığın malı) ----
     st.markdown("#### Haftalık")
     w1, w2, w3 = st.columns(3)
-    w1.metric("Setup", f"{mtf['w_setup']} / 100")
+    w1.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7")
     w2.metric("Durum", mtf["w_status"])
     rsr = mtf.get("rs_rating", float("nan"))
     w3.metric("RS Rating", f"{rsr:.0f}" if np.isfinite(rsr) else "—",
@@ -5577,7 +5586,7 @@ with tab_single:
                                 st.caption(f"ℹ️ MTF hesaplanamadı: {mtf['error']}")
                             elif mtf:
                                 cM1, cM2, cM3, cM4 = st.columns(4)
-                                cM1.metric("Haftalık Setup", f"{mtf['w_setup']} / 100")
+                                cM1.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 7")
                                 cM2.metric("Haftalık Durum", mtf["w_status"])
                                 cM3.metric("Trend Şablonu", f"{mtf.get('trend_tpl_skor', 0)} / 8")
                                 cM4.metric("Günlük Durum", mtf["d_status"])
@@ -5653,24 +5662,22 @@ with tab_single:
                                 f"${_pr:,.0f} = hesabın %{_pr/account_size*100:.2f}'i (hedef %{risk_pct_per_trade:.2f})."
                             )
 
-                        st.subheader("🧠 Skor Dağılımı")
-                        st.caption("Cetvel notu: tablo ham puandır (maks 130). TOPLAM = ham/130×100 · SETUP = ilk 4 bileşen/85×100.")
-                        b = plan.breakdown
-                        bdf = pd.DataFrame({
-                            "Bileşen": [
-                                "Trend", "Fiyat/EMA150", "Momentum (RSI)",
-                                "Volatilite (ATR%)", "Uzama (EMA50)",
-                                "52W Zirve Yakınlığı", "RSI Yönü", "Dar Baz (bonus)", "Pivot Kırılımı (bonus)"
-                            ],
-                            "Puan": [
-                                b.trend_stack, b.price_vs_ema150, b.momentum_rsi,
-                                b.volatility_atr, b.extension_vs_ema50,
-                                b.near_52w_high, b.rsi_direction, b.base_bonus, b.breakout_bonus
-                            ],
-                            "Maks": [30, 20, 20, 15, 15, 10, 5, 7, 8],
-                        })
-                        st.table(bdf)
-                        st.caption("Toplam 130 maks → 100'e normalize edilir. Dar baz (+7), pivot kırılımı (+8) bonus puandır. RSI yönü (+5 / 0 / -5) skora dahildir. Minervini #5 geçmezse tavan 55.")
+                        # V7.7: Eski 130 puanlık skor dağılımı kalktı — kapı artık
+                        # Minervini Trend Şablonu ile açılıyor (yukarıda gösteriliyor).
+                        with st.expander("🧮 Eski skor dökümü (arşiv — karar vermez)"):
+                            b = plan.breakdown
+                            st.table(pd.DataFrame({
+                                "Bileşen": ["Trend", "Fiyat/EMA150", "Momentum (RSI)",
+                                            "Volatilite (ATR%)", "Uzama (EMA50)",
+                                            "52W Zirve", "RSI Yönü", "Dar Baz", "Kırılım"],
+                                "Puan": [b.trend_stack, b.price_vs_ema150, b.momentum_rsi,
+                                         b.volatility_atr, b.extension_vs_ema50,
+                                         b.near_52w_high, b.rsi_direction, b.base_bonus,
+                                         b.breakout_bonus],
+                                "Maks": [30, 20, 20, 15, 15, 10, 5, 7, 8],
+                            }))
+                            st.caption("Bu döküm pullback döneminden kalmadır; kayıtlarda "
+                                       "karşılaştırma için tutulur, kapı kararını etkilemez.")
 
                         st.subheader("🧭 Senaryo")
                         st.write(plan.scenario)
@@ -6530,7 +6537,7 @@ with tab_scan:
                         "Dalga": _m.get("mv_dalga", "") or "",
                         "Son daralma %": (round(float(_m.get("mv_son_daralma", np.nan)), 1)
                                           if np.isfinite(_m.get("mv_son_daralma", np.nan)) else ""),
-                        "Setup": _m.get("w_setup", ""),
+                        "Trend": f"{_m.get('trend_tpl_skor', 0)}/7",
                         "RS": round(float(_m.get("rs_rating", np.nan)), 0)
                               if np.isfinite(_m.get("rs_rating", np.nan)) else "",
                     }
