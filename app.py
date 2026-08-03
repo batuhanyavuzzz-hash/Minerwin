@@ -147,7 +147,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable, CondPageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # Excel (openpyxl)
@@ -1232,7 +1232,9 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             # v8 her iki evrende, her iki dönem yarısında da üstün.
             gate = "ACIK"
             _px = float(ddf["close"].iloc[-1])
-            _riskp = (_px - mv_stop) / _px * 100.0
+            # Risk PİVOTTAN ölçülür (giriş pivotta yapılır) — rapor genelinde tek sayı
+            _riskp = ((mv_pivot - mv_stop) / mv_pivot * 100.0
+                      if (np.isfinite(mv_pivot) and mv_pivot > 0) else (_px - mv_stop) / _px * 100.0)
             _kirtxt = ("bugün" if not mv_kir_yas else _gun_ifadesi(mv_kir_yas))
             _hactxt = (f", hacim {mv_kir_hacim:.1f}×" if np.isfinite(mv_kir_hacim) else "")
             verdict = (f"Giriş koşulları oluştu — VCP tabanı ({mv_dalga} daralma dalgası) "
@@ -2083,14 +2085,14 @@ def _status_tag(
     if consolidation:
         return "🔵 KONSOLİDASYON"
     if in_entry and timing_score >= 70:
-        return "🟢 ALIM BÖLGESİNDE"
+        return "🟢 FİYAT BANT İÇİNDE"
     if is_extended and timing_score < 50:
-        return "⚫ UZAMIŞ — KOVALAMA"
-    return "🟡 PULLBACK BEKLENİYOR"
+        return "⚫ ORTALAMALARDAN UZAK"
+    return "🟡 BANT DIŞINDA"
 
 
 # =========================================================
-# MINERVINI TREND ŞABLONU (V7.7) — 8 kriterli geç/kal listesi
+# MINERVINI TREND ŞABLONU (V7.7) — 7 kriterli geç/kal listesi
 # Mevcut setup skoru pullback mantığından kalmaydı: uzama ve volatiliteyi
 # cezalandırıyor, dar baz/kırılım bonusu veriyordu — VCP motoruyla çelişiyor
 # (kırılım anında fiyat EMA50 üstünde olur, bu kusur değil şarttır).
@@ -2133,7 +2135,7 @@ def trend_template(ddf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[s
             ("SMA150 > SMA200", bool(e150 > e200), f"{e150:.2f} > {e200:.2f}", True),
             ("SMA200 en az 1 aydır yukarı",
              bool(np.isfinite(e200_p) and e200 > e200_p),
-             f"{e200:.2f} ← {e200_p:.2f}" if np.isfinite(e200_p) else "veri yok", True),
+             f"{e200:.2f} (1 ay önce {e200_p:.2f})" if np.isfinite(e200_p) else "veri yok", True),
             ("SMA50 > SMA150 > SMA200", bool(e50 > e150 > e200),
              f"{e50:.2f} > {e150:.2f} > {e200:.2f}", True),
             ("Fiyat SMA50 üstünde", bool(c > e50), f"{c:.2f} > {e50:.2f}", True),
@@ -3112,9 +3114,11 @@ def build_pdf_bytes_single(
             plan_left = [
                 ["Giriş (pivot)",   f"{_vp:.2f}"],
                 ["Taban dibi",       f"{_vd:.2f}"],
-                ["Stop (dibin %1 altı)", f"{_vstop:.2f}  (risk %{_vR/_vp*100:.1f})"],
+                ["Stop (dibin %1 altı)", f"{_vstop:.2f}  (pivottan risk %{_vR/_vp*100:.1f})"],
                 ["TP1 (2R)",        f"{_vtp1:.2f}"],
                 ["TP2 (4R)",        f"{_vtp2:.2f}"],
+                ["Not", "Seviyeler pivot girişine göredir; farklı fiyattan "
+                        "alırsan R yeniden hesaplanmalı."],
             ]
             try:
                 if ps and np.isfinite(ps.get("account", float("nan"))) and ps["account"] > 0:
@@ -3200,6 +3204,7 @@ def build_pdf_bytes_single(
 
     # V7.7: Minervini Trend Şablonu — 8 kriterli geç/kal listesi
     if mtf and mtf.get("trend_tpl"):
+        story.append(CondPageBreak(6.5 * cm))   # başlık ve tablo bölünmesin
         story += _section_header("Minervini Trend Şablonu", sty, page_w)
         _tt_rows = [[("EVET  " if g else "HAYIR  ") + ad, det] for ad, g, det in mtf["trend_tpl"]]
         _sk = mtf.get("trend_tpl_skor", 0)
@@ -3249,8 +3254,8 @@ def build_pdf_bytes_single(
     elif mtf and mtf.get("gate") == "ACIK":
         # V7.5: Hüküm giriş veriyorsa senaryo "kovalama olur" diyemez — tek ses.
         scenario_src = (
-            "VCP pivotu kırıldı; giriş koşulları oluştu. Uygulama: pozisyon tabloda hesaplanan "
-            "adet üzerinden alınır, stop emri taban dibinin %1 altına aynı gün girilir. Yönetim: TP1'e "
+            "VCP pivotu kırıldı; giriş koşulları oluştu. Uygulama: giriş pivot seviyesinden "
+            "yapılır, stop emri taban dibinin %1 altına aynı gün girilir. Yönetim: TP1'e "
             "ulaşıldığında hisse hâlâ güçlüyse (RSI ve haftalık yapı korunuyorsa) taşınır ve "
             "stop girişe çekilir, güç kaybolmuşsa satılır. Kâr %10'u geçtiğinde iz süren stop "
             "devreye girer. Haftalık yapı büyük bozulma gösterirse (setup 40 altı veya kapanış "
@@ -3629,10 +3634,10 @@ def held_action_comment(
         return "RİSK AZALT", "Trend bozuk → ekleme yok; stopu sıkılaştır / pozisyon azaltmayı düşün."
 
     if plan.status_tag.startswith("⚫"):
-        return "TUT", "Uzamış → ekleme yok; pullback ile yeniden değerlendir."
+        return "TUT", "Fiyat ortalamalardan uzamış → ekleme yok; yeni bir taban oluşmasını bekle."
 
     if plan.status_tag.startswith("🔵"):
-        return "TUT/İZLE", "Sıkışma → kırılım/bozulma gelene kadar sabır."
+        return "TUT/İZLE", "Konsolidasyon sürüyor → pivot kırılımı veya bozulma gelene kadar sabır."
 
     if np.isfinite(user_tp2) and price >= user_tp2:
         return "KARAR NOKTASI", "TP2 bölgesi → momentum bozulursa kısmi/çıkış; korunuyorsa trailing stop."
@@ -3643,7 +3648,7 @@ def held_action_comment(
     if np.isfinite(user_stop) and (price - user_stop) / price < 0.03:
         return "DİKKAT", "Stop çok yakın → oynaklık stoplatabilir. (Gevşetme yok; pozisyon boyunu düşün.)"
 
-    return "TUT", "Koşullar fena değil → plana sadık kal; ekleme için giriş bandı ve timing bekle."
+    return "TUT", "Koşullar fena değil → plana sadık kal; ekleme için yeni bir VCP kırılımı bekle."
 
 
 # =========================================================
@@ -4126,7 +4131,7 @@ with st.sidebar:
 
     # NEW (V6.3): MTF ve bilanço kontrol seçenekleri
     show_mtf = st.checkbox("MTF özet (Haftalık + Günlük)", value=True)
-    st.caption("Tek hisse analizinde haftalık setup + günlük timing özeti. +1-2 API çağrısı (cache'li).")
+    st.caption("Tek hisse analizinde trend şablonu + VCP özeti. +1-2 API çağrısı (cache'li).")
     check_earnings = st.checkbox("Bilanço (earnings) kontrolü", value=True)
     st.caption("Yaklaşan bilanço uyarısı. Önce Twelve Data, olmazsa Finnhub denenir (1 saat cache'li).")
 
@@ -5135,7 +5140,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             v6 = ((setup_arr >= 60) & (rs_ser.values >= 45) & v2sig
                   & (in_band | (armed & near_ok & ext_arr)) & np.isfinite(lo_arr))
             sigs = dict(sigs)
-            sigs["v6 · CANLI KURAL (kurulu pencere)"] = pd.Series(v6, index=d.index)
+            sigs["v6 · eski pullback girişi"] = pd.Series(v6, index=d.index)
 
             # ---- v8: GERÇEK VCP (çok dalgalı taban + pivot kırılımı) ----
             # Hız: her barda VCP aramak pahalı (~9ms). Sadece "kırılım adayı"
@@ -5183,7 +5188,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                 # (Önce fail-open'dı: hatalı veri "trend uygun" sayılıyordu.)
                 _tt_ok = np.zeros(len(d), dtype=bool)
             v8 = v8 & _tt_ok & (rs_ser.values >= 45)
-            sigs["v8 · GERÇEK VCP (çok dalgalı)"] = pd.Series(v8, index=d.index)
+            sigs["v8 · CANLI KURAL (VCP + trend şablonu)"] = pd.Series(v8, index=d.index)
 
             # ---- v7: TABAN + PİVOT KIRILIMI (Minervini girişi) ----
             # Aynı kalite kapısı (setup≥60 + RS≥45), farklı ALIM NOKTASI.
@@ -5219,8 +5224,8 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             # Gerçek kullanıcı simülasyonu (stop/TP/iz süren) ancak fiyat yoluyla
             # yapılabilir; özet metrikler (MFE/MAE) yetmez.
             SIM_MAX_HOLD = 60
-            for _kural, _mask in (("v6 · mevcut giriş", v6), ("v7 · taban+pivot", v7),
-                                  ("v8 · gerçek VCP", v8)):
+            for _kural, _mask in (("v6 · eski pullback girişi", v6), ("v7 · basit pivot (eski)", v7),
+                                  ("v8 · CANLI KURAL (VCP)", v8)):
                 for i in np.where(_mask)[0]:
                     i = int(i)
                     if i < 60 or i >= len(d) - 5:
@@ -5702,7 +5707,12 @@ with tab_single:
                                 "Endekse Üstünlük 12A": f"{lead.get('edge_12m'):+.1f}%" if np.isfinite(lead.get('edge_12m', np.nan)) else "—",
                             })
 
-                        st.subheader("📌 İşlem Planı")
+                        st.subheader("📌 Teknik Seviyeler (bağımsız analiz)")
+                        st.caption(
+                            "Bu bölüm seçilen zaman diliminin kendi analizidir; VCP kapısı "
+                            "ve alım kararı Swing modunda verilir. Buradaki seviyeler bilgi "
+                            "amaçlıdır, giriş sinyali değildir."
+                        )
                         table = pd.DataFrame({
                             "Parametre": ["Giriş Bölgesi", "Giriş Mesafesi", "Stop", "TP1", "TP2", "R/R (TP1)", "R/R (TP2)", "Kapasite"],
                             "Değer": [
@@ -5751,7 +5761,7 @@ with tab_single:
                                          b.breakout_bonus],
                                 "Maks": [30, 20, 20, 15, 15, 10, 5, 7, 8],
                             }))
-                            st.caption("Bu döküm pullback döneminden kalmadır; kayıtlarda "
+                            st.caption("Bu döküm eski skorlama sisteminden kalmadır; kayıtlarda "
                                        "karşılaştırma için tutulur, kapı kararını etkilemez.")
 
                         st.subheader("🧭 Senaryo")
@@ -6461,10 +6471,10 @@ with tab_retro:
             if not _sim:
                 st.info("Simülasyon verisi yok — retro-testi yeniden çalıştır (v6 sinyalleri gerekiyor).")
             else:
-                _kurallar = sorted({r.get("kural", "v6 · mevcut giriş") for r in _sim})
+                _kurallar = sorted({r.get("kural", "v6 · eski pullback girişi") for r in _sim})
                 _kural_sec = st.radio("Simüle edilecek GİRİŞ kuralı", _kurallar,
                                       horizontal=True, key="sim_kural")
-                _sim = [r for r in _sim if r.get("kural", "v6 · mevcut giriş") == _kural_sec]
+                _sim = [r for r in _sim if r.get("kural", "v6 · eski pullback girişi") == _kural_sec]
                 st.caption(f"{len(_sim)} sinyal · v7'de stop TABAN DİBİ (yapısal), hedefler 2R/4R")
                 cA, cB = st.columns(2)
                 _cap = cA.number_input("Sermaye ($)", 1000, 1000000, 10000, 1000, key="sim_cap")
