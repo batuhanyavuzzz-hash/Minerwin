@@ -6645,26 +6645,25 @@ with tab_scan:
                                  and float(_m.get("mv_pivot_risk")) > MAX_BASE_RISK*100) else ""),
                             (f"bilanço {int(_ed)} gün içinde"
                              if (np.isfinite(_ed) and _ed <= ENTRY_EARNINGS_BLOCK_DAYS) else ""),
-                            (f"fiyat pivotun %{_uzak:.1f} üstünde — kovalama"
-                             if (np.isfinite(_uzak) and _uzak > 5 and _m.get("mv_kir_yas") not in (None, ""))
-                             else ""),
+                            # Kırılım kaydı olmasa da fiyat pivotun çok üstündeyse
+                            # kurulum geçerli değildir (kırılım 10 günü aşmış olabilir).
+                            (f"fiyat pivotun %{_uzak:.1f} üstünde — giriş noktası geçilmiş"
+                             if (np.isfinite(_uzak) and _uzak > 5) else ""),
                             (f"RS {float(_m.get('rs_rating')):.0f} < 45"
                              if (np.isfinite(_m.get("rs_rating", np.nan))
                                  and float(_m.get("rs_rating")) < 45) else ""),
                         ] if x]),
-                        "Aksiyon": ("✅ uygun" if (
-                            _m.get("trend_tpl_gecti")
-                            and not _m.get("mv_kir_gecersiz")
-                            and np.isfinite(_m.get("mv_pivot_risk", np.nan))
-                            and float(_m.get("mv_pivot_risk")) <= MAX_BASE_RISK*100
-                            and not (np.isfinite(_ed) and _ed <= ENTRY_EARNINGS_BLOCK_DAYS)
-                            and np.isfinite(_m.get("rs_rating", np.nan))
-                            and float(_m.get("rs_rating")) >= 45
-                            and _m.get("gate") in ("ACIK", "BEKLEMEDE")
-                        ) else "⚠️ uygun değil"),
+                        # AKSİYON: tek kural — engel varsa uygun DEĞİL.
+                        # (Önce ayrı bir koşul listesi vardı ve "Neden" dolu olsa
+                        #  bile "uygun" diyebiliyordu — çelişkiliydi.)
+                        "Aksiyon": "",   # aşağıda Neden'e göre doldurulur
                         "_ham_guc": (float(_m.get("rs_edge_w", np.nan))
                                      if np.isfinite(_m.get("rs_edge_w", np.nan)) else np.nan),
                     }
+                    # Aksiyon, Neden'den türer: tek kaynak, çelişki imkânsız.
+                    _row["Aksiyon"] = ("⚠️ uygun değil" if _row.get("Neden")
+                                       else ("✅ uygun" if _row.get("Kapı") in ("ACIK", "BEKLEMEDE")
+                                             else "⚠️ uygun değil"))
                     rows = [r for r in rows if r["Ticker"] != _sym] + [_row]
                     _ardisik_kota = 0
             except Exception as e:
