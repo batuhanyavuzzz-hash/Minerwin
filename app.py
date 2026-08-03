@@ -1227,7 +1227,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             _hactxt = (f", hacim {mv_kir_hacim:.1f}×" if np.isfinite(mv_kir_hacim) else "")
             verdict = (f"Giriş koşulları oluştu — VCP tabanı ({mv_dalga} daralma dalgası) "
                        f"tamamlandı, pivot {mv_pivot:.2f} {_kirtxt} kırıldı{_hactxt}. "
-                       f"Stop {mv_stop:.2f} (taban dibi, risk %{_riskp:.1f}).{rs_note}")
+                       f"Stop {mv_stop:.2f} — taban dibinin %1 altı (risk %{_riskp:.1f}).{rs_note}")
             verdict_kind = "success"
         elif mv_break and np.isfinite(mv_stop) and np.isfinite(mv_pivot):
             # Kırılım var ama stop çok uzak → Minervini risk kuralı gereği giriş yok
@@ -2368,7 +2368,7 @@ def build_trade_plan(df: pd.DataFrame, low_52w: float, high_52w: float) -> Trade
     )
     # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse bunu açıkça belirt
     if targets_dbg.get("tp2_floor_override"):
-        targets_reason += " · ⚠️ TP2, 3.5R zemin garantisiyle tavanın üzerine yükseltildi — hedefi temkinli değerlendir."
+        targets_reason += " · TP2 zemin garantisiyle yükseltildi."
 
     stop_reason = (
         f"Stop (aktif): noise(ATR) + yapısal(invalidation:{stop_dbg.get('inv_src')}) + dinamik_cap(%{stop_dbg.get('max_risk_pct'):.0f}) "
@@ -3030,37 +3030,6 @@ def build_pdf_bytes_single(
     story.append(_kpi_row(row3_items, sty, page_w, accent_colors=[regime_clr, dist_clr, earn_clr]))
     story.append(Spacer(1, 6))
 
-    if plan.high_vol_warning:
-        warn_tbl = Table(
-            [[Paragraph("UYARI: Yüksek volatilite — stop cap devrede, pozisyon boyutunu küçült.", sty["warn"])]],
-            colWidths=[page_w],
-        )
-        warn_tbl.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0), (-1,-1), _C_AMBER_BG),
-            ("BOX",           (0,0), (-1,-1), 0.5, _C_AMBER),
-            ("LEFTPADDING",   (0,0), (-1,-1), 10),
-            ("TOPPADDING",    (0,0), (-1,-1), 5),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-        ]))
-        story.append(warn_tbl)
-        story.append(Spacer(1, 6))
-
-    # FIX (V6.2.1): TP2 zemin garantisi cap'i deldiyse PDF'te de uyarı göster
-    if plan.debug.get("targets_debug", {}).get("tp2_floor_override"):
-        tp2_warn_tbl = Table(
-            [[Paragraph("NOT: TP2, 3.5R zemin garantisiyle tarihsel tavanın üzerine yükseltildi — hedefi temkinli değerlendir.", sty["warn"])]],
-            colWidths=[page_w],
-        )
-        tp2_warn_tbl.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0), (-1,-1), _C_AMBER_BG),
-            ("BOX",           (0,0), (-1,-1), 0.5, _C_AMBER),
-            ("LEFTPADDING",   (0,0), (-1,-1), 10),
-            ("TOPPADDING",    (0,0), (-1,-1), 5),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-        ]))
-        story.append(tp2_warn_tbl)
-        story.append(Spacer(1, 6))
-
     # NEW (V6.3.3): Yaklaşan bilanço uyarı kutusu (≤14 gün)
     if earn and earn.get("days") is not None and earn["days"] <= EARNINGS_WARN_DAYS:
         earn_warn_tbl = Table(
@@ -3124,7 +3093,8 @@ def build_pdf_bytes_single(
             _vtp1, _vtp2 = _vp + 2 * _vR, _vp + 4 * _vR
             plan_left = [
                 ["Giriş (pivot)",   f"{_vp:.2f}"],
-                ["Stop (taban dibi)", f"{_vstop:.2f}  (risk %{_vR/_vp*100:.1f})"],
+                ["Taban dibi",       f"{_vd:.2f}"],
+                ["Stop (dibin %1 altı)", f"{_vstop:.2f}  (risk %{_vR/_vp*100:.1f})"],
                 ["TP1 (2R)",        f"{_vtp1:.2f}"],
                 ["TP2 (4R)",        f"{_vtp2:.2f}"],
             ]
@@ -4571,10 +4541,10 @@ RETRO_WEEKLY_BARS = 200
 #   · Dipler yükselen (her dip öncekinden yüksek ya da eşit)
 #   · Hacim geç dalgalarda erken dalgalardan düşük (kuruma)
 #   · Son daralma ATR'ye göre dar (mutlak % değil — volatiliteye normalize)
-#   · Pivot = son dalganın tepesi; stop = son dalganın dibi (YAPISAL)
+#   · Pivot = SON DARALMANIN tepesi; stop = son daralmanın dibinin %1 altı
 # =========================================================
 VCP_MIN_WAVES = 2
-VCP_MAX_WAVES = 4
+VCP_MAX_WAVES = 6      # kaynaklar 2-6 daralma diyor (önce 4 idi)
 VCP_BREAK_LOOKBACK = 10   # kırılım kaç gün geriye kadar aranır
 VCP_MIN_BARS = 20      # ~4 hafta
 VCP_MAX_BARS = 100     # ~20 hafta
@@ -4648,7 +4618,11 @@ def _vcp_at(d: pd.DataFrame, i: int, atr_pct: float) -> Optional[Dict[str, Any]]
         if len(v1) and len(v2) and v2.mean() >= v1.mean():
             continue
 
-        pivot = float(max(hw[w["t"]] for w in temiz))
+        # PİVOT = SON DARALMANIN TEPESİ (tüm dalgaların en yükseği değil).
+        # Minervini'de pivot, son daralmanın direnç seviyesidir; o an satıcıların
+        # bulunduğu son bariyer odur. Tabanın haftalar önceki en yüksek noktası
+        # aynı anlamı taşımaz ve girişi gereksiz yere geciktirir.
+        pivot = float(hw[temiz[-1]["t"]])
         taban_dip = float(temiz[-1]["dip"])
         aday = {"pivot": pivot, "dip": taban_dip, "dalga": len(temiz),
                 "bar": L, "son_daralma": son_derin,
@@ -4700,17 +4674,28 @@ def detect_vcp(d: pd.DataFrame, i: Optional[int] = None) -> Dict[str, Any]:
         kir_yas = None
         if kir_gun is not None:
             kir_yas = i - kir_gun
-            # (a) Kırılımdan sonra fiyat TABAN DİBİNİN altına indiyse kırılım geçersiz
-            #     (stop tetiklenecek seviye; throwback affedilir, çöküş affedilmez)
-            if float(np.min(low[kir_gun:i + 1])) < dip:
-                kir_gecersiz = "kırılım sonrası taban dibinin altına inildi"
-            # (b) Hacim teyidi yoksa kırılım sayılmaz
-            elif not (np.isfinite(kir_hacim_x) and kir_hacim_x >= 1.4):
+            # (a) Hacim teyidi — kırılım günü hacmi ortalamanın 1.4 katı olmalı
+            if not (np.isfinite(kir_hacim_x) and kir_hacim_x >= 1.4):
                 kir_gecersiz = (f"kırılım günü hacim yetersiz "
                                 f"({kir_hacim_x:.1f}× — en az 1.4× gerekir)"
                                 if np.isfinite(kir_hacim_x) else "kırılım günü hacim verisi yok")
+            # (b) Taban dibinin altına inildiyse yapı bozuldu (stop seviyesi)
+            elif float(np.min(low[kir_gun:i + 1])) < dip:
+                kir_gecersiz = "kırılım sonrası taban dibinin altına inildi"
             else:
-                kirilim = True
+                # (c) Minervini: ağır satış hacmiyle hızlı başarısızlık → arz emilmemiş.
+                #     Sakin geri çekilme (retest) normaldir, kırılımı geçersiz kılmaz.
+                _agir = False
+                if kir_gun < i and c[i] < pivot:
+                    _v50b = float(np.nanmean(v[max(0, kir_gun - 50):kir_gun]))
+                    if np.isfinite(_v50b) and _v50b > 0:
+                        _agir = any(c[k] < c[k - 1] and v[k] > 1.5 * _v50b
+                                    for k in range(kir_gun + 1, i + 1))
+                if _agir:
+                    kir_gecersiz = ("kırılım sonrası ağır satış hacmiyle pivot altına "
+                                    "dönüldü — arz emilmemiş")
+                else:
+                    kirilim = True
 
         return {"var": True, "kirilim": kirilim, "pivot": pivot, "dip": dip,
                 "dalga": res["dalga"], "son_daralma": res["son_daralma"],
@@ -6155,7 +6140,7 @@ with tab_portfolio:
                 if not out.empty and "Yüksek Vol Uyarı" in out.columns:
                     vol_warn_tickers = out[out["Yüksek Vol Uyarı"] == "⚠️"]["Ticker"].tolist()
                     if vol_warn_tickers:
-                        st.warning(f"⚠️ Yüksek volatilite uyarısı: **{', '.join(vol_warn_tickers)}** — stop cap devrede, pozisyon boylarını kontrol et.")
+                        st.warning(f"⚠️ Yüksek volatilite uyarısı: **{', '.join(vol_warn_tickers)}** — pozisyon boylarını kontrol et.")
 
                 # NEW (V6.3): Yaklaşan bilanço toplu uyarısı
                 if check_earnings and not out.empty and "Bilanço" in out.columns:
@@ -6564,14 +6549,15 @@ with tab_scan:
                     _px = float(_m.get("last_close", float("nan")))
                     _pv = float(_m.get("mv_pivot", float("nan")))
                     _dp = float(_m.get("mv_dip", float("nan")))
-                    _uzak = (_pv / _px - 1) * 100 if (np.isfinite(_pv) and _px > 0) else float("nan")
+                    # POZİTİF = fiyat pivotun ÜSTÜNDE, negatif = altında (işaret düzeltildi)
+                    _uzak = (_px / _pv - 1) * 100 if (np.isfinite(_pv) and _pv > 0) else float("nan")
                     _row = {
                         "Ticker": _sym,
                         "Durum": _m.get("vcp_durum", "⚪ KURULUM YOK"),
                         "Kapı": _m.get("gate", ""),
                         "Fiyat": round(_px, 2) if np.isfinite(_px) else "",
                         "Pivot": round(_pv, 2) if np.isfinite(_pv) else "",
-                        "Pivota %": round(_uzak, 1) if np.isfinite(_uzak) else "",
+                        "Pivot farkı %": round(_uzak, 1) if np.isfinite(_uzak) else "",
                         "Stop": (round(float(_m.get("mv_stop", np.nan)), 2)
                                  if np.isfinite(_m.get("mv_stop", np.nan)) else ""),
                         "Pivot Riski %": (round(float(_m.get("mv_pivot_risk", np.nan)), 1)
@@ -6587,8 +6573,29 @@ with tab_scan:
                         "RS": round(float(_m.get("rs_rating", np.nan)), 0)
                               if np.isfinite(_m.get("rs_rating", np.nan)) else "",
                         "Bilanço": (f"{int(_ed)} gün" if np.isfinite(_ed) else ""),
-                        "Neden": (_m.get("mv_kir_gecersiz", "")
-                                  or (_m.get("trend_tpl_eksik", "") if not _m.get("trend_tpl_gecti") else "")),
+                        "Neden": " · ".join([x for x in [
+                            (_m.get("trend_tpl_eksik", "") if not _m.get("trend_tpl_gecti") else ""),
+                            _m.get("mv_kir_gecersiz", ""),
+                            (f"pivot riski %{float(_m.get('mv_pivot_risk')):.1f} > "
+                             f"%{MAX_BASE_RISK*100:.0f}"
+                             if (np.isfinite(_m.get("mv_pivot_risk", np.nan))
+                                 and float(_m.get("mv_pivot_risk")) > MAX_BASE_RISK*100) else ""),
+                            (f"bilanço {int(_ed)} gün içinde"
+                             if (np.isfinite(_ed) and _ed <= ENTRY_EARNINGS_BLOCK_DAYS) else ""),
+                            (f"fiyat pivotun %{_uzak:.1f} üstünde — kovalama"
+                             if (np.isfinite(_uzak) and _uzak > 5 and _m.get("mv_kir_yas") not in (None, ""))
+                             else ""),
+                            (f"RS {float(_m.get('rs_rating')):.0f} < 45"
+                             if (np.isfinite(_m.get("rs_rating", np.nan))
+                                 and float(_m.get("rs_rating")) < 45) else ""),
+                        ] if x]),
+                        "Aksiyon": ("✅ uygun" if (
+                            _m.get("trend_tpl_gecti")
+                            and not _m.get("mv_kir_gecersiz")
+                            and np.isfinite(_m.get("mv_pivot_risk", np.nan))
+                            and float(_m.get("mv_pivot_risk")) <= MAX_BASE_RISK*100
+                            and not (np.isfinite(_ed) and _ed <= ENTRY_EARNINGS_BLOCK_DAYS)
+                        ) else "⚠️ uygun değil"),
                         "_ham_guc": (float(_m.get("rs_edge_w", np.nan))
                                      if np.isfinite(_m.get("rs_edge_w", np.nan)) else np.nan),
                     }
@@ -6645,8 +6652,12 @@ with tab_scan:
                         st.session_state["_scan_kaydedildi"] = len(_rows)
                         st.caption("☁️ Son tarama Gist'e kaydedildi — oturum kapansa da korunur.")
             _df = _df.drop(columns=["_ham_guc"])
-        _sira = {"🟢 PİVOT KIRILDI": 0, "🟡 TABAN KURULU": 1, "⚪ kurulum yok": 2, "HATA": 3}
-        _df["_s"] = _df["Durum"].map(_sira).fillna(9)
+        _df["_s"] = _df["Durum"].astype(str).map(
+            lambda x: 0 if "KIRILDI" in x else 1 if "TABAN KURULU" in x
+            else 2 if "OLUŞUYOR" in x else 3 if "KURULUM YOK" in x else 9)
+        if "Aksiyon" in _df.columns:
+            _df["_s"] = _df["_s"] + _df["Aksiyon"].astype(str).map(
+                lambda x: 0 if "uygun" == x.replace("✅ ", "") else 0.5)
         _df["_u"] = pd.to_numeric(_df["Pivota %"], errors="coerce").abs()
         _df = _df.sort_values(["_s", "_u"]).drop(columns=["_s", "_u"])
         _kir = (_df["Durum"] == "🟢 PİVOT KIRILDI").sum()
