@@ -273,11 +273,11 @@ if isinstance(GITHUB_TOKEN, str):
 # eşiklerinden biri (RS, setup, uzamış %8, dağıtım ≥6...) değiştirildiğinde
 # BU SAYI ELLE ARTIRILIR ki karne "hangi kural dönemine ait karar" bilsin.
 STOP_TIGHTEN = 0.75      # kalibrasyon: stop mesafesi ×0.75 (125 hisse/3 yıl simülasyonu)
-MAX_HOLD_DAYS = 40       # kalibrasyon: pozisyon en fazla 40 işlem günü taşınır
+MAX_HOLD_DAYS = 60       # simülasyondaki fiyat yoluyla aynı (kazananı erken kesme)
 # Minervini ölçüsü: tek işlemde kayıp %10'u geçmemeli (ideali %5-8).
 # Retro defterinde risk medyanı %8.5-9.7, uçlar %16'ya kadar çıkıyordu —
 # sınır kırılım anında uygulanmadığı için. Artık hem taban hem kırılımda geçerli.
-MAX_BASE_RISK = 0.10   # taban dibi girişten en fazla %12 uzakta (VCP darlığı)
+MAX_BASE_RISK = 0.10   # giriş-stop mesafesi üst sınırı: %10
 def _daily_chase_check(ddf: pd.DataFrame, d_plan) -> Dict[str, Any]:
     """Günlük tarafta kovalama freni. Döner: ok (teyit geçerli mi) + gerekçe."""
     out = {"ok": True, "sebep": "", "risk_pct": float("nan"),
@@ -1011,6 +1011,11 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema50"] = ema(df["close"], 50)
     df["ema150"] = ema(df["close"], 150)
     df["ema200"] = ema(df["close"], 200)
+    # Minervini Trend Şablonu BASİT hareketli ortalama (SMA) kullanır.
+    # EMA'lar VCP/plan tarafında kalır; şablon SMA ile hesaplanır.
+    df["sma50"] = df["close"].rolling(50).mean()
+    df["sma150"] = df["close"].rolling(150).mean()
+    df["sma200"] = df["close"].rolling(200).mean()
     df["rsi14"] = rsi(df["close"], 14)
     df["atr14"] = atr(df, 14)
     return df
@@ -1142,6 +1147,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
         mv_kir_hacim = float("nan")
         mv_kir_gecersiz = ""
         mv_kir_tarih = ""
+        mv_hata = ""
         mv_pivot_risk = float("nan")   # KIRILIM ÖNCESİ risk: (pivot - stop) / pivot
         mv_base = False         # taban kurulu mu (daralma + hacim kuruması)
         mv_pivot = float("nan")
@@ -1157,6 +1163,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             mv_kir_hacim = _vc.get("kir_hacim_x", float("nan"))
             mv_kir_gecersiz = _vc.get("kir_gecersiz", "")
             mv_kir_tarih = _vc.get("kir_tarih", "")
+            mv_hata = _vc.get("hata", "")
             mv_pivot = float(_vc.get("pivot", float("nan")))
             mv_dip = float(_vc.get("dip", float("nan")))
             mv_dalga = int(_vc.get("dalga", 0))
@@ -1266,7 +1273,8 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
         else:
             # Yapı uygun ama kurulum yok — sebebi yazılır
             gate = "BEKLEMEDE"
-            _neden = "henüz konsolidasyon oluşmamış"
+            _neden = (f"VCP hesabı yapılamadı ({mv_hata})" if mv_hata
+                      else "henüz konsolidasyon oluşmamış")
             try:
                 if np.isfinite(mv_pivot) and np.isfinite(mv_dip) and mv_pivot > 0:
                     _d = (mv_pivot - mv_dip) / mv_pivot * 100.0
@@ -2110,22 +2118,25 @@ def trend_template(ddf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[s
         # çevirir ve kriterleri olması gerekenden 5 kat yavaşlatır.
         son = ddf.iloc[-1]
         c = float(son["close"])
-        e50, e150, e200 = float(son["ema50"]), float(son["ema150"]), float(son["ema200"])
-        # EMA200 eğimi: ~1 ay (21 işlem günü) önceye göre
-        e200_p = float(ddf["ema200"].iloc[-21]) if len(ddf) >= 21 else float("nan")
+        e50 = float(son.get("sma50", son["ema50"]))
+        e150 = float(son.get("sma150", son["ema150"]))
+        e200 = float(son.get("sma200", son["ema200"]))
+        _s200 = ddf["sma200"] if "sma200" in ddf.columns else ddf["ema200"]
+        # SMA200 eğimi: ~1 ay (21 işlem günü) önceye göre
+        e200_p = float(_s200.iloc[-21]) if len(ddf) >= 21 else float("nan")
         dip_u = ((c / low_52w - 1) * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
         zir_u = ((1 - c / high_52w) * 100) if (np.isfinite(high_52w) and high_52w > 0) else float("nan")
 
         kriterler = [
-            ("Fiyat EMA150 ve EMA200 üstünde", bool(c > e150 and c > e200),
+            ("Fiyat SMA150 ve SMA200 üstünde", bool(c > e150 and c > e200),
              f"{c:.2f} vs {e150:.2f} / {e200:.2f}", True),
-            ("EMA150 > EMA200", bool(e150 > e200), f"{e150:.2f} > {e200:.2f}", True),
-            ("EMA200 en az 1 aydır yukarı",
+            ("SMA150 > SMA200", bool(e150 > e200), f"{e150:.2f} > {e200:.2f}", True),
+            ("SMA200 en az 1 aydır yukarı",
              bool(np.isfinite(e200_p) and e200 > e200_p),
              f"{e200:.2f} ← {e200_p:.2f}" if np.isfinite(e200_p) else "veri yok", True),
-            ("EMA50 > EMA150 > EMA200", bool(e50 > e150 > e200),
+            ("SMA50 > SMA150 > SMA200", bool(e50 > e150 > e200),
              f"{e50:.2f} > {e150:.2f} > {e200:.2f}", True),
-            ("Fiyat EMA50 üstünde", bool(c > e50), f"{c:.2f} > {e50:.2f}", True),
+            ("Fiyat SMA50 üstünde", bool(c > e50), f"{c:.2f} > {e50:.2f}", True),
             (f"52H dipten en az %{TT_DIP_MIN:.0f} yukarıda",
              bool(np.isfinite(dip_u) and dip_u >= TT_DIP_MIN),
              f"%{dip_u:.0f}" if np.isfinite(dip_u) else "—", False),
@@ -3178,7 +3189,7 @@ def build_pdf_bytes_single(
             mtf_rows.insert(0, ["VCP Pivot (giriş tetiği)", f"{_pv2:.2f}"])
             _dp2 = mtf.get("mv_dip", float("nan"))
             if np.isfinite(_dp2):
-                mtf_rows.insert(1, ["VCP Taban Dibi (stop)", f"{_dp2:.2f}"])
+                mtf_rows.insert(1, ["VCP Taban Dibi", f"{_dp2:.2f}  (stop: {_dp2*0.99:.2f})"])
             if mtf.get("mv_dalga"):
                 _sd2 = mtf.get("mv_son_daralma", float("nan"))
                 mtf_rows.insert(2, ["VCP Yapısı",
@@ -3219,7 +3230,7 @@ def build_pdf_bytes_single(
                     scenario_src = (
                         f"Giriş için VCP pivotunun ({_pv:.2f}) hacimle kırılması beklenir. "
                         f"Alarm bu seviyeye kurulur. Kırılım günü haftalık kriterler korunuyorsa "
-                        f"giriş değerlendirilir; stop tabanın dibine yerleştirilir. Kırılım "
+                        f"giriş değerlendirilir; stop tabanın dibinin %1 altına yerleştirilir. Kırılım "
                         f"gelmeden yapılan alım kovalamaya girer."
                     )
                 else:
@@ -3239,7 +3250,7 @@ def build_pdf_bytes_single(
         # V7.5: Hüküm giriş veriyorsa senaryo "kovalama olur" diyemez — tek ses.
         scenario_src = (
             "VCP pivotu kırıldı; giriş koşulları oluştu. Uygulama: pozisyon tabloda hesaplanan "
-            "adet üzerinden alınır, stop emri taban dibine aynı gün girilir. Yönetim: TP1'e "
+            "adet üzerinden alınır, stop emri taban dibinin %1 altına aynı gün girilir. Yönetim: TP1'e "
             "ulaşıldığında hisse hâlâ güçlüyse (RSI ve haftalık yapı korunuyorsa) taşınır ve "
             "stop girişe çekilir, güç kaybolmuşsa satılır. Kâr %10'u geçtiğinde iz süren stop "
             "devreye girer. Haftalık yapı büyük bozulma gösterirse (setup 40 altı veya kapanış "
@@ -4391,7 +4402,7 @@ def render_swing_mode(bars_n: int, use_quote: bool, use_earnings: bool,
             st.warning if mtf["verdict_kind"] == "warning" else st.error)
         box(f"**DURUM:** {mtf['verdict']}")
         st.caption(f"Kural seti **{RULE_VER}** — Minervini: VCP tabanı + pivot kırılımı, "
-                   f"stop taban dibinde. {mtf.get('vcp_aciklama', '')}")
+                   f"stop taban dibinin %1 altında. {mtf.get('vcp_aciklama', '')}")
 
     # ---- 2) YAPI ----
     st.markdown("#### Yapı")
@@ -4711,7 +4722,9 @@ def detect_vcp(d: pd.DataFrame, i: Optional[int] = None) -> Dict[str, Any]:
                 "kir_gecersiz": kir_gecersiz,
                 "kir_tarih": (str(pd.to_datetime(d["time"].iloc[kir_gun]).date())
                               if kir_gun is not None else "")}
-    except Exception:
+    except Exception as _e:
+        bos = dict(bos)
+        bos["hata"] = f"VCP hesabı başarısız: {type(_e).__name__}"
         return bos
 
 
@@ -4937,10 +4950,17 @@ def simulate_portfolio(sim_rows: list, sermaye: float = 10000.0, max_poz: int = 
                 continue
 
             # (5) GİRİŞ: ertesi gün açılışı
+            # GİRİŞ: ertesi gün açılışı. Stop yapısaldır (taban dibi) — değişmez;
+            # ama RİSK ve HEDEFLER gerçek giriş fiyatından yeniden hesaplanır.
+            # Önce önceki kapanıştan hesaplanmış TP'ler kullanılıyordu.
             giris = float(r.get("acilis_ertesi") or r["giris"])
-            stop, tp1, tp2 = float(r["stop"]), float(r["tp1"]), float(r["tp2"])
+            stop = float(r["stop"])
             if not (giris > stop > 0):
                 continue
+            _R_giris = giris - stop
+            if _R_giris / giris > MAX_BASE_RISK:      # açılışta risk %10'u aştıysa işlem yok
+                continue
+            tp1, tp2 = giris + 2.0 * _R_giris, giris + 4.0 * _R_giris
             _yeni_rs = float(r.get("rs", 50))
 
             # (12) ROTASYON — portföy doluysa
@@ -5141,7 +5161,28 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
             # dolayısıyla v8'in gerçek performansını gizliyordu. Kapı senaryoları
             # (trend şablonu varyantları) satırlardaki tt* kolonlarıyla SONRADAN
             # hesaplanır. Burada yalnız RS vetosu uygulanır.
-            v8 = v8 & (rs_ser.values >= 45)
+            # CANLI KAPI ile aynı: Minervini trend şablonu (SMA50/150/200 + 52H
+            # dip/zirve) + RS vetosu. Önce basitleştirilmiş haftalık maske vardı;
+            # retro ile canlı farklı kural test ediyordu.
+            try:
+                _c_d = d["close"].astype(float)
+                _s50 = _c_d.rolling(50).mean()
+                _s150 = _c_d.rolling(150).mean()
+                _s200 = _c_d.rolling(200).mean()
+                _hi52 = d["high"].astype(float).rolling(260, min_periods=60).max()
+                _lo52 = d["low"].astype(float).rolling(260, min_periods=60).min()
+                _tt_ok = (
+                    (_c_d > _s150) & (_c_d > _s200) & (_s150 > _s200)
+                    & (_s200 > _s200.shift(21))
+                    & (_s50 > _s150) & (_s150 > _s200) & (_c_d > _s50)
+                    & (((_c_d / _lo52 - 1) * 100) >= TT_DIP_MIN)
+                    & (((1 - _c_d / _hi52) * 100) <= TT_ZIRVE_TOLERANS)
+                ).fillna(False).values
+            except Exception:
+                # FAIL-CLOSED: trend şablonu hesaplanamadıysa sinyal ÜRETİLMEZ.
+                # (Önce fail-open'dı: hatalı veri "trend uygun" sayılıyordu.)
+                _tt_ok = np.zeros(len(d), dtype=bool)
+            v8 = v8 & _tt_ok & (rs_ser.values >= 45)
             sigs["v8 · GERÇEK VCP (çok dalgalı)"] = pd.Series(v8, index=d.index)
 
             # ---- v7: TABAN + PİVOT KIRILIMI (Minervini girişi) ----
@@ -5260,7 +5301,12 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
 
             for name, s in sigs.items():
                 pool.setdefault(name, set())
-                idx = [i for i in range(30, len(d) - fwd) if bool(s.iloc[i]) and bool(gate.iloc[i])]
+                # v8 CANLI kuraldır: kendi kapısını (trend şablonu + RS) zaten
+                # içerir. Eski basitleştirilmiş haftalık maskeyi ona uygulamak
+                # çifte filtre olur ve retro'yu canlıdan katı yapar.
+                _v8_mi = name.startswith("v8")
+                idx = [i for i in range(30, len(d) - fwd)
+                       if bool(s.iloc[i]) and (_v8_mi or bool(gate.iloc[i]))]
                 for i in idx:
                     p0, p1 = float(c.iloc[i]), float(c.iloc[i + fwd])
                     if not (p0 > 0 and p1 > 0):
