@@ -1068,7 +1068,7 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
         # V7.7: Kapı artık MINERVINI TREND ŞABLONU ile açılır (eski 130 puanlık
         # setup skoru pullback mantığından kalmaydı ve VCP kırılımını cezalandırıyordu).
         try:
-            tt = trend_template(wdf, low_52w, high_52w)
+            tt = trend_template(ddf, low_52w, high_52w)
         except Exception:
             tt = {"skor": 0, "maks": 7, "kriterler": [], "gecti": False,
                   "eksik": "hesaplanamadı"}
@@ -1164,7 +1164,10 @@ def build_mtf_summary(symbol: str, low_52w: float, high_52w: float,
             _px = float(ddf["close"].iloc[-1])
             _der = (mv_pivot - mv_dip) / mv_pivot if mv_pivot > 0 else float("nan")
             # Taban darlığı şartı: dip girişten %MAX_BASE_RISK'ten uzaksa geçersiz
-            _risk_ok = bool(np.isfinite(mv_dip) and _px > 0 and (_px - mv_dip * 0.99) / _px <= MAX_BASE_RISK)
+            # Risk PİVOTTAN ölçülür: giriş pivotta yapılacağı için taban darlığı
+            # da pivota göre değerlendirilmeli (güncel fiyat pivotun altında olabilir).
+            _risk_ok = bool(np.isfinite(mv_dip) and np.isfinite(mv_pivot) and mv_pivot > 0
+                            and (mv_pivot - mv_dip * 0.99) / mv_pivot <= MAX_BASE_RISK)
             mv_base = bool(_vc.get("var") and _risk_ok)
             if np.isfinite(mv_pivot) and mv_pivot > 0:
                 mv_dist = (mv_pivot / _px - 1.0) * 100.0
@@ -2090,7 +2093,7 @@ TT_ZIRVE_TOLERANS = 35.0   # retro: %25 katı, %35 orta senaryo kazandı (PF 2.2
 TT_DIP_MIN = 30.0
 
 
-def trend_template(wdf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[str, Any]:
+def trend_template(ddf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[str, Any]:
     """MINERVINI TREND ŞABLONU — 7 kriter. RS ayrı veto olduğu için dahil değil.
 
     Kapı şartı (retro-test kararı, 248 hisse / 5 yıl / 173 bağımsız işlem):
@@ -2102,10 +2105,14 @@ def trend_template(wdf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[s
     out = {"skor": 0, "maks": 7, "kriterler": [], "zorunlu_ok": False,
            "gecti": False, "eksik": ""}
     try:
-        son = wdf.iloc[-1]
+        # Minervini'nin şablonu GÜNLÜK 50/150/200 ortalamalarla tanımlıdır.
+        # Haftalık veriyle hesaplamak EMA50'yi 250 güne, EMA150'yi 750 güne
+        # çevirir ve kriterleri olması gerekenden 5 kat yavaşlatır.
+        son = ddf.iloc[-1]
         c = float(son["close"])
         e50, e150, e200 = float(son["ema50"]), float(son["ema150"]), float(son["ema200"])
-        e200_p = float(wdf["ema200"].iloc[-5]) if len(wdf) >= 5 else float("nan")
+        # EMA200 eğimi: ~1 ay (21 işlem günü) önceye göre
+        e200_p = float(ddf["ema200"].iloc[-21]) if len(ddf) >= 21 else float("nan")
         dip_u = ((c / low_52w - 1) * 100) if (np.isfinite(low_52w) and low_52w > 0) else float("nan")
         zir_u = ((1 - c / high_52w) * 100) if (np.isfinite(high_52w) and high_52w > 0) else float("nan")
 
@@ -5187,7 +5194,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                             if not (giris > stop > 0):
                                 continue
                             _R = giris - stop
-                            if _R / giris > 0.15:
+                            if _R / giris > MAX_BASE_RISK:   # canlıyla aynı: %10
                                 continue
                             tp1, tp2 = giris + 2.0 * _R, giris + 4.0 * _R
                         elif _kural.startswith("v7"):
@@ -5196,7 +5203,7 @@ def run_retro_test(tickers: tuple, fwd: int = RETRO_FWD_DAYS, nonce: int = 0) ->
                             if not (giris > stop > 0):
                                 continue
                             _R = giris - stop
-                            if _R / giris > 0.15:      # taban çok derinse atla
+                            if _R / giris > MAX_BASE_RISK:   # canlıyla aynı: %10
                                 continue
                             tp1, tp2 = giris + 2.0 * _R, giris + 4.0 * _R
                         else:
@@ -6595,6 +6602,9 @@ with tab_scan:
                             and np.isfinite(_m.get("mv_pivot_risk", np.nan))
                             and float(_m.get("mv_pivot_risk")) <= MAX_BASE_RISK*100
                             and not (np.isfinite(_ed) and _ed <= ENTRY_EARNINGS_BLOCK_DAYS)
+                            and np.isfinite(_m.get("rs_rating", np.nan))
+                            and float(_m.get("rs_rating")) >= 45
+                            and _m.get("gate") in ("ACIK", "BEKLEMEDE")
                         ) else "⚠️ uygun değil"),
                         "_ham_guc": (float(_m.get("rs_edge_w", np.nan))
                                      if np.isfinite(_m.get("rs_edge_w", np.nan)) else np.nan),
@@ -6658,7 +6668,8 @@ with tab_scan:
         if "Aksiyon" in _df.columns:
             _df["_s"] = _df["_s"] + _df["Aksiyon"].astype(str).map(
                 lambda x: 0 if "uygun" == x.replace("✅ ", "") else 0.5)
-        _df["_u"] = pd.to_numeric(_df["Pivota %"], errors="coerce").abs()
+        _u_kol = "Pivot farkı %" if "Pivot farkı %" in _df.columns else "Pivota %"
+        _df["_u"] = pd.to_numeric(_df.get(_u_kol), errors="coerce").abs()
         _df = _df.sort_values(["_s", "_u"]).drop(columns=["_s", "_u"])
         _kir = (_df["Durum"] == "🟢 PİVOT KIRILDI").sum()
         _tab = (_df["Durum"] == "🟡 TABAN KURULU").sum()
