@@ -690,6 +690,65 @@ def _fetch_daily_df(symbol: str, outputsize: int = 320) -> pd.DataFrame:
 # =========================================================
 # HAZIR TARAMA EVRENLERİ (V7.6)
 # =========================================================
+# =========================================================
+# SEKTÖR PAKETLERİ (V7.8) — parça parça tarama için
+# Kriter: likit, 3+ yıllık geçmişi olan, VCP kurulumu üretebilen isimler.
+# 404 veren semboller (PSTG, EXAS, OS, APLS, TERN, VERV) çıkarıldı.
+# =========================================================
+SEKTOR_PAKETLERI = {
+    "Yarı iletken & ekipman (34)": [
+        "NVDA","AVGO","AMD","MU","INTC","QCOM","TXN","ADI","AMAT","LRCX","KLAC","MRVL","CRDO","ARM",
+        "TSM","ASML","NXPI","MCHP","ON","SWKS","QRVO","TER","ENTG","MPWR","ALAB","NVMI","ONTO","ACLS",
+        "ACMR","AEIS","COHR","LITE","FN","CIEN",
+    ],
+    "Yazılım & bulut (30)": [
+        "MSFT","ORCL","CRM","ADBE","NOW","PANW","CRWD","ZS","S","OKTA","NET","DDOG","SNOW","MDB",
+        "ESTC","GTLB","TEAM","WDAY","HUBS","VEEV","PLTR","AI","PATH","FROG","DOCN","TWLO","ZM","DOCU",
+        "SNPS","CDNS",
+    ],
+    "İnternet & platform (26)": [
+        "GOOGL","AMZN","META","NFLX","SPOT","UBER","ABNB","DASH","BKNG","EXPE","SHOP","APP","TTD",
+        "ROKU","RBLX","U","DKNG","FLUT","PINS","SNAP","ETSY","CHWY","W","CVNA","LYFT","GRAB",
+    ],
+    "Finans & fintek (34)": [
+        "JPM","BAC","GS","MS","WFC","C","SCHW","BLK","AXP","V","MA","COF","CB","PGR","SPGI","ICE",
+        "CME","MCO","KKR","APO","ARES","BX","NDAQ","MSCI","FICO","PYPL","XYZ","AFRM","SOFI","HOOD",
+        "NU","TOST","SEZL","DAVE",
+    ],
+    "Sağlık & biyoteknoloji (30)": [
+        "LLY","UNH","JNJ","ABBV","MRK","PFE","TMO","ABT","DHR","AMGN","GILD","BIIB","ISRG","VRTX",
+        "REGN","BSX","MDT","SYK","ZTS","DXCM","PODD","ALNY","IONS","SRPT","CRSP","NTLA","BEAM",
+        "VKTX","HIMS","MRNA",
+    ],
+    "Enerji & emtia (27)": [
+        "XOM","CVX","COP","SLB","EOG","OXY","PSX","MPC","VLO","DVN","FANG","HAL","BKR","OKE",
+        "WMB","KMI","TRGP","LNG","EQT","CTRA","FCX","NEM","LIN","APD","NUE","STLD","CF",
+    ],
+    "Nükleer & enerji dönüşümü (24)": [
+        "VST","TLN","CEG","NRG","GEV","OKLO","SMR","LEU","CCJ","UEC","DNN","UUUU","NNE","BE","PLUG",
+        "FCEL","EOSE","ENPH","RUN","SHLS","ARRY","FSLR","NEE","DUK",
+    ],
+    "Sanayi & savunma (28)": [
+        "CAT","DE","RTX","LMT","GE","HON","UNP","UPS","FDX","BA","NOC","GD","LHX","ETN","PH","EMR",
+        "CSX","NSC","PWR","URI","LII","HUBB","VRT","AXON","KTOS","AVAV","BWXT","HWM",
+    ],
+    "Uzay & havacılık (14)": [
+        "RKLB","ASTS","LUNR","RDW","PL","ACHR","JOBY","EH","BLDE","ONDS","TDG","LDOS","PSN","CACI",
+    ],
+    "Kripto & madencilik (12)": [
+        "COIN","IREN","RIOT","MARA","CLSK","HUT","BITF","CIFR","WULF","APLD","CORZ","GLXY",
+    ],
+    "Tüketici & perakende (28)": [
+        "WMT","COST","HD","LOW","TGT","NKE","SBUX","MCD","CMG","LULU","TJX","ROST","DECK","ONON",
+        "BIRK","CAVA","WING","CELH","DUOL","ANF","PG","KO","PEP","MDLZ","CL","KMB","DIS","ULTA",
+    ],
+    "REIT & altyapı (24)": [
+        "PLD","AMT","EQIX","SPG","O","CCI","PSA","WELL","VTR","AVB","EQR","MAA","ESS","INVH","ARE",
+        "DLR","IRM","VICI","GLPI","VNO","BXP","FRT","REG","KIM",
+    ],
+}
+
+
 EVREN_MINERVINI = ",".join([
     # Momentum / lider adayları — sistemin asıl av sahası
     "NVDA","AVGO","AMD","MU","MRVL","CRDO","ALAB","NVMI","ONTO","ACLS","ACMR","ARM","TSM","ASML","AMAT",
@@ -697,7 +756,7 @@ EVREN_MINERVINI = ",".join([
     "WDC","LITE","FN","CIEN","COHR","AEIS","VRT","ETN","PWR","GEV","VST","TLN","CEG","NRG","OKLO","SMR",
     "LEU","CCJ","UEC","DNN","UUUU","NNE","BE","PLUG","FCEL","EOSE","ENPH","RUN","SHLS","ARRY","FSLR",
     "PLTR","CRWD","PANW","ZS","S","OKTA","NET","DDOG","SNOW","MDB","ESTC","GTLB","TEAM","NOW","CRM",
-    "APP","TTD","ROKU","SPOT","NFLX","RBLX","U","DKNG","FLUT","SHOP","SQ","PYPL","AFRM","SOFI","UPST",
+    "APP","TTD","ROKU","SPOT","NFLX","RBLX","U","DKNG","FLUT","SHOP","XYZ","PYPL","AFRM","SOFI","UPST",
     "HOOD","COIN","NU","TOST","LMND","CVNA","IREN","RIOT","MARA","CLSK","HUT","BITF","CIFR","WULF","APLD",
     "CORZ","IONQ","RGTI","QBTS","BBAI","SOUN","AI","PATH","TEM","RXRX","CRSP","NTLA","BEAM","SRPT","ALNY",
     "IONS","VKTX","EXAS","GH","NTRA","HIMS","OSCR","DOCS","ISRG","VRTX","REGN","BSX","AXON","KTOS","AVAV",
@@ -719,10 +778,10 @@ EVREN_GENIS = ",".join([
     "BAX","EW","HOLX","RMD","STE","WST","DGX","LH","CI","ELV","CNC","MOH","HCA","UHS","MCK","COR","CAH",
     "CAT","DE","RTX","LMT","GE","HON","UNP","UPS","FDX","BA","NOC","GD","LHX","TXT","CSX","NSC","ODFL",
     "WM","RSG","JCI","CARR","OTIS","IR","DOV","SWK","PNR","AME","FTV","XYL","GGG","NDSN","IEX",
-    "XOM","CVX","COP","SLB","EOG","OXY","PSX","MPC","VLO","HES","DVN","FANG","HAL","BKR","OKE","WMB",
+    "XOM","CVX","COP","SLB","EOG","OXY","PSX","MPC","VLO","DVN","FANG","HAL","BKR","OKE","WMB",
     "KMI","TRGP","LNG","EQT","AR","CTRA","MRO","APA","FCX","NEM","LIN","APD","SHW","ECL","NUE","STLD",
     "PG","KO","PEP","MDLZ","CL","KMB","GIS","K","HSY","SYY","KR","DG","DLTR","MCD","YUM","QSR","DPZ",
-    "DIS","CMCSA","VZ","T","TMUS","CHTR","EA","TTWO","WBD","PARA","FOXA","NWSA","OMC","IPG",
+    "DIS","CMCSA","VZ","T","TMUS","CHTR","EA","TTWO","WBD","PSKY","FOXA","NWSA","OMC","IPG",
     "NEE","DUK","SO","D","EXC","AEP","XEL","ED","WEC","ES","PEG","SRE","PCG","FE","ETR","AEE","CMS",
     "PLD","AMT","EQIX","SPG","O","CCI","PSA","WELL","VTR","AVB","EQR","MAA","ESS","UDR","INVH","ARE",
     "DLR","IRM","VICI","GLPI","HST","RHP","KIM","REG","FRT","BXP","VNO","SLG","HIW",
@@ -2150,7 +2209,19 @@ def trend_template(ddf: pd.DataFrame, low_52w: float, high_52w: float) -> Dict[s
         out["skor"] = sum(1 for _, g, _, _ in kriterler if g)
         out["zorunlu_ok"] = all(g for _, g, _, z in kriterler if z)
         out["gecti"] = all(g for _, g, _, _ in kriterler)
-        out["eksik"] = "; ".join(a for a, g, _, _ in kriterler if not g)
+        # Eksik kriterler OLUMSUZ halde yazılır ("Fiyat SMA50 üstünde" değil,
+        # "Fiyat SMA50 ALTINDA") — aksi halde ters okunuyordu.
+        _ters = {
+            "Fiyat SMA150 ve SMA200 üstünde": "Fiyat SMA150/SMA200 altında",
+            "SMA150 > SMA200": "SMA150, SMA200'ün altında",
+            "SMA200 en az 1 aydır yukarı": "SMA200 yükselmiyor",
+            "SMA50 > SMA150 > SMA200": "SMA sıralaması bozuk",
+            "Fiyat SMA50 üstünde": "Fiyat SMA50 altında",
+            f"52H dipten en az %{TT_DIP_MIN:.0f} yukarıda": f"52H dipten %{TT_DIP_MIN:.0f}'den az yukarıda",
+            f"52H zirveden en fazla %{TT_ZIRVE_TOLERANS:.0f} aşağıda":
+                f"52H zirveden %{TT_ZIRVE_TOLERANS:.0f}'ten fazla uzak",
+        }
+        out["eksik"] = "; ".join(_ters.get(a, a) for a, g, _, _ in kriterler if not g)
         out["dip_uzak"] = dip_u
         out["zirve_uzak"] = zir_u
     except Exception:
@@ -6269,9 +6340,11 @@ with tab_retro:
     _RT_EVRENLER = {
         "Minervini evreni (~256)": EVREN_MINERVINI,
         "Geniş piyasa (~250)": EVREN_GENIS,
+        "Tüm sektör paketleri (312)": ",".join(x for v in SEKTOR_PAKETLERI.values() for x in v),
         "Çekirdek vaka (30)": _def_list,
         "Elle gir": "",
     }
+    _RT_EVRENLER.update({f"📦 {k}": ",".join(v) for k, v in SEKTOR_PAKETLERI.items()})
     _liste_sec = st.radio("Denek evreni", list(_RT_EVRENLER.keys()),
                           horizontal=True, key="rt_evren")
     _val = _RT_EVRENLER[_liste_sec]
@@ -6536,15 +6609,23 @@ with tab_scan:
         "Sıralama: önce pivotu KIRANLAR, sonra pivota en yakın olanlar. "
         "Aday bulunca 📈 Tek Hisse sekmesinde detayına bak."
     )
-    _EVRENLER = {
-        "Minervini evreni (~256) — momentum/lider": EVREN_MINERVINI,
-        "Geniş piyasa (~250) — mega-cap/savunmacı": EVREN_GENIS,
-        "Çekirdek takip (17)": "AEIS,SNDK,BE,CLSK,BEP,INTC,NBIS,BG,AMZN,PLD,WDC,MRVL,CRDO,MU,AVGO,TSLA,IREN",
-        "Elle gir": "",
-    }
-    _sec = st.radio("Tarama evreni", list(_EVRENLER.keys()), key="scan_evren")
-    scan_syms = st.text_area("Taranacak hisseler (virgülle)", value=_EVRENLER[_sec],
-                             height=110, key=f"scan_syms_{_sec}")
+    _tip = st.radio("Liste kaynağı", ["📦 Sektör paketi", "🌐 Geniş evren", "✍️ Elle gir"],
+                    horizontal=True, key="scan_tip")
+    if _tip.startswith("📦"):
+        _pk = st.selectbox("Paket seç", list(SEKTOR_PAKETLERI.keys()), key="scan_paket")
+        _val = ",".join(SEKTOR_PAKETLERI[_pk])
+        st.caption("Paketleri tek tek çalıştır, her turdan sonra tabloyu incele. "
+                   "Sonuçlar birikir — hangi paketi ne zaman tarayacağını sen seçersin.")
+    elif _tip.startswith("🌐"):
+        _ge = st.selectbox("Evren", ["Minervini evreni (~256)", "Geniş piyasa (~250)",
+                                     "Tüm paketler (312)"], key="scan_genis")
+        _val = (EVREN_MINERVINI if _ge.startswith("Minervini")
+                else EVREN_GENIS if _ge.startswith("Geniş")
+                else ",".join(x for v in SEKTOR_PAKETLERI.values() for x in v))
+    else:
+        _val = ""
+    scan_syms = st.text_area("Taranacak hisseler (virgülle)", value=_val,
+                             height=110, key=f"scan_syms_{_tip}_{_val[:20]}")
     scan_earn = st.checkbox(
         "Bilanço kontrolü (giriş frenini çalıştırır — API çağrısını 2 katına çıkarır)",
         value=True, key="scan_earn")
@@ -6592,10 +6673,18 @@ with tab_scan:
                 try:
                     _ddf_tmp = _fetch_daily_df(_sym, 1000)   # cache'i mtf ile paylaşır
                 except Exception as _e1:
-                    # 404: geçici sunucu sorunu olabilir → bir kez daha dene
+                    # 404 geçici sunucu sorunu olabilir → artan beklemeyle 2 kez daha dene
                     if "404" in str(_e1):
-                        time.sleep(2.0)
-                        _ddf_tmp = _fetch_daily_df(_sym, 1000)
+                        _ddf_tmp = None
+                        for _bek in (2.0, 5.0):
+                            time.sleep(_bek)
+                            try:
+                                _ddf_tmp = _fetch_daily_df(_sym, 1000)
+                                break
+                            except Exception:
+                                continue
+                        if _ddf_tmp is None:
+                            raise
                     else:
                         raise
                 _lo52, _hi52 = compute_52w_levels(_ddf_tmp, 260)
@@ -6633,9 +6722,10 @@ with tab_scan:
                         "Son daralma %": (round(float(_m.get("mv_son_daralma", np.nan)), 1)
                                           if np.isfinite(_m.get("mv_son_daralma", np.nan)) else ""),
                         "Trend": f"{_m.get('trend_tpl_skor', 0)}/7",
-                        "RS": round(float(_m.get("rs_rating", np.nan)), 0)
+                        "RS": round(float(_m.get("rs_rating", np.nan)), 1)
                               if np.isfinite(_m.get("rs_rating", np.nan)) else "",
-                        "Bilanço": (f"{int(_ed)} gün" if np.isfinite(_ed) else ""),
+                        "Bilanço": (f"{int(_ed)} gün" if np.isfinite(_ed)
+                                    else ("kontrol edilmedi" if not scan_earn else "veri yok")),
                         "Neden": " · ".join([x for x in [
                             (_m.get("trend_tpl_eksik", "") if not _m.get("trend_tpl_gecti") else ""),
                             _m.get("mv_kir_gecersiz", ""),
@@ -6649,7 +6739,7 @@ with tab_scan:
                             # kurulum geçerli değildir (kırılım 10 günü aşmış olabilir).
                             (f"fiyat pivotun %{_uzak:.1f} üstünde — giriş noktası geçilmiş"
                              if (np.isfinite(_uzak) and _uzak > 5) else ""),
-                            (f"RS {float(_m.get('rs_rating')):.0f} < 45"
+                            (f"RS {float(_m.get('rs_rating')):.1f} < 45 (kalite eşiği)"
                              if (np.isfinite(_m.get("rs_rating", np.nan))
                                  and float(_m.get("rs_rating")) < 45) else ""),
                         ] if x]),
@@ -6660,10 +6750,20 @@ with tab_scan:
                         "_ham_guc": (float(_m.get("rs_edge_w", np.nan))
                                      if np.isfinite(_m.get("rs_edge_w", np.nan)) else np.nan),
                     }
-                    # Aksiyon, Neden'den türer: tek kaynak, çelişki imkânsız.
-                    _row["Aksiyon"] = ("⚠️ uygun değil" if _row.get("Neden")
-                                       else ("✅ uygun" if _row.get("Kapı") in ("ACIK", "BEKLEMEDE")
-                                             else "⚠️ uygun değil"))
+                    # AKSİYON — dört kategori, tek kaynak:
+                    #   ✅ AL           : kapı AÇIK, engel yok
+                    #   👀 ALARM KUR    : geçerli VCP tabanı var, pivot bekleniyor
+                    #   ⚪ KURULUM YOK  : trend uygun ama taban oluşmamış
+                    #   ⚠️ UYGUN DEĞİL  : engel var (Neden dolu) veya trend bozuk
+                    _kurulum_var = bool(_m.get("mv_base") or _m.get("mv_break"))
+                    if _row.get("Neden") or _row.get("Kapı") == "RET":
+                        _row["Aksiyon"] = "⚠️ UYGUN DEĞİL"
+                    elif _row.get("Kapı") == "ACIK":
+                        _row["Aksiyon"] = "✅ AL"
+                    elif _kurulum_var:
+                        _row["Aksiyon"] = "👀 ALARM KUR"
+                    else:
+                        _row["Aksiyon"] = "⚪ KURULUM YOK"
                     rows = [r for r in rows if r["Ticker"] != _sym] + [_row]
                     _ardisik_kota = 0
             except Exception as e:
@@ -6705,7 +6805,8 @@ with tab_scan:
         _df = pd.DataFrame(_rows)
         # EVREN İÇİ RS SIRASI (1-99) — taranan hisseler arasında yüzdelik
         if "_ham_guc" in _df.columns:
-            _hg = {r["Ticker"]: r.get("_ham_guc") for r in _rows}
+            _hg = {r["Ticker"]: r.get("_ham_guc") for r in _rows
+                   if not str(r.get("Durum", "")).startswith("⛔")}
             _sira = rs_sirali_puan(_hg)
             if _sira:
                 _df["RS sırası"] = _df["Ticker"].map(_sira)
@@ -6721,8 +6822,8 @@ with tab_scan:
             lambda x: 0 if "KIRILDI" in x else 1 if "TABAN KURULU" in x
             else 2 if "OLUŞUYOR" in x else 3 if "KURULUM YOK" in x else 9)
         if "Aksiyon" in _df.columns:
-            _df["_s"] = _df["_s"] + _df["Aksiyon"].astype(str).map(
-                lambda x: 0 if "uygun" == x.replace("✅ ", "") else 0.5)
+            _oncelik = {"✅ AL": 0, "👀 ALARM KUR": 1, "⚪ KURULUM YOK": 2, "⚠️ UYGUN DEĞİL": 3}
+            _df["_s"] = _df["Aksiyon"].astype(str).map(_oncelik).fillna(9)
         _u_kol = "Pivot farkı %" if "Pivot farkı %" in _df.columns else "Pivota %"
         _df["_u"] = pd.to_numeric(_df.get(_u_kol), errors="coerce").abs()
         _df = _df.sort_values(["_s", "_u"]).drop(columns=["_s", "_u"])
